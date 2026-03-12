@@ -144,8 +144,10 @@ async def api_dispatch_task(task_id: str):
 async def api_cancel_task(task_id: str):
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
-    ok = orchestrator.cancel_task(task_id)
-    return {"cancelled": ok}
+    result = orchestrator.cancel_task(task_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
 
 
 @app.post("/api/tasks/{task_id}/clean")
@@ -1008,7 +1010,7 @@ async function refresh() {
         ${t.status==='pending'&&!isBlocked?`<button class="btn btn-sm" onclick="dispatch('${t.id}')">Run</button>`:''}
         ${publishBtn}
         ${!['completed','cancelled'].includes(t.status)?`<button class="btn btn-sm" onclick="cancel('${t.id}')">Cancel</button>`:''}
-        ${['completed','failed','review_failed'].includes(t.status)&&t.branch_name?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
+        ${['completed','failed','review_failed','cancelled'].includes(t.status)&&t.branch_name?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
       </td>
     </tr>`;
   }).join('');
@@ -1063,7 +1065,7 @@ async function showDetail(id) {
       <button class="btn" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push to remote' : '&#8593; Publish branch to remote'}</button>
     </div>`;
   }
-  if (['completed','failed','review_failed'].includes(t.status) && t.branch_name) {
+  if (['completed','failed','review_failed','cancelled'].includes(t.status) && t.branch_name) {
     html += `<div style="margin:8px 0">
       <button class="btn" style="color:var(--red);border-color:var(--red)" onclick="cleanTask('${t.id}')">&#128465; Clean up worktree &amp; branch</button>
       <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Frees disk/git resources. Cannot be undone.</span>
@@ -1348,7 +1350,11 @@ function switchAddTab(el, tabId) {
 
 async function dispatchAll() { await api('/api/dispatch-all', {method:'POST'}); refresh(); }
 async function dispatch(id) { await api(`/api/tasks/${id}/dispatch`, {method:'POST'}); refresh(); }
-async function cancel(id) { await api(`/api/tasks/${id}/cancel`, {method:'POST'}); refresh(); }
+async function cancel(id) {
+  const res = await api(`/api/tasks/${id}/cancel`, {method:'POST'});
+  if (res && res.error) { await uiAlert(res.error, 'Cancel failed'); return; }
+  refresh();
+}
 
 async function cleanTask(id) {
   const confirmed = await uiConfirm(

@@ -302,6 +302,10 @@ class Orchestrator:
 
     # ── Task Management ──────────────────────────────────────────────
 
+    def _get_child_tasks(self, parent_id: str) -> list:
+        """Return all tasks whose parent_id matches *parent_id*."""
+        return [t for t in self.db.get_all_tasks() if t.parent_id == parent_id]
+
     def clean_task(self, task_id: str) -> dict:
         """Remove the worktree and branch of a completed/failed task to free resources.
 
@@ -319,47 +323,71 @@ class Orchestrator:
             return {"error": "Task has no branch to clean"}
         removed_branch = task.branch_name
         try:
-            self.worktree_mgr.remove_worktree(task.branch_name)
+            self.worktree_mgr.remove_worktree(task.branch_name, worktree_path=task.worktree_path)
             log.info("Cleaned worktree for task [%s]: %s", task_id, task.branch_name)
         except Exception as e:
-            log.warning("clean_task: remove_worktree failed for [%s]: %s", task_id, e)
+            log.error("clean_task: remove_worktree failed for [%s]: %s", task_id, e)
+            return {"error": f"Failed to remove worktree: {e}"}
         task.worktree_path = ""
         task.branch_name = ""
         task.updated_at = time.time()
         self.db.save_task(task)
+        # Cascade clean to child tasks
+        child_errors = []
+        for child in self._get_child_tasks(task_id):
+            if child.branch_name:
+                child_result = self.clean_task(child.id)
+                if "error" in child_result:
+                    child_errors.append(f"[{child.id[:8]}]: {child_result['error']}")
+        if child_errors:
+            return {"cleaned": True, "branch": removed_branch,
+                    "warnings": f"Parent cleaned but some children failed: {'; '.join(child_errors)}"}
         return {"cleaned": True, "branch": removed_branch}
 
-    def cancel_task(self, task_id: str) -> bool:
+    def cancel_task(self, task_id: str) -> dict:
         task = self.db.get_task(task_id)
         if not task:
-            return False
-        if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
-            return False
-        task.status = TaskStatus.CANCELLED
-        task.updated_at = time.time()
-        self.db.save_task(task)
-        # Kill any running opencode process for this task immediately
-        self.client.kill_task(task_id)
-        # Clean up worktree if exists
-        if task.branch_name:
-            try:
-                self.worktree_mgr.remove_worktree(task.branch_name)
-            except Exception as e:
-                log.warning("Failed to remove worktree for %s: %s", task_id, e)
-        # Clean dependency tracking maps
-        self.dep_tracker.cleanup(task_id)
-        # Revert any TODO item linked to this task back to analyzed
-        todos = self.db.get_all_todo_items()
-        for item in todos:
-            if item.task_id == task_id and item.status == TodoItemStatus.DISPATCHED:
-                item.status = TodoItemStatus.ANALYZED
-                item.task_id = ""
-                item.updated_at = time.time()
-                self.db.save_todo_item(item)
-                log.info("Auto-reverted todo [%s] after cancelling task [%s]", item.id, task_id)
-        log.info("Cancelled task: [%s]", task_id)
-        self._update_parent_status(task_id)
-        return True
+            return {"error": "Task not found"}
+        already_terminal = task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED)
+        if not already_terminal:
+            task.status = TaskStatus.CANCELLED
+            task.updated_at = time.time()
+            self.db.save_task(task)
+            # Kill any running opencode process for this task immediately
+            self.client.kill_task(task_id)
+            # Clean up worktree if exists
+            if task.branch_name:
+                try:
+                    self.worktree_mgr.remove_worktree(task.branch_name, worktree_path=task.worktree_path)
+                    log.info("Removed worktree for cancelled task [%s]: %s", task_id, task.branch_name)
+                    task.worktree_path = ""
+                    task.branch_name = ""
+                    task.updated_at = time.time()
+                    self.db.save_task(task)
+                except Exception as e:
+                    log.warning("Failed to remove worktree for %s: %s — user can clean manually", task_id, e)
+            # Clean dependency tracking maps
+            self.dep_tracker.cleanup(task_id)
+            # Revert any TODO item linked to this task back to analyzed
+            todos = self.db.get_all_todo_items()
+            for item in todos:
+                if item.task_id == task_id and item.status == TodoItemStatus.DISPATCHED:
+                    item.status = TodoItemStatus.ANALYZED
+                    item.task_id = ""
+                    item.updated_at = time.time()
+                    self.db.save_todo_item(item)
+                    log.info("Auto-reverted todo [%s] after cancelling task [%s]", item.id, task_id)
+            log.info("Cancelled task: [%s]", task_id)
+            self._update_parent_status(task_id)
+        # Always cascade cancel to non-terminal child tasks (even if this
+        # task is already completed/cancelled — descendants may still be running)
+        for child in self._get_child_tasks(task_id):
+            if child.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+                child_result = self.cancel_task(child.id)
+                if "error" in child_result:
+                    log.warning("Failed to cascade cancel to child [%s]: %s",
+                                child.id, child_result["error"])
+        return {"cancelled": True}
 
     def revise_task(self, task_id: str, feedback: str) -> dict:
         """Re-open a completed/failed task with manual review feedback.
@@ -997,6 +1025,17 @@ class Orchestrator:
                 log.info("Task [%s] planner session: %s (complexity=%s)",
                          task.id, plan_run.session_id, complexity)
 
+            if is_split and task.source == TaskSource.PLANNER:
+                # Sub-tasks created by the planner must not be split further —
+                # force single-task execution to avoid unbounded recursion.
+                log.info(
+                    "Task [%s] is a planner sub-task; ignoring split=true from planner "
+                    "(would create recursive split). Treating as single task.",
+                    task.id,
+                )
+                is_split = False
+                plan_text = sub_tasks[0].get("description", plan_text) if sub_tasks else plan_text
+
             if is_split:
                 # Planner decided to decompose — create sub-tasks and mark parent done
                 log.info("Task [%s] split into %d sub-tasks", task.id, len(sub_tasks))
@@ -1069,6 +1108,9 @@ class Orchestrator:
             # Tracks the coder's opencode session so retries continue in the
             # same session (full context retention via --session <id>).
             coder_session_id = ""
+            # Accumulates rejection feedback from all previous rounds so each
+            # reviewer in the next round can see what was already raised.
+            all_prior_rejections: list[str] = []
 
             for attempt in range(task.max_retries + 1):
                 # Re-read task to detect external cancellation before each attempt
@@ -1121,7 +1163,8 @@ class Orchestrator:
                 all_passed = True
                 for reviewer in self.reviewers:
                     review_run, passed, review_text = reviewer.review_changes(
-                        task, worktree_path
+                        task, worktree_path,
+                        prior_rejections="\n\n".join(all_prior_rejections),
                     )
                     self.db.save_agent_run(review_run)
                     reviewer_results.append({
@@ -1153,6 +1196,9 @@ class Orchestrator:
                 else:
                     # Feed only the rejection feedback because only it is meaningful for fixing
                     task.review_output = "\n\n".join(rejection_outputs)
+                    # Append this round's rejections to the cumulative history
+                    # so the next round's reviewers can see all prior complaints.
+                    all_prior_rejections.extend(rejection_outputs)
 
                 task.reviewer_results = reviewer_results
                 task.review_pass = all_passed

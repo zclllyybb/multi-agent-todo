@@ -20,6 +20,7 @@ class ReviewerAgent(BaseAgent):
     def review_changes(
         self, task: Task, worktree_path: str,
         revision_context: str = "",
+        prior_rejections: str = "",
     ) -> Tuple[AgentRun, bool, str]:
         """Review the committed changes in the worktree.
 
@@ -30,12 +31,17 @@ class ReviewerAgent(BaseAgent):
         If *revision_context* is provided (manual user feedback for a revise),
         it is included in the prompt so the reviewer can verify it was addressed.
 
+        If *prior_rejections* is provided (concatenated REQUEST_CHANGES feedback
+        from all previous retry rounds), it is included so the reviewer knows
+        what issues were already raised and can verify whether they were fixed.
+
         Returns (agent_run, passed: bool, review_text).
         """
         prompt = reviewer_review(
             title=task.title,
             description=task.description,
             revision_context=revision_context,
+            prior_rejections=prior_rejections,
         )
         run = self.run(prompt, worktree_path, task_id=task.id)
         review_text = self.get_text(run)

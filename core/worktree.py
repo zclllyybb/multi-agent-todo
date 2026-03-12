@@ -133,19 +133,66 @@ class WorktreeManager:
                 shutil.copy2(src, dst)
             log.info("Copied %s -> %s", src, dst)
 
-    def remove_worktree(self, branch_name: str):
-        """Remove a worktree and its branch."""
-        worktree_path = os.path.join(self.worktree_dir, branch_name)
-        if os.path.exists(worktree_path):
-            result = self._run_git("worktree", "remove", "--force", worktree_path)
+    def _find_worktree_path(self, branch_name: str) -> Optional[str]:
+        """Look up the actual worktree directory for *branch_name* via git."""
+        for wt in self.list_worktrees():
+            # wt["branch"] looks like "refs/heads/agent/task-..."
+            wt_branch = wt.get("branch", "")
+            if wt_branch == f"refs/heads/{branch_name}" or wt_branch == branch_name:
+                return wt.get("path")
+        return None
+
+    def remove_worktree(self, branch_name: str, worktree_path: str = ""):
+        """Remove a worktree and its branch.
+
+        *worktree_path* should be the actual worktree directory (from task DB).
+        If empty, falls back to computing from worktree_dir, and also queries
+        ``git worktree list`` to find the real path — so a stale config cannot
+        cause a silent miss.
+
+        Raises RuntimeError if the worktree directory or branch still exists
+        after all cleanup attempts.
+        """
+        # Build candidate paths: caller-provided, config-derived, git-queried
+        candidates: list[str] = []
+        if worktree_path:
+            candidates.append(worktree_path)
+        config_path = os.path.join(self.worktree_dir, branch_name)
+        if config_path not in candidates:
+            candidates.append(config_path)
+        git_path = self._find_worktree_path(branch_name)
+        if git_path and git_path not in candidates:
+            candidates.append(git_path)
+
+        # Try to remove every candidate that exists on disk
+        for path in candidates:
+            if not os.path.exists(path):
+                continue
+            log.info("Removing worktree directory: %s", path)
+            result = self._run_git("worktree", "remove", "--force", path)
             if result.returncode != 0:
-                # Force remove directory if git fails
-                log.warning("Force removing worktree directory: %s", worktree_path)
-                shutil.rmtree(worktree_path, ignore_errors=True)
+                log.warning("git worktree remove failed, trying shutil.rmtree: %s", path)
+                shutil.rmtree(path)  # let OSError propagate on failure
                 self._run_git("worktree", "prune")
 
+        # Verify all candidate directories are actually gone
+        for path in candidates:
+            if os.path.exists(path):
+                raise RuntimeError(
+                    f"Worktree directory still exists after cleanup: {path}"
+                )
+
+        # Prune any stale worktree entries that git still tracks
+        self._run_git("worktree", "prune")
+
         # Delete the branch
-        self._run_git("branch", "-D", branch_name)
+        result = self._run_git("branch", "-D", branch_name)
+        # Verify branch is gone (ignore if it was already absent)
+        check = self._run_git("rev-parse", "--verify", f"refs/heads/{branch_name}")
+        if check.returncode == 0:
+            raise RuntimeError(
+                f"Branch still exists after deletion attempt: {branch_name}"
+            )
         log.info("Removed worktree and branch: %s", branch_name)
 
     def list_worktrees(self) -> List[dict]:

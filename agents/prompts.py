@@ -214,12 +214,22 @@ Then provide specific feedback. Review comments should concisely point out the i
 """
 
 
-def reviewer_review(title: str, description: str, revision_context: str = "") -> str:
+def reviewer_review(
+    title: str,
+    description: str,
+    revision_context: str = "",
+    prior_rejections: str = "",
+) -> str:
     """Prompt for reviewing code changes produced by the coder agent.
 
     The reviewer runs as a full opencode agent inside the worktree where the
     coder has already committed its work.  It is free to use git log, git diff,
     read files, etc. to form its judgement.
+
+    *prior_rejections*: concatenated rejection feedback from previous review
+    rounds (after the coder already attempted to address them).  Included so
+    the reviewer can verify those issues were resolved, but must not blindly
+    trust them.
     """
     revision_block = ""
     if revision_context:
@@ -227,6 +237,17 @@ def reviewer_review(title: str, description: str, revision_context: str = "") ->
             f"## Revision Context"
             f"The user provided the following manual feedback to the coder. "
             f"Verify that the coder has addressed it:\n{revision_context}"
+        )
+    prior_block = ""
+    if prior_rejections:
+        prior_block = (
+            f"## Previous Review Rejections (for reference only)\n"
+            f"The following issues were raised by reviewers in earlier round(s). "
+            f"The coder has since made further changes, so these complaints may "
+            f"already be resolved — or may have been incorrect in the first place. "
+            f"Use them as hints to guide your inspection, but reach your own "
+            f"independent conclusion.\n\n"
+            f"{prior_rejections}\n"
         )
     return f"""You are a code review agent.
 
@@ -236,6 +257,7 @@ Description: {description}
 
 {revision_block}
 
+{prior_block}
 {REVIEW_REQUIREMENTS}
 """
 

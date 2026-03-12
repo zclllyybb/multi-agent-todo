@@ -1,8 +1,12 @@
-"""Tests for agents/reviewer.py: _evaluate_review pure logic."""
+"""Tests for agents/reviewer.py: _evaluate_review pure logic and prompts."""
+
+from unittest.mock import MagicMock
 
 import pytest
 
+from agents.prompts import reviewer_review
 from agents.reviewer import ReviewerAgent
+from core.models import AgentRun, Task
 
 
 @pytest.fixture
@@ -54,3 +58,84 @@ class TestEvaluateReview:
 
     def test_request_changes_case_insensitive(self, evaluator):
         assert evaluator._evaluate_review("request_changes") is False
+
+
+class TestReviewerReviewPrompt:
+    """Tests for the reviewer_review() prompt builder."""
+
+    def test_no_prior_rejections(self):
+        prompt = reviewer_review(title="T", description="D")
+        assert "Previous Review Rejections" not in prompt
+        assert "T" in prompt
+        assert "D" in prompt
+
+    def test_prior_rejections_included(self):
+        prompt = reviewer_review(
+            title="T", description="D",
+            prior_rejections="=== Reviewer: m1 | REQUEST_CHANGES ===\nFix the null check.",
+        )
+        assert "Previous Review Rejections (for reference only)" in prompt
+        assert "Fix the null check." in prompt
+        assert "may already be resolved" in prompt
+        assert "reach your own" in prompt
+
+    def test_revision_context_included(self):
+        prompt = reviewer_review(title="T", description="D", revision_context="Also fix X")
+        assert "Revision Context" in prompt
+        assert "Also fix X" in prompt
+
+    def test_both_blocks_present(self):
+        prompt = reviewer_review(
+            title="T", description="D",
+            revision_context="Fix X",
+            prior_rejections="Old rejection",
+        )
+        assert "Revision Context" in prompt
+        assert "Previous Review Rejections" in prompt
+
+    def test_empty_prior_rejections_omitted(self):
+        prompt = reviewer_review(title="T", description="D", prior_rejections="")
+        assert "Previous Review Rejections" not in prompt
+
+
+def _make_reviewer(review_text: str) -> ReviewerAgent:
+    """Create a ReviewerAgent whose run() returns a fixed text response."""
+    mock_client = MagicMock()
+    mock_run = AgentRun(agent_type="reviewer", model="test-model", output=review_text)
+    mock_client.run.return_value = mock_run
+    mock_client.extract_text_response.return_value = review_text
+    return ReviewerAgent(model="test-model", client=mock_client)
+
+
+class TestReviewChangesInterface:
+    """Tests for ReviewerAgent.review_changes with prior_rejections."""
+
+    def _make_task(self) -> Task:
+        return Task(title="Add feature", description="desc")
+
+    def test_approve_no_prior(self):
+        reviewer = _make_reviewer("APPROVE\nLooks good.")
+        run, passed, text = reviewer.review_changes(self._make_task(), "/repo")
+        assert passed is True
+
+    def test_request_changes_no_prior(self):
+        reviewer = _make_reviewer("REQUEST_CHANGES\nMissing null check.")
+        run, passed, text = reviewer.review_changes(self._make_task(), "/repo")
+        assert passed is False
+
+    def test_prior_rejections_forwarded_to_prompt(self):
+        """Verify prior_rejections ends up in the prompt sent to the client."""
+        reviewer = _make_reviewer("APPROVE\nFixed.")
+        task = self._make_task()
+        prior = "=== Reviewer: m1 | REQUEST_CHANGES ===\nFix the null check."
+        reviewer.review_changes(task, "/repo", prior_rejections=prior)
+        prompt_sent = reviewer.client.run.call_args.kwargs["message"]
+        assert "Fix the null check." in prompt_sent
+        assert "Previous Review Rejections" in prompt_sent
+
+    def test_no_prior_rejections_not_in_prompt(self):
+        reviewer = _make_reviewer("APPROVE\nOK.")
+        task = self._make_task()
+        reviewer.review_changes(task, "/repo", prior_rejections="")
+        prompt_sent = reviewer.client.run.call_args.kwargs["message"]
+        assert "Previous Review Rejections" not in prompt_sent
