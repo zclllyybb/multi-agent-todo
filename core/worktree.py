@@ -77,6 +77,95 @@ class WorktreeManager:
 
         return worktree_path
 
+    def _reset_hard(self, worktree_path: str) -> None:
+        """Unconditionally hard-reset the worktree to HEAD, discarding any
+        staged or unstaged changes left by a failed cherry-pick or merge."""
+        self._run_git("reset", "--hard", "HEAD", cwd=worktree_path)
+
+    def merge_dependency_branches(
+        self, worktree_path: str, dep_branches: List[str],
+    ) -> List[str]:
+        """Cherry-pick commits from dependency branches into the worktree.
+
+        For each dependency branch, cherry-picks all commits that are on
+        that branch but not on base_branch.  This brings the dependency's
+        code into the current worktree so the coder can build on top of it.
+
+        Args:
+            worktree_path: path to the worktree to merge into.
+            dep_branches: branch names of completed dependency tasks.
+
+        Returns:
+            List of short commit summaries for injection into the coder prompt.
+
+        Raises:
+            RuntimeError: if cherry-picking fails due to merge conflicts.
+                The worktree is hard-reset to HEAD before raising so the
+                caller receives a clean state.  The caller (orchestrator)
+                is expected to fail the task so a human can resolve the
+                conflict manually.
+        """
+        summaries: List[str] = []
+        for branch in dep_branches:
+            # Find commits on `branch` that are NOT reachable from base_branch
+            log_result = self._run_git(
+                "log", "--oneline", "--reverse",
+                f"origin/{self.base_branch}..{branch}",
+                cwd=worktree_path,
+            )
+            if log_result.returncode != 0:
+                log.warning(
+                    "Could not list commits for dep branch %s: %s",
+                    branch, log_result.stderr.strip(),
+                )
+                continue
+            commits = log_result.stdout.strip()
+            if not commits:
+                log.info("Dep branch %s has no extra commits, skipping", branch)
+                continue
+
+            hashes = [line.split()[0] for line in commits.splitlines() if line.strip()]
+            if not hashes:
+                continue
+
+            # Cherry-pick all commits from this branch (staged but not yet
+            # committed, so we can bundle them into a single merge commit).
+            cp_result = self._run_git(
+                "cherry-pick", "--no-commit", *hashes,
+                cwd=worktree_path,
+            )
+            if cp_result.returncode != 0:
+                # `cherry-pick --no-commit` does NOT enter interactive
+                # cherry-pick state on failure — it just leaves conflict
+                # markers in the working tree and exits non-zero.
+                # `git cherry-pick --abort` would be a no-op here; the
+                # correct cleanup is a hard reset.
+                log.error(
+                    "Cherry-pick from dep branch %s has conflicts — "
+                    "resetting worktree and failing the task.\n%s",
+                    branch, cp_result.stderr.strip(),
+                )
+                self._reset_hard(worktree_path)
+                raise RuntimeError(
+                    f"Dependency branch '{branch}' conflicts with the current "
+                    f"worktree and cannot be automatically merged. "
+                    f"Resolve the conflict manually, then restart the task.\n"
+                    f"Git output: {cp_result.stderr.strip()}"
+                )
+
+            # Commit the cherry-picked changes as a single merge commit
+            self._run_git(
+                "commit", "-m", f"Merge dependency branch {branch}",
+                "--allow-empty",
+                cwd=worktree_path,
+            )
+            summaries.append(f"[{branch}]\n{commits}")
+            log.info(
+                "Merged %d commit(s) from dep branch %s into %s",
+                len(hashes), branch, worktree_path,
+            )
+        return summaries
+
     def run_hooks(self, hooks: List[str], worktree_path: str):
         """Run each hook script inside *worktree_path*.
 

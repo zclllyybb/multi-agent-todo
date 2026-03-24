@@ -103,7 +103,7 @@ Step 1 — Assess complexity. Choose ONE label:
 Step 2 — Decide splitting. Split into sub-tasks ONLY if:
   - The task clearly contains multiple separable concerns in different modules/files AND
   - Parallelising (where possible) would save meaningful time.
-  Prefer NOT splitting. Touching 2-3 related files should NOT be split. Max 6 sub-tasks.
+  Prefer NOT splitting. The tasks of making minor modifications to several files should not be split up; what should be split are large tasks, with each subtask being sufficiently complete and substantial.
 
 Step 3 — For each sub-task, determine ordering dependencies:
   - Sub-tasks that can run in parallel have an empty depends_on list.
@@ -111,7 +111,12 @@ Step 3 — For each sub-task, determine ordering dependencies:
   - Only add a dependency when there is a real reason (e.g. B modifies an interface that A defines).
   - Prefer parallelism: only add dependencies that are strictly required.
 
-Step 4 — Produce the output. Output ONLY valid JSON (no markdown fences).
+Step 4 - Clarify the complete purpose and description of each subtask.
+  - The description of each subtask must fully and measurably specify the output it needs to present.
+  - Sub-tasks are not isolated; it is necessary to explain their role in the entire task.
+  - The description should be suitable for an agent to understand what needs to be done and why.
+
+Step 5 — Produce the output. Output ONLY valid JSON (no markdown fences).
 
 If single task:
 {{"complexity": "medium", "split": false, "reason": "...", "plan": "Overall objective: ...\\n1. ...\\n2. ..."}}
@@ -145,7 +150,8 @@ Output ONLY valid JSON, no other text. Example:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def coder_implement(title: str, description: str, file_path: str,
-                    line_number: int, plan_output: str) -> str:
+                    line_number: int, plan_output: str,
+                    dep_context: str = "") -> str:
     """Prompt for implementing a task in the worktree."""
     parts = [
         "You are a coding agent. Implement the following task completely. You must first read the AGENTS.md within the project to understand the relevant specifications and strictly enforce them.",
@@ -159,6 +165,11 @@ def coder_implement(title: str, description: str, file_path: str,
         "The set of modifications for this task needs to form a correct git commit, so that it can directly be used as a qualified Pull Request. The commit should not include irrelevant changes such as environment setup.",
         "",
     ]
+    if dep_context:
+        parts += [
+            "",
+            dep_context,
+        ]
     if file_path:
         parts += [
             "",
@@ -219,6 +230,7 @@ def reviewer_review(
     description: str,
     revision_context: str = "",
     prior_rejections: str = "",
+    coder_response: str = "",
 ) -> str:
     """Prompt for reviewing code changes produced by the coder agent.
 
@@ -230,6 +242,11 @@ def reviewer_review(
     rounds (after the coder already attempted to address them).  Included so
     the reviewer can verify those issues were resolved, but must not blindly
     trust them.
+
+    *coder_response*: the coder's textual response from the latest coding
+    round, which may contain reasoning about design decisions or arguments
+    about why certain reviewer suggestions are not applicable.  The reviewer
+    should consider these arguments on their merits.
     """
     revision_block = ""
     if revision_context:
@@ -249,6 +266,16 @@ def reviewer_review(
             f"independent conclusion.\n\n"
             f"{prior_rejections}\n"
         )
+    coder_block = ""
+    if coder_response:
+        coder_block = (
+            f"## Coder's Response (from latest round)\n"
+            f"The coding agent provided the following explanation alongside its "
+            f"changes. Consider these arguments on their merits — the coder may "
+            f"have valid reasons for certain design choices, or may be mistaken. "
+            f"Evaluate the actual code, not just the coder's claims.\n\n"
+            f"{coder_response}\n"
+        )
     return f"""You are a code review agent.
 
 ## Task that was implemented
@@ -257,6 +284,7 @@ Description: {description}
 
 {revision_block}
 
+{coder_block}
 {prior_block}
 {REVIEW_REQUIREMENTS}
 """

@@ -48,7 +48,8 @@ class CoderAgent(BaseAgent):
         return None
 
     def implement_task(
-        self, task: Task, worktree_path: str, session_id: str = ""
+        self, task: Task, worktree_path: str, session_id: str = "",
+        dep_context: str = "",
     ) -> Tuple[AgentRun, str]:
         """Use opencode to implement the task in the given worktree.
 
@@ -57,7 +58,7 @@ class CoderAgent(BaseAgent):
         Returns (agent_run, output_text).
         """
         rel_path = self._resolve_file_path(task.file_path, worktree_path)
-        prompt = self._build_prompt(task, rel_path)
+        prompt = self._build_prompt(task, rel_path, dep_context=dep_context)
 
         run = self.run(prompt, worktree_path, task_id=task.id,
                        session_id=session_id)
@@ -82,11 +83,13 @@ class CoderAgent(BaseAgent):
         output_text = self.get_text(run)
         return run, output_text
 
-    def _build_prompt(self, task: Task, rel_file_path: Optional[str] = None) -> str:
+    def _build_prompt(self, task: Task, rel_file_path: Optional[str] = None,
+                      dep_context: str = "") -> str:
         return coder_implement(
             title=task.title,
             description=task.description,
             file_path=rel_file_path or task.file_path,
             line_number=task.line_number,
-            plan_output=task.plan_output
+            plan_output=task.plan_output,
+            dep_context=dep_context,
         )

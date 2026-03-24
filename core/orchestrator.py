@@ -70,6 +70,7 @@ class Orchestrator:
 
         # Dependency tracking between sub-tasks (pure in-memory, rebuilt on split)
         self.dep_tracker = DependencyTracker()
+        self._rebuild_dep_tracker()
 
         # Recovery: reset any TodoItems stuck in ANALYZING from a previous crash.
         # (from_dict already converts ANALYZING → PENDING_ANALYSIS on load, but items
@@ -90,6 +91,47 @@ class Orchestrator:
             log.warning(
                 "Recovered %d TODO item(s) stuck in ANALYZING state (server restart)",
                 recovered,
+            )
+
+    def _rebuild_dep_tracker(self):
+        """Reconstruct in-memory dependency graph from persisted tasks.
+
+        On daemon restart the DependencyTracker is empty.  Walk all tasks
+        that have a ``parent_id``, group them by parent, and re-register
+        them so that ``_update_parent_status`` / ``on_completed`` work
+        correctly for existing task trees.
+
+        After registration, replay ``on_completed`` for children that are
+        already in a terminal state so their dependents get unblocked.
+        """
+        all_tasks = self.db.get_all_tasks()
+        # Group children by parent_id
+        parent_children: Dict[str, List[Task]] = {}
+        for t in all_tasks:
+            if t.parent_id:
+                parent_children.setdefault(t.parent_id, []).append(t)
+        registered = 0
+        for parent_id, children in parent_children.items():
+            self.dep_tracker.register(parent_id, children)
+            registered += len(children)
+
+        # Replay completions for tasks already in terminal states so that
+        # their dependents' pending-dep sets are updated correctly.
+        # Collect newly unblocked pending tasks for auto-dispatch on start().
+        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        self._pending_dispatch: List[str] = []
+        for t in all_tasks:
+            if t.parent_id and t.status in terminal:
+                for uid in self.dep_tracker.on_completed(t.id):
+                    unblocked_task = self.db.get_task(uid)
+                    if unblocked_task and unblocked_task.status == TaskStatus.PENDING:
+                        self._pending_dispatch.append(uid)
+
+        if registered:
+            log.info(
+                "Rebuilt dep_tracker from DB: %d child task(s) across %d parent(s), "
+                "%d task(s) ready to dispatch",
+                registered, len(parent_children), len(self._pending_dispatch),
             )
 
     # ── Branch Name Generation ──────────────────────────────────────
@@ -317,7 +359,8 @@ class Orchestrator:
         if not task:
             return {"error": "Task not found"}
         if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED,
-                                TaskStatus.REVIEW_FAILED, TaskStatus.CANCELLED):
+                                TaskStatus.REVIEW_FAILED, TaskStatus.CANCELLED,
+                                TaskStatus.NEEDS_ARBITRATION):
             return {"error": f"Cannot clean task in '{task.status.value}' state — it may still be running"}
         if not task.branch_name:
             return {"error": "Task has no branch to clean"}
@@ -399,7 +442,8 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.REVIEW_FAILED):
+        if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                                TaskStatus.REVIEW_FAILED, TaskStatus.NEEDS_ARBITRATION):
             return {"error": f"Cannot revise task in {task.status.value} state"}
         if not task.worktree_path:
             return {"error": "Task has no worktree (was it split into sub-tasks?)"}
@@ -435,6 +479,51 @@ class Orchestrator:
                  task_id, task.task_mode, len(feedback))
         log.debug("Task [%s] revised with feedback: %s", task_id, feedback)
         return {"ok": True, "task_id": task_id}
+
+    def resolve_arbitration(self, task_id: str, action: str,
+                            feedback: str = "") -> dict:
+        """Resolve a NEEDS_ARBITRATION task via human decision.
+
+        *action* must be one of:
+          - ``"approve"``: accept the coder's current work as-is (force-approve).
+          - ``"revise"``:  provide *feedback* and restart the coder→reviewer loop.
+          - ``"reject"``:  permanently fail the task.
+
+        Returns a status dict.
+        """
+        task = self.db.get_task(task_id)
+        if not task:
+            return {"error": "Task not found"}
+        if task.status != TaskStatus.NEEDS_ARBITRATION:
+            return {"error": f"Task is not awaiting arbitration (status={task.status.value})"}
+
+        if action == "approve":
+            task.status = TaskStatus.COMPLETED
+            task.review_pass = True
+            task.completed_at = time.time()
+            task.error = ""
+            task.updated_at = time.time()
+            self.db.save_task(task)
+            log.info("Arbitration resolved: force-approved [%s]", task_id)
+            self._update_parent_status(task_id)
+            return {"ok": True, "action": "approve", "task_id": task_id}
+
+        elif action == "revise":
+            if not feedback:
+                return {"error": "feedback is required for 'revise' action"}
+            return self.revise_task(task_id, feedback)
+
+        elif action == "reject":
+            task.status = TaskStatus.FAILED
+            task.error = feedback or "Rejected by human arbitration"
+            task.updated_at = time.time()
+            self.db.save_task(task)
+            log.info("Arbitration resolved: rejected [%s]", task_id)
+            self._update_parent_status(task_id)
+            return {"ok": True, "action": "reject", "task_id": task_id}
+
+        else:
+            return {"error": f"Unknown action '{action}'; must be approve/revise/reject"}
 
     def _dispatch_revise(self, task_id: str) -> bool:
         """Submit a revise-task for execution (skips planning, reuses worktree)."""
@@ -517,6 +606,7 @@ class Orchestrator:
                     review_run, passed, review_text = reviewer.review_changes(
                         task, worktree_path,
                         revision_context=user_feedback,
+                        coder_response=code_text,
                     )
                     self.db.save_agent_run(review_run)
                     reviewer_results.append({
@@ -566,12 +656,17 @@ class Orchestrator:
                         task.updated_at = time.time()
                         self.db.save_task(task)
                     else:
-                        task.status = TaskStatus.FAILED
-                        task.error = f"Revise: review failed after {task.max_retries + 1} attempts"
+                        task.status = TaskStatus.NEEDS_ARBITRATION
+                        task.error = (
+                            f"Revise: review failed after {task.max_retries + 1} "
+                            f"attempts — needs human arbitration"
+                        )
                         task.updated_at = time.time()
                         self.db.save_task(task)
-                        log.warning("Revise failed review: [%s]", task.id)
-                        self._update_parent_status(task.id)
+                        log.warning(
+                            "Revise [%s] needs arbitration: review failed %d times",
+                            task.id, task.max_retries + 1,
+                        )
 
         except Exception as e:
             log.error("Revise failed [%s]: %s\n%s", task_id, e, traceback.format_exc())
@@ -964,6 +1059,7 @@ class Orchestrator:
                 title=task.title,
                 description=task.description,
                 repo_path=repo_path,
+                task_id=task.id,
             )
         except ModelOutputError as first_err:
             log.warning(
@@ -975,6 +1071,7 @@ class Orchestrator:
                     title=task.title,
                     description=task.description,
                     repo_path=repo_path,
+                    task_id=task.id,
                 )
             except ModelOutputError as second_err:
                 raise ModelOutputError(
@@ -1099,6 +1196,31 @@ class Orchestrator:
             if task.copy_files:
                 self.worktree_mgr.copy_files_into(worktree_path, task.copy_files)
 
+            # ── Phase 2b: Merge dependency branches ──
+            dep_context = ""
+            if task.depends_on:
+                dep_branches = []
+                for dep_id in task.depends_on:
+                    dep_task = self.db.get_task(dep_id)
+                    if dep_task and dep_task.branch_name:
+                        dep_branches.append(dep_task.branch_name)
+                if dep_branches:
+                    merge_summaries = self.worktree_mgr.merge_dependency_branches(
+                        worktree_path, dep_branches,
+                    )
+                    if merge_summaries:
+                        dep_context = (
+                            "## Dependency Commits (already merged into your worktree)\n"
+                            "The following commits from prerequisite tasks have been "
+                            "cherry-picked into your working tree. Your code should "
+                            "build on top of these changes.\n\n"
+                            + "\n\n".join(merge_summaries)
+                        )
+                        log.info(
+                            "Task [%s] merged %d dep branch(es): %s",
+                            task.id, len(dep_branches), dep_branches,
+                        )
+
             # Select coder model based on complexity assessed by planner
             coder = self._coder_by_complexity.get(task.complexity, self._default_coder)
             log.info("Task [%s] using coder model=%s (complexity=%s)",
@@ -1127,7 +1249,8 @@ class Orchestrator:
                 if attempt == 0 or not coder_session_id:
                     # First attempt or no session: send the full prompt
                     code_run, code_text = coder.implement_task(
-                        task, worktree_path, session_id=coder_session_id
+                        task, worktree_path, session_id=coder_session_id,
+                        dep_context=dep_context,
                     )
                 else:
                     # Retry in continued session: send only review feedback
@@ -1147,11 +1270,29 @@ class Orchestrator:
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
+                # Validate coder output: the last step must end with
+                # finish_reason='stop'.  A missing stop means the model
+                # output was truncated or the process died mid-step.
+                if not self.client.is_output_complete(code_run.output):
+                    raise RuntimeError(
+                        f"Coder output is incomplete — the last step has no "
+                        f"'stop' finish reason (session={code_run.session_id}, "
+                        f"attempt={attempt + 1}).  The model may have been "
+                        f"truncated or crashed mid-step."
+                    )
+
                 # Re-check cancellation before starting review
                 task = self.db.get_task(task_id)
                 if task.status == TaskStatus.CANCELLED:
                     log.info("Task [%s] was cancelled before review, aborting", task_id)
                     return
+
+                # Extract only the coder's final summary (last text block
+                # before stop) — not the entire session transcript.
+                coder_last_response = (
+                    self.client.extract_last_text_block(code_run.output)
+                    if attempt > 0 else ""
+                )
 
                 # ── Multi-Reviewer: short-circuit on first REQUEST_CHANGES ──
                 task.status = TaskStatus.REVIEWING
@@ -1165,6 +1306,7 @@ class Orchestrator:
                     review_run, passed, review_text = reviewer.review_changes(
                         task, worktree_path,
                         prior_rejections="\n\n".join(all_prior_rejections),
+                        coder_response=coder_last_response,
                     )
                     self.db.save_agent_run(review_run)
                     reviewer_results.append({
@@ -1223,12 +1365,17 @@ class Orchestrator:
                         task.updated_at = time.time()
                         self.db.save_task(task)
                     else:
-                        task.status = TaskStatus.FAILED
-                        task.error = f"Review failed after {task.max_retries + 1} attempts"
+                        task.status = TaskStatus.NEEDS_ARBITRATION
+                        task.error = (
+                            f"Review failed after {task.max_retries + 1} attempts — "
+                            f"needs human arbitration"
+                        )
                         task.updated_at = time.time()
                         self.db.save_task(task)
-                        log.warning("Task failed review: [%s]", task.id)
-                        self._update_parent_status(task.id)
+                        log.warning(
+                            "Task [%s] needs arbitration: review failed %d times",
+                            task.id, task.max_retries + 1,
+                        )
 
         except Exception as e:
             log.error("Task execution failed [%s]: %s\n%s", task_id, e, traceback.format_exc())
@@ -1315,6 +1462,16 @@ class Orchestrator:
         self._loop_thread = threading.Thread(target=self._main_loop, daemon=True)
         self._loop_thread.start()
         log.info("Orchestrator started")
+
+        # Auto-dispatch tasks that were unblocked during dep_tracker rebuild
+        if self._pending_dispatch:
+            log.info(
+                "Auto-dispatching %d task(s) unblocked during rebuild",
+                len(self._pending_dispatch),
+            )
+            for tid in self._pending_dispatch:
+                self.dispatch_task(tid)
+            self._pending_dispatch.clear()
 
     def stop(self):
         """Stop the orchestrator and kill any running opencode processes."""

@@ -349,6 +349,42 @@ class OpenCodeClient:
             },
         }
 
+    def is_output_complete(self, output: str) -> bool:
+        """Check whether the model output ended with a proper ``stop``.
+
+        Returns False if the last step has no ``step_finish`` event with
+        ``reason='stop'``, which indicates the output was truncated or the
+        model failed to produce a complete response.
+        """
+        parsed = self.parse_readable_output(output)
+        steps = parsed.get("steps", [])
+        if not steps:
+            return False
+        last_step = steps[-1]
+        return last_step.get("finish_reason") == "stop"
+
+    def extract_last_text_block(self, output: str) -> str:
+        """Extract only the text from the final step that ends with ``stop``.
+
+        Used to build the ``coder_response`` for reviewers — we only want
+        the coder's concluding summary, not the entire session transcript.
+        Returns empty string if the last stop-step has no text events.
+        """
+        parsed = self.parse_readable_output(output)
+        steps = parsed.get("steps", [])
+        # Walk backwards to find the last step with finish_reason='stop'
+        for step in reversed(steps):
+            if step.get("finish_reason") != "stop":
+                continue
+            texts = [
+                ev["content"]
+                for ev in step.get("events", [])
+                if ev.get("type") == "text" and ev.get("content")
+            ]
+            if texts:
+                return "".join(texts)
+        return ""
+
     def format_readable_text(self, output: str) -> str:
         """Convert opencode JSON output into a plain-text readable log."""
         parsed = self.parse_readable_output(output)

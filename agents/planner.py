@@ -158,7 +158,8 @@ class PlannerAgent(BaseAgent):
         return run, feasibility, difficulty, note
 
     def analyze_and_split(
-        self, title: str, description: str, repo_path: str
+        self, title: str, description: str, repo_path: str,
+        task_id: str = "",
     ) -> Tuple[AgentRun, bool, str, List[dict], str]:
         """Unified entry-point: assess complexity, decide atomicity, produce plan or sub-tasks.
         Returns (agent_run, is_split, plan_text, sub_tasks_list, complexity).
@@ -171,7 +172,7 @@ class PlannerAgent(BaseAgent):
             description=description,
             repo_path=repo_path,
         )
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, task_id=task_id)
         text = self.get_text(run)
 
         match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -213,7 +214,7 @@ class PlannerAgent(BaseAgent):
             repo_path=repo_path,
         )
 
-        run = self.run(prompt, repo_path, task_id=task.id)
+        run = self.run(prompt, repo_path, task_id=task.id)  # already correct
         plan_text = self.get_text(run)
         return run, plan_text
 

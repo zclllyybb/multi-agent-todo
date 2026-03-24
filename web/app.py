@@ -80,7 +80,6 @@ async def api_task_detail(task_id: str):
         # Don't send raw output to frontend (too large) — except manual_review
         if r.agent_type != "manual_review":
             rd.pop("output", None)
-        rd.pop("prompt", None)
         parsed_runs.append(rd)
     # Fetch live git status for the worktree (empty dict if no worktree yet)
     git_status = {}
@@ -182,6 +181,22 @@ async def api_revise_task(task_id: str, request: Request):
     if not feedback:
         return JSONResponse({"error": "feedback required"}, status_code=400)
     result = orchestrator.revise_task(task_id, feedback)
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@app.post("/api/tasks/{task_id}/arbitrate")
+async def api_arbitrate_task(task_id: str, request: Request):
+    """Resolve a NEEDS_ARBITRATION task: approve, revise, or reject."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    action = body.get("action", "").strip()
+    feedback = body.get("feedback", "").strip()
+    if not action:
+        return JSONResponse({"error": "action required (approve/revise/reject)"}, status_code=400)
+    result = orchestrator.resolve_arbitration(task_id, action, feedback)
     if "error" in result:
         return JSONResponse(result, status_code=400)
     return result
@@ -423,6 +438,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge-reviewing { background: #2a1f0d; color: var(--yellow); }
   .badge-completed { background: #0d2d1a; color: var(--green); }
   .badge-failed, .badge-review_failed { background: #2d0d0d; color: var(--red); }
+  .badge-needs_arbitration { background: #2d1f0d; color: #f0a040; border: 1px solid #f0a040; }
   .badge-cancelled { background: #30363d; color: var(--text-dim); }
   .badge-high { color: var(--red); } .badge-medium { color: var(--yellow); }
   .badge-low { color: var(--text-dim); }
@@ -475,6 +491,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .run-header .run-title { font-weight: 600; font-size: 13px; }
   .run-header .run-meta { font-size: 11px; color: var(--text-dim); }
   .run-body { display: none; padding: 12px 14px; max-height: 60vh; overflow-y: auto; }
+  .prompt-section { margin-bottom: 10px; }
+  .prompt-label { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; cursor: pointer;
+    user-select: none; display: flex; gap: 6px; align-items: center; }
+  .prompt-label:hover { color: var(--text); }
+  .prompt-label .prompt-arrow { font-size: 10px; }
+  .prompt-body { margin-top: 0; }
+  .prompt-body.collapsed { display: none; }
+  .prompt-pre { font-size: 12px; font-family: monospace; color: var(--text);
+    padding: 4px 8px; background: rgba(255,255,255,0.02);
+    border-radius: 4px; margin: 2px 0; white-space: pre-wrap; word-break: break-word;
+    max-height: 300px; overflow-y: auto; }
   .run-body.open { display: block; }
   .run-summary { display: flex; gap: 16px; font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
 
@@ -758,10 +785,14 @@ function copyText(text) {
 function renderSessionBox(sessionId, label) {
   if (!sessionId) return '';
   const cmd = `opencode --session ${sessionId}`;
+  // Session IDs are alphanumeric+underscore — safe to embed directly in JS
+  // string literals.  Using esc() here would HTML-encode the value and break
+  // the onclick handler.
+  const safeCmd = cmd.replace(/'/g, "\\'");
   return `<div class="session-box">
     <div class="session-label">${esc(label)}</div>
     <code>${esc(sessionId)}</code>
-    <span class="copy-btn" onclick="copyText('${esc(cmd)}')" title="Copy command">[copy]</span>
+    <span class="copy-btn" onclick="copyText('${safeCmd}')" title="Copy command">[copy]</span>
     <div class="cmd">${esc(cmd)}</div>
   </div>`;
 }
@@ -789,6 +820,27 @@ function countSessions(sessionIds) {
     if (Array.isArray(ids)) n += ids.length;
   }
   return n;
+}
+
+// Render prompt/input section for a run — default open, same style as output
+function renderPromptSection(prompt, idx) {
+  if (!prompt) return '';
+  const bodyId = `prompt-body-${idx}`;
+  return `<div class="prompt-section">
+    <div class="prompt-label" onclick="togglePromptBody('${bodyId}', this)">
+      <span class="prompt-arrow">&#9660;</span>
+      <span>Input prompt</span>
+    </div>
+    <div class="prompt-body" id="${bodyId}">
+      <div class="step-event"><div class="ev-text prompt-pre">${esc(prompt)}</div></div>
+    </div>
+  </div>`;
+}
+
+function togglePromptBody(id, labelEl) {
+  const body = document.getElementById(id);
+  const collapsed = body.classList.toggle('collapsed');
+  labelEl.querySelector('.prompt-arrow').innerHTML = collapsed ? '&#9654;' : '&#9660;';
 }
 
 // Render structured step events from a parsed run
@@ -939,6 +991,7 @@ async function refresh() {
     <div class="stat-card"><div class="num" style="color:var(--text-dim)">${sc.pending||0}</div><div class="label">Pending</div></div>
     <div class="stat-card"><div class="num" style="color:var(--accent)">${(sc.planning||0)+(sc.coding||0)+(sc.reviewing||0)}</div><div class="label">Active</div></div>
     <div class="stat-card"><div class="num" style="color:var(--green)">${sc.completed||0}</div><div class="label">Completed</div></div>
+    <div class="stat-card"><div class="num" style="color:#f0a040">${sc.needs_arbitration||0}</div><div class="label">Arbitration</div></div>
     <div class="stat-card"><div class="num" style="color:var(--red)">${(sc.failed||0)+(sc.review_failed||0)}</div><div class="label">Failed</div></div>
   `;
 
@@ -1010,7 +1063,7 @@ async function refresh() {
         ${t.status==='pending'&&!isBlocked?`<button class="btn btn-sm" onclick="dispatch('${t.id}')">Run</button>`:''}
         ${publishBtn}
         ${!['completed','cancelled'].includes(t.status)?`<button class="btn btn-sm" onclick="cancel('${t.id}')">Cancel</button>`:''}
-        ${['completed','failed','review_failed','cancelled'].includes(t.status)&&t.branch_name?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
+        ${['completed','failed','review_failed','cancelled','needs_arbitration'].includes(t.status)&&t.branch_name?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
       </td>
     </tr>`;
   }).join('');
@@ -1065,7 +1118,7 @@ async function showDetail(id) {
       <button class="btn" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push to remote' : '&#8593; Publish branch to remote'}</button>
     </div>`;
   }
-  if (['completed','failed','review_failed','cancelled'].includes(t.status) && t.branch_name) {
+  if (['completed','failed','review_failed','cancelled','needs_arbitration'].includes(t.status) && t.branch_name) {
     html += `<div style="margin:8px 0">
       <button class="btn" style="color:var(--red);border-color:var(--red)" onclick="cleanTask('${t.id}')">&#128465; Clean up worktree &amp; branch</button>
       <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Frees disk/git resources. Cannot be undone.</span>
@@ -1079,6 +1132,20 @@ async function showDetail(id) {
   }
   if (t.error) {
     html += `<div class="detail-section"><h3 style="color:var(--red)">Error</h3><pre style="color:var(--red)">${esc(t.error)}</pre></div>`;
+  }
+  // Arbitration section for needs_arbitration tasks
+  if (t.status === 'needs_arbitration' && t.worktree_path) {
+    html += `<div class="detail-section" style="margin-top:16px;border:1px solid #f0a040;border-radius:8px;padding:12px">
+      <h3 style="margin-top:0;color:#f0a040">&#9888; Human Arbitration Required</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">The coder and reviewer could not reach agreement after all retry attempts. Review the code and reviewer feedback above, then choose an action:</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn" style="color:var(--green);border-color:var(--green)" onclick="arbitrate('${t.id}','approve')">&#10003; Force Approve</button>
+        <button class="btn" style="color:var(--red);border-color:var(--red)" onclick="arbitrate('${t.id}','reject')">&#10007; Reject (fail task)</button>
+      </div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Or provide feedback and revise (restarts the code\u2192review loop):</p>
+      <textarea id="arbitrate-feedback-${t.id}" placeholder="Enter arbitration feedback for the coder..." style="width:100%;height:80px;font-size:13px;margin-bottom:8px"></textarea>
+      <button class="btn btn-primary" onclick="arbitrate('${t.id}','revise')">Revise with Feedback</button>
+    </div>`;
   }
   // Revise section for completed/failed tasks with a worktree
   if (['completed','failed','review_failed'].includes(t.status) && t.worktree_path) {
@@ -1139,6 +1206,7 @@ async function showDetail(id) {
         </div>
         <div class="run-body" id="run-body-${i}">
           ${sid ? renderSessionBox(sid, r.agent_type + ' session') : ''}
+          ${renderPromptSection(r.prompt, i)}
           ${r.agent_type === 'manual_review'
             ? `<pre style="font-size:12px;white-space:pre-wrap;word-break:break-word;color:var(--text)">${esc(r.output||'(no content)')}</pre>`
             : renderParsedRun(r.parsed)}
@@ -1400,6 +1468,26 @@ async function reviseTask(id) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Revise'; }
   }
+}
+
+async function arbitrate(id, action) {
+  let feedback = '';
+  if (action === 'revise') {
+    const textarea = document.getElementById('arbitrate-feedback-' + id);
+    feedback = textarea ? textarea.value.trim() : '';
+    if (!feedback) { await uiAlert('Please enter feedback for the coder.'); return; }
+  }
+  if (action === 'approve') {
+    const ok = await uiConfirm('Force-approve the coder\\'s current work, overriding reviewer objections?', 'Force Approve');
+    if (!ok) return;
+  }
+  if (action === 'reject') {
+    const ok = await uiConfirm('Permanently fail this task?', 'Reject Task');
+    if (!ok) return;
+  }
+  const res = await api(`/api/tasks/${id}/arbitrate`, {method:'POST', body: JSON.stringify({action, feedback})});
+  if (res && res.error) { await uiAlert('Arbitration failed: ' + res.error); return; }
+  closeModals(); refresh();
 }
 
 // ── Main tab switching ──

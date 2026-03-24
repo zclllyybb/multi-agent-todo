@@ -21,6 +21,7 @@ class TaskStatus(str, enum.Enum):
     CODING = "coding"
     REVIEWING = "reviewing"
     REVIEW_FAILED = "review_failed"
+    NEEDS_ARBITRATION = "needs_arbitration"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
