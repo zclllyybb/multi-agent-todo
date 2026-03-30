@@ -284,6 +284,29 @@ class WorktreeManager:
             )
         log.info("Removed worktree and branch: %s", branch_name)
 
+    def remove_worktree_path_only(self, worktree_path: str):
+        """Remove only a worktree directory when branch is already unknown/absent."""
+        if not worktree_path:
+            raise RuntimeError("worktree_path is required")
+
+        target = os.path.abspath(worktree_path)
+        if os.path.exists(target):
+            log.info("Removing worktree directory (path-only): %s", target)
+            result = self._run_git("worktree", "remove", "--force", target)
+            if result.returncode != 0:
+                log.warning(
+                    "git worktree remove failed in path-only cleanup, trying shutil.rmtree: %s",
+                    target,
+                )
+                shutil.rmtree(target)
+
+        if os.path.exists(target):
+            raise RuntimeError(
+                f"Worktree directory still exists after path-only cleanup: {target}"
+            )
+
+        self._run_git("worktree", "prune")
+
     def list_worktrees(self) -> List[dict]:
         """List all worktrees."""
         result = self._run_git("worktree", "list", "--porcelain")

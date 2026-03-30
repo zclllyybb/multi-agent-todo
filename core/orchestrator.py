@@ -78,6 +78,11 @@ class Orchestrator:
         self.dep_tracker = DependencyTracker()
         self._rebuild_dep_tracker()
 
+        # Cache for UI resource snapshot (git branches/worktrees) to keep
+        # dashboard auto-refresh lightweight.
+        self._resource_snapshot_cache = (set(), {})
+        self._resource_snapshot_cached_at = 0.0
+
         # Recovery: reset any TodoItems stuck in ANALYZING from a previous crash.
         # (from_dict already converts ANALYZING → PENDING_ANALYSIS on load, but items
         #  in the DB still have status=analyzing until we overwrite them.)
@@ -139,6 +144,90 @@ class Orchestrator:
                 "%d task(s) ready to dispatch",
                 registered, len(parent_children), len(self._pending_dispatch),
             )
+
+    def _collect_resource_snapshot(self) -> tuple[set[str], dict[str, list[str]]]:
+        """Collect current git resource existence snapshot.
+
+        Returns:
+            - local_branches: set of local branch names
+            - branch_worktrees: branch -> list of worktree paths from `git worktree list`
+        """
+        now = time.time()
+        if now - self._resource_snapshot_cached_at < 1.0:
+            return self._resource_snapshot_cache
+
+        local_branches: set[str] = set()
+        branch_worktrees: dict[str, list[str]] = {}
+
+        branch_result = self.worktree_mgr._run_git(
+            "for-each-ref", "--format=%(refname:short)", "refs/heads"
+        )
+        if branch_result.returncode == 0:
+            local_branches = {
+                line.strip() for line in branch_result.stdout.splitlines() if line.strip()
+            }
+
+        for wt in self.worktree_mgr.list_worktrees():
+            raw_branch = wt.get("branch", "")
+            if raw_branch.startswith("refs/heads/"):
+                raw_branch = raw_branch[len("refs/heads/"):]
+            raw_path = wt.get("path", "")
+            if raw_branch and raw_path:
+                branch_worktrees.setdefault(raw_branch, []).append(os.path.abspath(raw_path))
+
+        self._resource_snapshot_cache = (local_branches, branch_worktrees)
+        self._resource_snapshot_cached_at = now
+        return self._resource_snapshot_cache
+
+    @staticmethod
+    def _task_resource_state(
+        task: Task,
+        local_branches: set[str],
+        branch_worktrees: dict[str, list[str]],
+    ) -> dict:
+        """Compute actual git-resource existence used by UI clean visibility."""
+        cleanable_statuses = {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.REVIEW_FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.NEEDS_ARBITRATION,
+        }
+
+        actual_branch_exists = bool(task.branch_name and task.branch_name in local_branches)
+        recorded_worktree_exists = bool(task.worktree_path and os.path.isdir(task.worktree_path))
+        branch_worktree_exists = False
+        if task.branch_name:
+            for path in branch_worktrees.get(task.branch_name, []):
+                if os.path.isdir(path):
+                    branch_worktree_exists = True
+                    break
+
+        actual_worktree_exists = recorded_worktree_exists or branch_worktree_exists
+        clean_available = (
+            task.status in cleanable_statuses
+            and (actual_branch_exists or actual_worktree_exists)
+        )
+
+        return {
+            "actual_branch_exists": actual_branch_exists,
+            "actual_worktree_exists": actual_worktree_exists,
+            "clean_available": clean_available,
+        }
+
+    def serialize_tasks_for_ui(self, tasks: List[Task]) -> List[dict]:
+        """Serialize tasks with runtime resource-state fields for dashboard UI."""
+        local_branches, branch_worktrees = self._collect_resource_snapshot()
+        result = []
+        for task in tasks:
+            td = task.to_dict()
+            td.update(self._task_resource_state(task, local_branches, branch_worktrees))
+            result.append(td)
+        return result
+
+    def serialize_task_for_ui(self, task: Task) -> dict:
+        """Serialize a single task with runtime resource-state fields for dashboard UI."""
+        return self.serialize_tasks_for_ui([task])[0]
 
     # ── Branch Name Generation ──────────────────────────────────────
 
@@ -368,12 +457,16 @@ class Orchestrator:
                                 TaskStatus.REVIEW_FAILED, TaskStatus.CANCELLED,
                                 TaskStatus.NEEDS_ARBITRATION):
             return {"error": f"Cannot clean task in '{task.status.value}' state — it may still be running"}
-        if not task.branch_name:
-            return {"error": "Task has no branch to clean"}
+        if not task.branch_name and not task.worktree_path:
+            return {"error": "Task has no branch/worktree to clean"}
         removed_branch = task.branch_name
         try:
-            self.worktree_mgr.remove_worktree(task.branch_name, worktree_path=task.worktree_path)
-            log.info("Cleaned worktree for task [%s]: %s", task_id, task.branch_name)
+            if task.branch_name:
+                self.worktree_mgr.remove_worktree(task.branch_name, worktree_path=task.worktree_path)
+                log.info("Cleaned worktree for task [%s]: %s", task_id, task.branch_name)
+            else:
+                self.worktree_mgr.remove_worktree_path_only(task.worktree_path)
+                log.info("Cleaned worktree(path-only) for task [%s]: %s", task_id, task.worktree_path)
         except Exception as e:
             log.error("clean_task: remove_worktree failed for [%s]: %s", task_id, e)
             return {"error": f"Failed to remove worktree: {e}"}
@@ -854,6 +947,7 @@ class Orchestrator:
         try:
             self.worktree_mgr.remove_worktree(task.branch_name)
             log.info("Removed review worktree for task [%s]: %s", task.id, task.branch_name)
+            task.branch_name = ""
         except Exception as e:
             log.warning("Could not remove review worktree [%s]: %s", task.id, e)
         task.worktree_path = ""

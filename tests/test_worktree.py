@@ -203,6 +203,56 @@ class TestRemoveWorktreeFailures:
                 wm.remove_worktree("agent/task-gone")
 
 
+class TestRemoveWorktreeManualDeletion:
+    """Idempotency when resources were manually removed before clean."""
+
+    def test_succeeds_when_branch_and_worktree_already_removed(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        wt_dir = tmp_path / "wt"
+        wt_dir.mkdir()
+        wm = _make_wm(str(repo_dir), str(wt_dir))
+
+        with patch.object(wm, "list_worktrees", return_value=[]), \
+             patch.object(wm, "_run_git") as mock_git:
+            def _side(cmd, *args, cwd=None):
+                r = _git_ok()
+                if cmd == "rev-parse":
+                    r.returncode = 1
+                return r
+            mock_git.side_effect = _side
+
+            wm.remove_worktree("agent/task-missing")
+
+        assert call("branch", "-D", "agent/task-missing") in mock_git.call_args_list
+
+    def test_succeeds_when_branch_removed_but_worktree_still_exists(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        wt_dir = tmp_path / "wt"
+        wt_dir.mkdir()
+        actual = wt_dir / "agent" / "task-manual"
+        actual.mkdir(parents=True)
+
+        wm = _make_wm(str(repo_dir), str(wt_dir))
+
+        with patch.object(wm, "_run_git") as mock_git:
+            def _side(cmd, *args, cwd=None):
+                r = _git_ok()
+                if cmd == "worktree" and args and args[0] == "remove":
+                    path = args[-1]
+                    if os.path.exists(path):
+                        shutil.rmtree(path)
+                elif cmd == "rev-parse":
+                    r.returncode = 1
+                return r
+            mock_git.side_effect = _side
+
+            wm.remove_worktree("agent/task-manual", worktree_path=str(actual))
+
+        assert not actual.exists()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Orchestrator.clean_task: error propagation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -390,6 +440,175 @@ class TestCancelTaskWorktreeCleanup:
             "agent/task-ggg",
             worktree_path="/actual/stored/path/agent/task-ggg",
         )
+
+
+class TestReviewOnlyTaskCleanup:
+
+    def test_review_cleanup_success_clears_branch_and_worktree(self, tmp_db, make_task):
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            task_mode="review",
+            branch_name="agent/review-aaa",
+            worktree_path="/wt/agent/review-aaa",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch.worktree_mgr.remove_worktree.return_value = None
+
+        orch._cleanup_review_worktree(task)
+
+        saved = tmp_db.get_task(task.id)
+        assert saved.branch_name == ""
+        assert saved.worktree_path == ""
+        orch.worktree_mgr.remove_worktree.assert_called_once_with("agent/review-aaa")
+
+    def test_review_cleanup_failure_keeps_branch_for_manual_clean(self, tmp_db, make_task):
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            task_mode="review",
+            branch_name="agent/review-bbb",
+            worktree_path="/wt/agent/review-bbb",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch.worktree_mgr.remove_worktree.side_effect = RuntimeError("locked")
+
+        orch._cleanup_review_worktree(task)
+
+        saved = tmp_db.get_task(task.id)
+        assert saved.branch_name == "agent/review-bbb"
+        assert saved.worktree_path == ""
+
+
+class TestCleanVisibilityByActualResources:
+
+    def test_clean_hidden_when_stale_record_has_no_real_resources(self, tmp_db, make_task):
+        from core.orchestrator import Orchestrator
+
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            branch_name="agent/task-stale",
+            worktree_path="/missing/worktree",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        with patch.object(Orchestrator, "_collect_resource_snapshot", return_value=(set(), {})), \
+             patch("core.orchestrator.os.path.isdir", return_value=False):
+            ui_task = orch.serialize_task_for_ui(task)
+
+        assert ui_task["actual_branch_exists"] is False
+        assert ui_task["actual_worktree_exists"] is False
+        assert ui_task["clean_available"] is False
+
+    def test_clean_visible_when_only_branch_exists(self, tmp_db, make_task):
+        from core.orchestrator import Orchestrator
+
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            branch_name="agent/task-branch-only",
+            worktree_path="/missing/worktree",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        with patch.object(
+            Orchestrator,
+            "_collect_resource_snapshot",
+            return_value=({"agent/task-branch-only"}, {}),
+        ), patch("core.orchestrator.os.path.isdir", return_value=False):
+            ui_task = orch.serialize_task_for_ui(task)
+
+        assert ui_task["actual_branch_exists"] is True
+        assert ui_task["actual_worktree_exists"] is False
+        assert ui_task["clean_available"] is True
+
+    def test_clean_visible_when_only_worktree_exists(self, tmp_db, make_task):
+        from core.orchestrator import Orchestrator
+
+        task = make_task(
+            status=TaskStatus.FAILED,
+            branch_name="agent/task-worktree-only",
+            worktree_path="/present/worktree",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        def _isdir(path):
+            return path == "/present/worktree"
+
+        with patch.object(Orchestrator, "_collect_resource_snapshot", return_value=(set(), {})), \
+             patch("core.orchestrator.os.path.isdir", side_effect=_isdir):
+            ui_task = orch.serialize_task_for_ui(task)
+
+        assert ui_task["actual_branch_exists"] is False
+        assert ui_task["actual_worktree_exists"] is True
+        assert ui_task["clean_available"] is True
+
+    def test_clean_visible_when_branch_name_missing_but_worktree_exists(self, tmp_db, make_task):
+        from core.orchestrator import Orchestrator
+
+        task = make_task(
+            status=TaskStatus.CANCELLED,
+            branch_name="",
+            worktree_path="/present/worktree-only",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        def _isdir(path):
+            return path == "/present/worktree-only"
+
+        with patch.object(Orchestrator, "_collect_resource_snapshot", return_value=(set(), {})), \
+             patch("core.orchestrator.os.path.isdir", side_effect=_isdir):
+            ui_task = orch.serialize_task_for_ui(task)
+
+        assert ui_task["actual_branch_exists"] is False
+        assert ui_task["actual_worktree_exists"] is True
+        assert ui_task["clean_available"] is True
+
+    def test_clean_success_clears_record_then_hides_button(self, tmp_db, make_task):
+        from core.orchestrator import Orchestrator
+
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            branch_name="agent/task-cleaned",
+            worktree_path="/wt/agent/task-cleaned",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch.worktree_mgr.remove_worktree.return_value = None
+
+        result = orch.clean_task(task.id)
+        assert result == {"cleaned": True, "branch": "agent/task-cleaned"}
+
+        saved = tmp_db.get_task(task.id)
+        assert saved.branch_name == ""
+        assert saved.worktree_path == ""
+
+        with patch.object(Orchestrator, "_collect_resource_snapshot", return_value=(set(), {})), \
+             patch("core.orchestrator.os.path.isdir", return_value=False):
+            ui_task = orch.serialize_task_for_ui(saved)
+
+        assert ui_task["clean_available"] is False
+
+    def test_clean_worktree_only_without_branch_name(self, tmp_db, make_task):
+        task = make_task(
+            status=TaskStatus.CANCELLED,
+            branch_name="",
+            worktree_path="/wt/orphan-worktree",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch.worktree_mgr.remove_worktree_path_only.return_value = None
+
+        result = orch.clean_task(task.id)
+
+        assert result == {"cleaned": True, "branch": ""}
+        saved = tmp_db.get_task(task.id)
+        assert saved.branch_name == ""
+        assert saved.worktree_path == ""
+        orch.worktree_mgr.remove_worktree_path_only.assert_called_once_with("/wt/orphan-worktree")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

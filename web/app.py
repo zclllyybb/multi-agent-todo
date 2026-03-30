@@ -1,5 +1,6 @@
 """FastAPI web dashboard for observing and managing the multi-agent system."""
 
+import logging
 import os
 import subprocess
 import time
@@ -12,6 +13,7 @@ from core.orchestrator import Orchestrator
 from core.opencode_client import OpenCodeClient
 
 app = FastAPI(title="Multi-Agent TODO Resolver")
+log = logging.getLogger(__name__)
 
 # Will be set by the daemon
 orchestrator: Optional[Orchestrator] = None
@@ -20,6 +22,27 @@ orchestrator: Optional[Orchestrator] = None
 def set_orchestrator(orch: Orchestrator):
     global orchestrator
     orchestrator = orch
+
+
+@app.middleware("http")
+async def api_timing_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    path = request.url.path
+    if path.startswith("/api/"):
+        size = response.headers.get("content-length", "-")
+        if elapsed_ms >= 800:
+            log.warning(
+                "API slow: %s %s status=%d elapsed_ms=%.1f content_length=%s",
+                request.method, path, response.status_code, elapsed_ms, size,
+            )
+        else:
+            log.info(
+                "API: %s %s status=%d elapsed_ms=%.1f content_length=%s",
+                request.method, path, response.status_code, elapsed_ms, size,
+            )
+    return response
 
 
 def _evaluate_review_verdict(review_text: str) -> str:
@@ -39,6 +62,29 @@ def _evaluate_review_verdict(review_text: str) -> str:
     return "approve" if pos > neg else "request_changes"
 
 
+def _task_list_item(task_dict: dict) -> dict:
+    """Return only fields needed by the task table refresh endpoint."""
+    keys = (
+        "id",
+        "title",
+        "status",
+        "priority",
+        "source",
+        "session_ids",
+        "updated_at",
+        "complexity",
+        "published_at",
+        "branch_name",
+        "task_mode",
+        "parent_id",
+        "depends_on",
+        "clean_available",
+        "actual_branch_exists",
+        "actual_worktree_exists",
+    )
+    return {k: task_dict.get(k) for k in keys}
+
+
 # ── API Routes ───────────────────────────────────────────────────────
 
 @app.get("/api/status")
@@ -52,11 +98,37 @@ async def api_status():
 async def api_tasks(status: Optional[str] = None):
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
+
+    t0 = time.perf_counter()
     tasks = orchestrator.db.get_all_tasks()
+    t_db = time.perf_counter()
+
     if status:
         tasks = [t for t in tasks if t.status.value == status]
+    t_filter = time.perf_counter()
+
     tasks.sort(key=lambda t: t.created_at, reverse=True)
-    return [t.to_dict() for t in tasks]
+    t_sort = time.perf_counter()
+
+    ui_tasks = orchestrator.serialize_tasks_for_ui(tasks)
+    t_serialize = time.perf_counter()
+
+    compact_tasks = [_task_list_item(t) for t in ui_tasks]
+    t_compact = time.perf_counter()
+
+    total_ms = (t_compact - t0) * 1000.0
+    log.info(
+        "api_tasks metrics: count=%d total_ms=%.1f db_ms=%.1f filter_ms=%.1f sort_ms=%.1f "
+        "serialize_ms=%.1f compact_ms=%.1f",
+        len(compact_tasks),
+        total_ms,
+        (t_db - t0) * 1000.0,
+        (t_filter - t_db) * 1000.0,
+        (t_sort - t_filter) * 1000.0,
+        (t_serialize - t_sort) * 1000.0,
+        (t_compact - t_serialize) * 1000.0,
+    )
+    return compact_tasks
 
 
 @app.get("/api/tasks/{task_id}")
@@ -87,7 +159,7 @@ async def api_task_detail(task_id: str):
         git_status = orchestrator.worktree_mgr.get_git_status(task.worktree_path)
 
     return {
-        "task": task.to_dict(),
+        "task": orchestrator.serialize_task_for_ui(task),
         "runs": parsed_runs,
         "git_status": git_status,
     }
@@ -1189,10 +1261,21 @@ function renderGitStatus(gs, worktreePath, branchName, taskId) {
 }
 
 let _lastRefreshHash = '';
+let _currentDetailTaskId = '';
 async function refresh() {
   const [status, tasks] = await Promise.all([api('/api/status'), api('/api/tasks')]);
   // Skip DOM rebuild if data unchanged (fast path for auto-refresh)
-  const hash = JSON.stringify([status.status_counts, tasks.map(t => [t.id, t.status, t.updated_at])]);
+  const hash = JSON.stringify([
+    status.status_counts,
+    tasks.map(t => [
+      t.id,
+      t.status,
+      t.updated_at,
+      !!t.clean_available,
+      !!t.actual_branch_exists,
+      !!t.actual_worktree_exists,
+    ]),
+  ]);
   if (hash === _lastRefreshHash) return;
   _lastRefreshHash = hash;
 
@@ -1274,13 +1357,14 @@ async function refresh() {
         ${t.status==='pending'&&!isBlocked?`<button class="btn btn-sm" onclick="dispatch('${t.id}')">Run</button>`:''}
         ${publishBtn}
         ${!['completed','cancelled'].includes(t.status)?`<button class="btn btn-sm" onclick="cancel('${t.id}')">Cancel</button>`:''}
-        ${['completed','failed','review_failed','cancelled','needs_arbitration'].includes(t.status)&&t.branch_name?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
+        ${t.clean_available?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
       </td>
     </tr>`;
   }).join('');
 }
 
 async function showDetail(id) {
+  _currentDetailTaskId = id;
   const data = await api(`/api/tasks/${id}`);
   const t = data.task;
   document.getElementById('detail-title').textContent = t.title;
@@ -1329,7 +1413,7 @@ async function showDetail(id) {
       <button class="btn" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push to remote' : '&#8593; Publish branch to remote'}</button>
     </div>`;
   }
-  if (['completed','failed','review_failed','cancelled','needs_arbitration'].includes(t.status) && t.branch_name) {
+  if (t.clean_available) {
     html += `<div style="margin:8px 0">
       <button class="btn" style="color:var(--red);border-color:var(--red)" onclick="cleanTask('${t.id}')">&#128465; Clean up worktree &amp; branch</button>
       <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Frees disk/git resources. Cannot be undone.</span>
@@ -1505,7 +1589,10 @@ function showAddTask() {
   document.getElementById('add-modal').classList.add('active');
   refreshAddTaskBaseBranch();
 }
-function closeModals() { document.querySelectorAll('.modal-overlay').forEach(m=>m.classList.remove('active')); }
+function closeModals() {
+  document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+  _currentDetailTaskId = '';
+}
 
 function uiAlert(message, title = 'Notice') {
   return new Promise((resolve) => {
@@ -1643,8 +1730,15 @@ async function cleanTask(id) {
   if (!confirmed) return;
   const res = await api(`/api/tasks/${id}/clean`, {method:'POST'});
   if (res && res.error) { await uiAlert(res.error, 'Clean failed'); return; }
-  await uiAlert(`Branch "${res.branch}" and its worktree have been removed.`, 'Cleaned');
-  refresh();
+  const msg = res.branch
+    ? `Branch "${res.branch}" and its worktree have been removed.`
+    : 'Worktree resources have been removed.';
+  await uiAlert(msg, 'Cleaned');
+  await refresh();
+  const detailOpen = document.getElementById('detail-modal')?.classList.contains('active');
+  if (detailOpen && _currentDetailTaskId === id) {
+    await showDetail(id);
+  }
 }
 
 async function publishTask(id) {

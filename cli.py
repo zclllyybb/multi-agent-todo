@@ -22,12 +22,12 @@ def cmd_start(args):
 
 def cmd_stop(args):
     """Stop the daemon."""
-    daemon_mod.stop()
+    daemon_mod.stop(config_path=args.config)
 
 
 def cmd_status(args):
     """Show daemon and system status."""
-    daemon_mod.status()
+    daemon_mod.status(config_path=args.config)
     config = load_config(args.config)
     db = Database(config["database"]["path"])
     tasks = db.get_all_tasks()

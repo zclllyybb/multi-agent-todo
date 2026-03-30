@@ -4,7 +4,10 @@ import datetime
 import logging
 import os
 import signal
+import subprocess
 import sys
+import time
+from typing import Optional
 
 import uvicorn
 
@@ -15,6 +18,7 @@ from web.app import app, set_orchestrator
 PID_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "daemon.pid"
 )
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def setup_logging(config: dict) -> str:
@@ -56,9 +60,8 @@ def read_pid() -> int:
     return 0
 
 
-def is_running() -> bool:
-    pid = read_pid()
-    if pid == 0:
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -67,22 +70,119 @@ def is_running() -> bool:
         return False
 
 
+def _find_listener_pid(port: int) -> int:
+    """Return the process id listening on *port* (0 if none/unknown)."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return 0
+    for line in result.stdout.splitlines():
+        s = line.strip()
+        if s.isdigit():
+            return int(s)
+    return 0
+
+
+def _pid_matches_project(pid: int) -> bool:
+    """Best-effort check whether PID belongs to this project's daemon process."""
+    if pid <= 0:
+        return False
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        cwd = ""
+    if cwd.startswith(PROJECT_ROOT):
+        return True
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode(errors="ignore")
+    except OSError:
+        cmdline = ""
+    return "multi-agent-todo" in cmdline
+
+
+def _wait_until_stopped(pid: int, timeout_sec: float = 5.0) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if not _is_pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _is_pid_alive(pid)
+
+
+def _terminate_pid(pid: int) -> bool:
+    """Terminate process politely, then force kill if needed."""
+    if not _is_pid_alive(pid):
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return True
+    if _wait_until_stopped(pid, timeout_sec=5.0):
+        return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return True
+    return _wait_until_stopped(pid, timeout_sec=2.0)
+
+
+def is_running() -> bool:
+    pid = read_pid()
+    return _is_pid_alive(pid)
+
+
 def start(config_path: str = None, foreground: bool = False):
     """Start the daemon."""
-    if is_running():
-        print(f"Daemon already running (pid={read_pid()})")
-        return
-
     config = load_config(config_path)
+    port = int(config["web"]["port"])
+
+    pid = read_pid()
+    if pid and _is_pid_alive(pid):
+        print(f"Daemon already running (pid={pid})")
+        return
+    if pid and not _is_pid_alive(pid):
+        remove_pid()
+
+    listener_pid = _find_listener_pid(port)
+    if listener_pid:
+        if _pid_matches_project(listener_pid):
+            print(f"Daemon already running (pid={listener_pid})")
+        else:
+            print(
+                f"Cannot start daemon: port {port} is already in use by pid={listener_pid}."
+            )
+        return
 
     if not foreground:
         # Fork to background — logging is set up only in the child
         pid = os.fork()
         if pid > 0:
-            # Parent: print info and exit
-            print(f"Daemon started (pid={pid})")
-            print(f"Dashboard: http://localhost:{config['web']['port']}")
-            print(f"Logs: {os.path.dirname(os.path.abspath(config['logging']['file']))}")
+            # Parent: wait briefly to verify child actually bound the port.
+            deadline = time.time() + 5.0
+            started = False
+            while time.time() < deadline:
+                if not _is_pid_alive(pid):
+                    break
+                if _find_listener_pid(port) == pid:
+                    started = True
+                    break
+                time.sleep(0.1)
+            if started:
+                print(f"Daemon started (pid={pid})")
+                print(f"Dashboard: http://localhost:{config['web']['port']}")
+                print(f"Logs: {os.path.dirname(os.path.abspath(config['logging']['file']))}")
+            else:
+                print(
+                    f"Daemon failed to start (pid={pid}). "
+                    f"Check logs under {os.path.dirname(os.path.abspath(config['logging']['file']))}."
+                )
             return
         # Child process
         os.setsid()
@@ -112,32 +212,71 @@ def start(config_path: str = None, foreground: bool = False):
     log.info("Orchestrator started, launching web dashboard on port %d", config["web"]["port"])
 
     # Run web server (blocks)
-    uvicorn.run(
-        app,
-        host=config["web"]["host"],
-        port=config["web"]["port"],
-        log_level="warning",
-    )
-
-
-def stop():
-    """Stop the daemon."""
-    pid = read_pid()
-    if pid == 0 or not is_running():
-        print("Daemon is not running")
+    try:
+        uvicorn.run(
+            app,
+            host=config["web"]["host"],
+            port=config["web"]["port"],
+            log_level="warning",
+        )
+    finally:
+        try:
+            orch.stop()
+        except Exception:
+            pass
         remove_pid()
-        return
-    os.kill(pid, signal.SIGTERM)
-    print(f"Daemon stopped (pid={pid})")
+
+
+def stop(config_path: Optional[str] = None):
+    """Stop the daemon."""
+    config = load_config(config_path)
+    port = int(config["web"]["port"])
+
+    pid = read_pid()
+    stopped_pids = []
+
+    if pid and _is_pid_alive(pid):
+        if _terminate_pid(pid):
+            stopped_pids.append(pid)
+    elif pid:
+        remove_pid()
+
+    listener_pid = _find_listener_pid(port)
+    if listener_pid and listener_pid not in stopped_pids:
+        if _pid_matches_project(listener_pid):
+            if _terminate_pid(listener_pid):
+                stopped_pids.append(listener_pid)
+        else:
+            print(
+                f"Port {port} is occupied by non-project pid={listener_pid}; not terminating it."
+            )
+
+    if stopped_pids:
+        print("Daemon stopped (pid=" + ",".join(str(p) for p in stopped_pids) + ")")
+    else:
+        print("Daemon is not running")
+
     remove_pid()
 
 
-def status():
+def status(config_path: Optional[str] = None):
     """Check daemon status."""
+    config = load_config(config_path)
+    port = int(config["web"]["port"])
+
     pid = read_pid()
-    if is_running():
+    running = _is_pid_alive(pid)
+    listener_pid = _find_listener_pid(port)
+
+    if running:
         print(f"Daemon is running (pid={pid})")
     else:
         print("Daemon is not running")
         if pid:
             remove_pid()
+
+    if listener_pid and listener_pid != pid:
+        owner = "project" if _pid_matches_project(listener_pid) else "non-project"
+        print(
+            f"Port {port} listener detected (pid={listener_pid}, owner={owner})"
+        )
