@@ -37,6 +37,7 @@ class TaskSource(str, enum.Enum):
     TODO_SCAN = "todo_scan"
     MANUAL = "manual"
     PLANNER = "planner"
+    EXPLORE = "explore"
 
 
 class TodoItemStatus(str, enum.Enum):
@@ -168,6 +169,88 @@ class TodoItem:
         d.pop("relevance_score", None)
         d.setdefault("difficulty_score", -1.0)
         d.setdefault("analyze_output", "")
+        return cls(**d)
+
+
+# ── Exploration System ────────────────────────────────────────────────────────
+
+class ExploreStatus(str, enum.Enum):
+    TODO = "todo"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    STALE = "stale"
+
+
+@dataclass
+class ExploreModule:
+    """A node in the hierarchical project map for code exploration."""
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    name: str = ""
+    path: str = ""            # directory path relative to repo root
+    parent_id: str = ""       # "" for root modules
+    depth: int = 0
+    description: str = ""
+
+    # Per-category exploration state: {"performance": "todo", ...}
+    category_status: Dict[str, str] = field(default_factory=dict)
+    # Per-category notes from explorers
+    category_notes: Dict[str, str] = field(default_factory=dict)
+
+    # Module metadata
+    file_count: int = 0
+    loc: int = 0
+    languages: List[str] = field(default_factory=list)
+
+    sort_order: int = 0
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ExploreModule":
+        d = dict(d)
+        d.setdefault("category_status", {})
+        d.setdefault("category_notes", {})
+        d.setdefault("file_count", 0)
+        d.setdefault("loc", 0)
+        d.setdefault("languages", [])
+        d.setdefault("sort_order", 0)
+        return cls(**d)
+
+
+@dataclass
+class ExploreRun:
+    """Record of a single exploration agent invocation."""
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    module_id: str = ""
+    category: str = ""
+    personality: str = ""
+    model: str = ""
+    prompt: str = ""
+    output: str = ""
+    session_id: str = ""
+
+    # Parsed results
+    findings: List[dict] = field(default_factory=list)
+    summary: str = ""
+    issue_count: int = 0
+
+    exit_code: int = -1
+    duration_sec: float = 0.0
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ExploreRun":
+        d = dict(d)
+        d.setdefault("session_id", "")
+        d.setdefault("findings", [])
+        d.setdefault("summary", "")
+        d.setdefault("issue_count", 0)
         return cls(**d)
 
 

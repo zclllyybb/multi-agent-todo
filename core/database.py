@@ -6,7 +6,10 @@ import sqlite3
 import threading
 from typing import List, Optional
 
-from core.models import Task, TaskStatus, AgentRun, TodoItem, TodoItemStatus
+from core.models import (
+    Task, TaskStatus, AgentRun, TodoItem, TodoItemStatus,
+    ExploreModule, ExploreRun,
+)
 
 
 class Database:
@@ -42,6 +45,23 @@ class Database:
                 data TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_todo_items_status ON todo_items(status);
+
+            CREATE TABLE IF NOT EXISTS explore_modules (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NOT NULL DEFAULT '',
+                data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_explore_modules_parent
+                ON explore_modules(parent_id);
+
+            CREATE TABLE IF NOT EXISTS explore_runs (
+                id TEXT PRIMARY KEY,
+                module_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_explore_runs_module
+                ON explore_runs(module_id);
         """)
         conn.commit()
         conn.close()
@@ -131,3 +151,72 @@ class Database:
             "SELECT data FROM agent_runs WHERE task_id = ?", (task_id,)
         ).fetchall()
         return [AgentRun.from_dict(json.loads(r[0])) for r in rows]
+
+    # ── ExploreModule CRUD ──────────────────────────────────────────────
+
+    def save_explore_module(self, module: ExploreModule):
+        self._conn.execute(
+            "INSERT OR REPLACE INTO explore_modules (id, parent_id, data) VALUES (?, ?, ?)",
+            (module.id, module.parent_id, json.dumps(module.to_dict())),
+        )
+        self._conn.commit()
+
+    def get_explore_module(self, module_id: str) -> Optional[ExploreModule]:
+        row = self._conn.execute(
+            "SELECT data FROM explore_modules WHERE id = ?", (module_id,)
+        ).fetchone()
+        if row:
+            return ExploreModule.from_dict(json.loads(row[0]))
+        return None
+
+    def get_all_explore_modules(self) -> List[ExploreModule]:
+        rows = self._conn.execute(
+            "SELECT data FROM explore_modules ORDER BY rowid"
+        ).fetchall()
+        return [ExploreModule.from_dict(json.loads(r[0])) for r in rows]
+
+    def get_child_modules(self, parent_id: str) -> List[ExploreModule]:
+        rows = self._conn.execute(
+            "SELECT data FROM explore_modules WHERE parent_id = ? ORDER BY rowid",
+            (parent_id,),
+        ).fetchall()
+        return [ExploreModule.from_dict(json.loads(r[0])) for r in rows]
+
+    def delete_explore_module(self, module_id: str):
+        self._conn.execute("DELETE FROM explore_modules WHERE id = ?", (module_id,))
+        self._conn.commit()
+
+    def delete_all_explore_modules(self):
+        self._conn.execute("DELETE FROM explore_modules")
+        self._conn.commit()
+
+    # ── ExploreRun CRUD ─────────────────────────────────────────────────
+
+    def save_explore_run(self, run: ExploreRun):
+        self._conn.execute(
+            "INSERT OR REPLACE INTO explore_runs (id, module_id, category, data) "
+            "VALUES (?, ?, ?, ?)",
+            (run.id, run.module_id, run.category, json.dumps(run.to_dict())),
+        )
+        self._conn.commit()
+
+    def get_explore_run(self, run_id: str) -> Optional[ExploreRun]:
+        row = self._conn.execute(
+            "SELECT data FROM explore_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row:
+            return ExploreRun.from_dict(json.loads(row[0]))
+        return None
+
+    def get_explore_runs_for_module(self, module_id: str) -> List[ExploreRun]:
+        rows = self._conn.execute(
+            "SELECT data FROM explore_runs WHERE module_id = ? ORDER BY rowid DESC",
+            (module_id,),
+        ).fetchall()
+        return [ExploreRun.from_dict(json.loads(r[0])) for r in rows]
+
+    def get_all_explore_runs(self) -> List[ExploreRun]:
+        rows = self._conn.execute(
+            "SELECT data FROM explore_runs ORDER BY rowid DESC"
+        ).fetchall()
+        return [ExploreRun.from_dict(json.loads(r[0])) for r in rows]

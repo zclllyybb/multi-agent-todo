@@ -1,0 +1,852 @@
+"""Comprehensive tests for the code exploration system.
+
+Covers: models, database CRUD, explorer agent parsing, orchestrator exploration
+methods (init_explore_map, start_exploration, _run_exploration, task creation),
+and the full end-to-end flow with mocked model output.
+"""
+
+import json
+import time
+import threading
+from unittest.mock import MagicMock, patch, PropertyMock
+
+import pytest
+
+from core.models import (
+    ExploreModule, ExploreRun, ExploreStatus, TaskSource, TaskStatus,
+    ModelOutputError,
+)
+from core.database import Database
+from agents.explorer import ExplorerAgent
+from agents.prompts import (
+    EXPLORER_PERSONALITIES, DEFAULT_EXPLORE_CATEGORIES,
+    explorer_prompt, map_init_prompt,
+)
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────
+
+@pytest.fixture
+def tmp_db(tmp_path):
+    db_path = str(tmp_path / "test_explore.db")
+    return Database(db_path)
+
+
+@pytest.fixture
+def sample_module():
+    return ExploreModule(
+        id="mod_abc123",
+        name="Query Engine",
+        path="be/src/exec",
+        parent_id="",
+        depth=0,
+        description="Vectorized execution engine",
+        category_status={
+            "performance": "todo",
+            "concurrency": "todo",
+        },
+        category_notes={
+            "performance": "",
+            "concurrency": "",
+        },
+    )
+
+
+@pytest.fixture
+def sample_run():
+    return ExploreRun(
+        id="run_xyz789",
+        module_id="mod_abc123",
+        category="performance",
+        personality="perf_hunter",
+        model="test-model",
+        prompt="test prompt",
+        output="test output",
+        session_id="ses_001",
+        findings=[
+            {
+                "severity": "major",
+                "title": "Unnecessary copy in hot path",
+                "description": "A large vector is copied instead of moved",
+                "file_path": "be/src/exec/scanner.cpp",
+                "line_number": 42,
+                "suggested_fix": "Use std::move",
+            }
+        ],
+        summary="Found 1 performance issue",
+        issue_count=1,
+        exit_code=0,
+        duration_sec=120.5,
+    )
+
+
+MOCK_MAP_OUTPUT = json.dumps({
+    "modules": [
+        {
+            "name": "Backend Engine",
+            "path": "be/src",
+            "description": "C++ backend execution engine",
+            "children": [
+                {
+                    "name": "Exec Module",
+                    "path": "be/src/exec",
+                    "description": "Query execution operators",
+                    "children": [],
+                }
+            ],
+        },
+        {
+            "name": "Frontend",
+            "path": "fe/src",
+            "description": "Java frontend query planner",
+            "children": [],
+        },
+    ]
+})
+
+MOCK_EXPLORE_OUTPUT = json.dumps({
+    "summary": "Explored scanner.cpp and found a major performance issue with unnecessary copies.",
+    "findings": [
+        {
+            "severity": "major",
+            "title": "Unnecessary vector copy in Scanner::next_batch()",
+            "description": "The method copies a 1MB vector on every call instead of moving it.",
+            "file_path": "be/src/exec/scanner.cpp",
+            "line_number": 142,
+            "suggested_fix": "Use std::move() to transfer ownership",
+        },
+        {
+            "severity": "minor",
+            "title": "Missing reserve() before push_back loop",
+            "description": "A vector grows incrementally in a loop without pre-allocation.",
+            "file_path": "be/src/exec/scanner.cpp",
+            "line_number": 200,
+            "suggested_fix": "Add results.reserve(expected_size) before the loop",
+        },
+    ],
+})
+
+MOCK_EXPLORE_OUTPUT_EMPTY = json.dumps({
+    "summary": "Explored module, no issues found.",
+    "findings": [],
+})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 1. MODEL TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExploreModels:
+    def test_explore_status_values(self):
+        assert ExploreStatus.TODO.value == "todo"
+        assert ExploreStatus.IN_PROGRESS.value == "in_progress"
+        assert ExploreStatus.DONE.value == "done"
+        assert ExploreStatus.STALE.value == "stale"
+
+    def test_task_source_explore(self):
+        assert TaskSource.EXPLORE.value == "explore"
+
+    def test_explore_module_defaults(self):
+        m = ExploreModule()
+        assert m.name == ""
+        assert m.path == ""
+        assert m.parent_id == ""
+        assert m.depth == 0
+        assert m.category_status == {}
+        assert m.category_notes == {}
+        assert m.file_count == 0
+        assert m.loc == 0
+        assert m.languages == []
+        assert m.sort_order == 0
+        assert m.id  # auto-generated
+
+    def test_explore_module_to_dict_roundtrip(self, sample_module):
+        d = sample_module.to_dict()
+        assert d["name"] == "Query Engine"
+        assert d["path"] == "be/src/exec"
+        assert d["category_status"]["performance"] == "todo"
+
+        restored = ExploreModule.from_dict(d)
+        assert restored.id == sample_module.id
+        assert restored.name == sample_module.name
+        assert restored.category_status == sample_module.category_status
+
+    def test_explore_module_from_dict_defaults(self):
+        d = {"id": "x", "name": "foo", "path": "bar", "parent_id": "",
+             "depth": 0, "description": "", "created_at": 1.0, "updated_at": 1.0}
+        m = ExploreModule.from_dict(d)
+        assert m.category_status == {}
+        assert m.category_notes == {}
+        assert m.file_count == 0
+        assert m.loc == 0
+        assert m.languages == []
+        assert m.sort_order == 0
+
+    def test_explore_run_defaults(self):
+        r = ExploreRun()
+        assert r.module_id == ""
+        assert r.category == ""
+        assert r.findings == []
+        assert r.summary == ""
+        assert r.issue_count == 0
+        assert r.exit_code == -1
+
+    def test_explore_run_to_dict_roundtrip(self, sample_run):
+        d = sample_run.to_dict()
+        assert d["module_id"] == "mod_abc123"
+        assert d["category"] == "performance"
+        assert len(d["findings"]) == 1
+        assert d["findings"][0]["severity"] == "major"
+
+        restored = ExploreRun.from_dict(d)
+        assert restored.id == sample_run.id
+        assert restored.findings == sample_run.findings
+        assert restored.summary == sample_run.summary
+
+    def test_explore_run_from_dict_defaults(self):
+        d = {"id": "r1", "module_id": "m1", "category": "perf",
+             "personality": "p", "model": "m", "prompt": "", "output": "",
+             "exit_code": 0, "duration_sec": 1.0, "created_at": 1.0}
+        r = ExploreRun.from_dict(d)
+        assert r.session_id == ""
+        assert r.findings == []
+        assert r.summary == ""
+        assert r.issue_count == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 2. DATABASE TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExploreDatabase:
+    def test_save_and_get_module(self, tmp_db, sample_module):
+        tmp_db.save_explore_module(sample_module)
+        loaded = tmp_db.get_explore_module(sample_module.id)
+        assert loaded is not None
+        assert loaded.name == "Query Engine"
+        assert loaded.path == "be/src/exec"
+
+    def test_get_nonexistent_module(self, tmp_db):
+        assert tmp_db.get_explore_module("nonexistent") is None
+
+    def test_get_all_modules(self, tmp_db):
+        m1 = ExploreModule(id="m1", name="A", path="a")
+        m2 = ExploreModule(id="m2", name="B", path="b")
+        tmp_db.save_explore_module(m1)
+        tmp_db.save_explore_module(m2)
+        all_mods = tmp_db.get_all_explore_modules()
+        assert len(all_mods) == 2
+        assert {m.id for m in all_mods} == {"m1", "m2"}
+
+    def test_get_child_modules(self, tmp_db):
+        parent = ExploreModule(id="p1", name="Parent", path="p")
+        child1 = ExploreModule(id="c1", name="Child1", path="p/c1", parent_id="p1")
+        child2 = ExploreModule(id="c2", name="Child2", path="p/c2", parent_id="p1")
+        other = ExploreModule(id="o1", name="Other", path="o")
+        for m in [parent, child1, child2, other]:
+            tmp_db.save_explore_module(m)
+        children = tmp_db.get_child_modules("p1")
+        assert len(children) == 2
+        assert {c.id for c in children} == {"c1", "c2"}
+
+    def test_delete_module(self, tmp_db, sample_module):
+        tmp_db.save_explore_module(sample_module)
+        tmp_db.delete_explore_module(sample_module.id)
+        assert tmp_db.get_explore_module(sample_module.id) is None
+
+    def test_delete_all_modules(self, tmp_db):
+        for i in range(5):
+            tmp_db.save_explore_module(ExploreModule(id=f"m{i}", name=f"M{i}", path=f"p{i}"))
+        assert len(tmp_db.get_all_explore_modules()) == 5
+        tmp_db.delete_all_explore_modules()
+        assert len(tmp_db.get_all_explore_modules()) == 0
+
+    def test_save_and_get_run(self, tmp_db, sample_run):
+        tmp_db.save_explore_run(sample_run)
+        loaded = tmp_db.get_explore_run(sample_run.id)
+        assert loaded is not None
+        assert loaded.category == "performance"
+        assert loaded.issue_count == 1
+
+    def test_get_nonexistent_run(self, tmp_db):
+        assert tmp_db.get_explore_run("nonexistent") is None
+
+    def test_get_runs_for_module(self, tmp_db):
+        r1 = ExploreRun(id="r1", module_id="m1", category="perf")
+        r2 = ExploreRun(id="r2", module_id="m1", category="security")
+        r3 = ExploreRun(id="r3", module_id="m2", category="perf")
+        for r in [r1, r2, r3]:
+            tmp_db.save_explore_run(r)
+        runs = tmp_db.get_explore_runs_for_module("m1")
+        assert len(runs) == 2
+        assert {r.id for r in runs} == {"r1", "r2"}
+
+    def test_get_all_runs(self, tmp_db):
+        for i in range(3):
+            tmp_db.save_explore_run(ExploreRun(id=f"r{i}", module_id="m1", category="c"))
+        assert len(tmp_db.get_all_explore_runs()) == 3
+
+    def test_module_update_persists(self, tmp_db, sample_module):
+        tmp_db.save_explore_module(sample_module)
+        sample_module.category_status["performance"] = "done"
+        sample_module.category_notes["performance"] = "All good"
+        tmp_db.save_explore_module(sample_module)
+        loaded = tmp_db.get_explore_module(sample_module.id)
+        assert loaded.category_status["performance"] == "done"
+        assert loaded.category_notes["performance"] == "All good"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 3. EXPLORER AGENT PARSING TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExplorerAgentParsing:
+    def test_parse_output_valid(self):
+        findings, summary = ExplorerAgent._parse_output(MOCK_EXPLORE_OUTPUT)
+        assert len(findings) == 2
+        assert summary == "Explored scanner.cpp and found a major performance issue with unnecessary copies."
+        assert findings[0]["severity"] == "major"
+        assert findings[0]["title"] == "Unnecessary vector copy in Scanner::next_batch()"
+        assert findings[0]["line_number"] == 142
+        assert findings[1]["severity"] == "minor"
+
+    def test_parse_output_empty_findings(self):
+        findings, summary = ExplorerAgent._parse_output(MOCK_EXPLORE_OUTPUT_EMPTY)
+        assert findings == []
+        assert "no issues" in summary
+
+    def test_parse_output_no_json(self):
+        with pytest.raises(ModelOutputError, match="no JSON object found"):
+            ExplorerAgent._parse_output("Just some random text without JSON")
+
+    def test_parse_output_invalid_json(self):
+        with pytest.raises(ModelOutputError, match="invalid JSON|no JSON object found"):
+            ExplorerAgent._parse_output("{broken json here")
+
+    def test_parse_output_with_surrounding_text(self):
+        text = "Here is my analysis:\n" + MOCK_EXPLORE_OUTPUT + "\nDone."
+        findings, summary = ExplorerAgent._parse_output(text)
+        assert len(findings) == 2
+
+    def test_parse_output_partial_finding_fields(self):
+        text = json.dumps({
+            "summary": "test",
+            "findings": [{"title": "A bug", "severity": "critical"}],
+        })
+        findings, summary = ExplorerAgent._parse_output(text)
+        assert len(findings) == 1
+        assert findings[0]["title"] == "A bug"
+        assert findings[0]["file_path"] == ""
+        assert findings[0]["line_number"] == 0
+        assert findings[0]["suggested_fix"] == ""
+
+    def test_parse_map_output_valid(self):
+        modules = ExplorerAgent._parse_map_output(MOCK_MAP_OUTPUT)
+        assert len(modules) == 2
+        assert modules[0]["name"] == "Backend Engine"
+        assert len(modules[0]["children"]) == 1
+
+    def test_parse_map_output_no_json(self):
+        with pytest.raises(ModelOutputError, match="no JSON object found"):
+            ExplorerAgent._parse_map_output("no json here")
+
+    def test_parse_map_output_empty_modules(self):
+        with pytest.raises(ModelOutputError, match="no modules found"):
+            ExplorerAgent._parse_map_output(json.dumps({"modules": []}))
+
+    def test_parse_map_output_invalid_json(self):
+        with pytest.raises(ModelOutputError, match="invalid JSON|no JSON object found"):
+            ExplorerAgent._parse_map_output("{bad")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 4. PROMPT GENERATION TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExplorePrompts:
+    def test_personalities_structure(self):
+        assert len(EXPLORER_PERSONALITIES) == 5
+        for key, p in EXPLORER_PERSONALITIES.items():
+            assert "name" in p
+            assert "category" in p
+            assert "focus" in p
+            assert "model_preference" in p
+            assert p["model_preference"] == "very_complex"
+
+    def test_default_categories(self):
+        assert len(DEFAULT_EXPLORE_CATEGORIES) == 5
+        assert "performance" in DEFAULT_EXPLORE_CATEGORIES
+        assert "concurrency" in DEFAULT_EXPLORE_CATEGORIES
+
+    def test_explorer_prompt_contains_key_info(self):
+        prompt = explorer_prompt(
+            module_name="Exec",
+            module_path="be/src/exec",
+            module_description="Execution engine",
+            category="performance",
+            personality_name="Performance Hunter",
+            personality_focus="bottlenecks, copies",
+            repo_path="/repo",
+        )
+        assert "Performance Hunter" in prompt
+        assert "be/src/exec" in prompt
+        assert "performance" in prompt
+        assert "bottlenecks, copies" in prompt
+        assert "Execution engine" in prompt
+
+    def test_map_init_prompt_contains_key_info(self):
+        prompt = map_init_prompt(repo_path="/repo", max_depth=3)
+        assert "/repo" in prompt
+        assert "depth 3" in prompt
+        assert "modules" in prompt
+
+    def test_personality_category_mapping(self):
+        """Each personality has a unique category mapping."""
+        categories = [p["category"] for p in EXPLORER_PERSONALITIES.values()]
+        assert len(categories) == len(set(categories)), "Duplicate category mappings"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5. ORCHESTRATOR EXPLORATION TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+def _make_orchestrator_config(tmp_path):
+    """Build a minimal config dict for Orchestrator instantiation."""
+    return {
+        "repo": {"path": "/fake/repo", "base_branch": "master",
+                 "worktree_dir": str(tmp_path), "worktree_hooks": []},
+        "opencode": {
+            "planner_model": "test-planner",
+            "coder_model_by_complexity": {"simple": "test-coder"},
+            "coder_model_default": "test-coder",
+            "reviewer_models": ["test-reviewer"],
+            "timeout": 60,
+        },
+        "orchestrator": {"max_parallel_tasks": 2, "max_retries": 1,
+                         "poll_interval": 999},
+        "explore": {
+            "explorer_model": "test-explorer",
+            "map_model": "test-map-model",
+            "categories": ["performance", "concurrency"],
+            "auto_task_severity": "major",
+        },
+        "database": {"path": str(tmp_path / "test.db")},
+        "hook_env": {},
+    }
+
+
+def _mock_agent_run(prompt="", output="", exit_code=0, session_id="ses_test"):
+    """Create a mock AgentRun-like object."""
+    from core.models import AgentRun
+    return AgentRun(
+        prompt=prompt, output=output, exit_code=exit_code,
+        session_id=session_id, duration_sec=1.0,
+    )
+
+
+class TestOrchestratorExplore:
+    @pytest.fixture
+    def orch(self, tmp_path):
+        config = _make_orchestrator_config(tmp_path)
+        with patch("core.orchestrator.OpenCodeClient"):
+            from core.orchestrator import Orchestrator
+            o = Orchestrator(config)
+        return o
+
+    def test_get_explore_categories(self, orch):
+        cats = orch._get_explore_categories()
+        assert cats == ["performance", "concurrency"]
+
+    def test_get_explore_categories_default(self, orch):
+        del orch.config["explore"]
+        cats = orch._get_explore_categories()
+        assert cats == DEFAULT_EXPLORE_CATEGORIES
+
+    def test_get_explorer_model(self, orch):
+        assert orch._get_explorer_model() == "test-explorer"
+
+    def test_get_explorer_model_fallback(self, orch):
+        del orch.config["explore"]
+        assert orch._get_explorer_model() == "test-planner"
+
+    def test_pick_personality_for_category(self, orch):
+        key = orch._pick_personality_for_category("performance")
+        assert key == "perf_hunter"
+        key = orch._pick_personality_for_category("concurrency")
+        assert key == "concurrency_auditor"
+
+    def test_pick_personality_for_unknown_category(self, orch):
+        key = orch._pick_personality_for_category("unknown_category")
+        assert key in EXPLORER_PERSONALITIES
+
+    def test_init_explore_map(self, orch):
+        mock_run = _mock_agent_run(output=MOCK_MAP_OUTPUT)
+        with patch.object(ExplorerAgent, "init_map", return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"])):
+            result = orch.init_explore_map()
+
+        assert "modules_created" in result
+        assert result["modules_created"] == 3  # 2 top-level + 1 child
+
+        modules = orch.db.get_all_explore_modules()
+        assert len(modules) == 3
+        names = {m.name for m in modules}
+        assert "Backend Engine" in names
+        assert "Exec Module" in names
+        assert "Frontend" in names
+
+        # Verify hierarchy
+        be = [m for m in modules if m.name == "Backend Engine"][0]
+        exec_mod = [m for m in modules if m.name == "Exec Module"][0]
+        assert exec_mod.parent_id == be.id
+        assert exec_mod.depth == 1
+
+        # Verify category_status initialized
+        for m in modules:
+            assert set(m.category_status.keys()) == {"performance", "concurrency"}
+            for v in m.category_status.values():
+                assert v == ExploreStatus.TODO.value
+
+    def test_init_explore_map_clears_old(self, orch):
+        orch.db.save_explore_module(ExploreModule(id="old", name="Old", path="old"))
+        mock_run = _mock_agent_run(output=MOCK_MAP_OUTPUT)
+        with patch.object(ExplorerAgent, "init_map", return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"])):
+            orch.init_explore_map()
+        modules = orch.db.get_all_explore_modules()
+        assert all(m.id != "old" for m in modules)
+
+    def test_init_explore_map_error(self, orch):
+        with patch.object(ExplorerAgent, "init_map", side_effect=RuntimeError("fail")):
+            result = orch.init_explore_map()
+        assert "error" in result
+
+    def test_add_explore_module(self, orch):
+        result = orch.add_explore_module(name="Test", path="test/path", description="A test")
+        assert "id" in result
+        assert result["name"] == "Test"
+        assert set(result["category_status"].keys()) == {"performance", "concurrency"}
+
+    def test_add_explore_module_with_parent(self, orch):
+        parent = orch.add_explore_module(name="Parent", path="p")
+        child = orch.add_explore_module(name="Child", path="p/c", parent_id=parent["id"])
+        assert child["depth"] == 1
+        assert child["parent_id"] == parent["id"]
+
+    def test_add_explore_module_bad_parent(self, orch):
+        result = orch.add_explore_module(name="X", path="x", parent_id="nonexistent")
+        assert "error" in result
+
+    def test_update_explore_module(self, orch):
+        mod = orch.add_explore_module(name="A", path="a")
+        result = orch.update_explore_module(mod["id"], {"name": "B", "description": "Updated"})
+        assert result["name"] == "B"
+        assert result["description"] == "Updated"
+
+    def test_update_explore_module_category_status(self, orch):
+        mod = orch.add_explore_module(name="A", path="a")
+        result = orch.update_explore_module(
+            mod["id"], {"category_status": {"performance": "done"}}
+        )
+        assert result["category_status"]["performance"] == "done"
+
+    def test_update_explore_module_not_found(self, orch):
+        result = orch.update_explore_module("nonexistent", {"name": "X"})
+        assert "error" in result
+
+    def test_delete_explore_module(self, orch):
+        mod = orch.add_explore_module(name="A", path="a")
+        result = orch.delete_explore_module(mod["id"])
+        assert result["deleted"] is True
+        assert orch.db.get_explore_module(mod["id"]) is None
+
+    def test_delete_explore_module_cascades(self, orch):
+        parent = orch.add_explore_module(name="P", path="p")
+        child = orch.add_explore_module(name="C", path="p/c", parent_id=parent["id"])
+        orch.delete_explore_module(parent["id"])
+        assert orch.db.get_explore_module(parent["id"]) is None
+        assert orch.db.get_explore_module(child["id"]) is None
+
+    def test_delete_explore_module_not_found(self, orch):
+        result = orch.delete_explore_module("nonexistent")
+        assert "error" in result
+
+    def test_start_exploration_selects_leaf_todo_modules(self, orch):
+        """start_exploration with no args picks leaf modules with TODO cells."""
+        # Create a parent and a child (leaf)
+        parent = orch.add_explore_module(name="P", path="p")
+        child = orch.add_explore_module(name="C", path="p/c", parent_id=parent["id"])
+
+        # Mock the pool.submit to capture calls instead of actually running
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration()
+        # Only the leaf (child) should be explored, 2 categories
+        assert result["started"] == 2
+        assert len(submitted) == 2
+
+    def test_start_exploration_with_specific_modules(self, orch):
+        mod = orch.add_explore_module(name="A", path="a")
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(module_ids=[mod["id"]])
+        assert result["started"] == 2  # 2 categories
+
+    def test_start_exploration_skips_non_todo(self, orch):
+        mod_data = orch.add_explore_module(name="A", path="a")
+        mod = orch.db.get_explore_module(mod_data["id"])
+        mod.category_status["performance"] = ExploreStatus.DONE.value
+        orch.db.save_explore_module(mod)
+
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(module_ids=[mod.id])
+        assert result["started"] == 1  # only concurrency remains TODO
+
+    def test_start_exploration_specific_categories(self, orch):
+        mod = orch.add_explore_module(name="A", path="a")
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(
+            module_ids=[mod["id"]], categories=["performance"]
+        )
+        assert result["started"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 6. FULL END-TO-END EXPLORATION FLOW (mocked model output)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestExplorationFullFlow:
+    """Tests the complete exploration pipeline with mocked model I/O."""
+
+    @pytest.fixture
+    def orch(self, tmp_path):
+        config = _make_orchestrator_config(tmp_path)
+        with patch("core.orchestrator.OpenCodeClient"):
+            from core.orchestrator import Orchestrator
+            o = Orchestrator(config)
+        return o
+
+    def test_run_exploration_success_with_findings(self, orch):
+        """Full _run_exploration: module → agent → parse → save run → update module → create task."""
+        mod_data = orch.add_explore_module(name="Exec", path="be/src/exec",
+                                           description="Execution engine")
+        mod_id = mod_data["id"]
+        mod = orch.db.get_explore_module(mod_id)
+        mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
+        orch.db.save_explore_module(mod)
+
+        mock_run = _mock_agent_run(
+            prompt="test prompt", output=MOCK_EXPLORE_OUTPUT, exit_code=0
+        )
+        findings = json.loads(MOCK_EXPLORE_OUTPUT)["findings"]
+        summary = json.loads(MOCK_EXPLORE_OUTPUT)["summary"]
+
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            return_value=(mock_run, findings, summary),
+        ):
+            orch._run_exploration(mod_id, "performance", "perf_hunter")
+
+        # Verify module updated
+        updated = orch.db.get_explore_module(mod_id)
+        assert updated.category_status["performance"] == ExploreStatus.DONE.value
+        assert "performance issue" in updated.category_notes["performance"]
+
+        # Verify ExploreRun saved
+        runs = orch.db.get_explore_runs_for_module(mod_id)
+        assert len(runs) == 1
+        assert runs[0].category == "performance"
+        assert runs[0].personality == "perf_hunter"
+        assert runs[0].issue_count == 2
+        assert len(runs[0].findings) == 2
+
+        # Verify auto-task created for major finding (auto_task_severity = major)
+        tasks = orch.db.get_all_tasks()
+        major_tasks = [t for t in tasks if t.source == TaskSource.EXPLORE]
+        assert len(major_tasks) == 1  # only major, not minor
+        assert "Unnecessary vector copy" in major_tasks[0].title
+        assert major_tasks[0].file_path == "be/src/exec/scanner.cpp"
+
+    def test_run_exploration_no_findings(self, orch):
+        """Exploration with no findings: module marked DONE, no tasks created."""
+        mod_data = orch.add_explore_module(name="Clean", path="clean")
+        mod_id = mod_data["id"]
+
+        mock_run = _mock_agent_run(output=MOCK_EXPLORE_OUTPUT_EMPTY)
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            return_value=(mock_run, [], "Explored module, no issues found."),
+        ):
+            orch._run_exploration(mod_id, "performance", "perf_hunter")
+
+        updated = orch.db.get_explore_module(mod_id)
+        assert updated.category_status["performance"] == ExploreStatus.DONE.value
+        tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
+        assert len(tasks) == 0
+
+    def test_run_exploration_error_resets_status(self, orch):
+        """When exploration fails, module status reverts to TODO."""
+        mod_data = orch.add_explore_module(name="Err", path="err")
+        mod_id = mod_data["id"]
+
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            side_effect=RuntimeError("model timeout"),
+        ):
+            orch._run_exploration(mod_id, "performance", "perf_hunter")
+
+        updated = orch.db.get_explore_module(mod_id)
+        assert updated.category_status["performance"] == ExploreStatus.TODO.value
+
+    def test_run_exploration_critical_finding_creates_high_priority_task(self, orch):
+        """Critical findings create HIGH priority tasks."""
+        mod_data = orch.add_explore_module(name="Sec", path="sec")
+        mod_id = mod_data["id"]
+
+        critical_findings = [{
+            "severity": "critical",
+            "title": "SQL injection",
+            "description": "User input directly interpolated into query",
+            "file_path": "sec/query.py",
+            "line_number": 10,
+            "suggested_fix": "Use parameterized queries",
+        }]
+        mock_run = _mock_agent_run()
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            return_value=(mock_run, critical_findings, "Found critical issue"),
+        ):
+            orch._run_exploration(mod_id, "security", "security_scout")
+
+        tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
+        assert len(tasks) == 1
+        assert tasks[0].priority.value == "high"
+
+    def test_create_task_from_finding(self, orch):
+        """Manual task creation from a specific finding in an ExploreRun."""
+        mod_data = orch.add_explore_module(name="M", path="m")
+        run = ExploreRun(
+            module_id=mod_data["id"],
+            category="concurrency",
+            personality="concurrency_auditor",
+            findings=[
+                {"severity": "major", "title": "Race condition",
+                 "description": "Unsafe read", "file_path": "m/foo.cpp",
+                 "line_number": 50, "suggested_fix": "Add lock"},
+                {"severity": "minor", "title": "Lock granularity",
+                 "description": "Too coarse", "file_path": "m/bar.cpp",
+                 "line_number": 100, "suggested_fix": "Split lock"},
+            ],
+        )
+        orch.db.save_explore_run(run)
+
+        result = orch.create_task_from_finding(run.id, 0)
+        assert "id" in result
+        assert "Race condition" in result["title"]
+        assert result["source"] == "explore"
+
+        result2 = orch.create_task_from_finding(run.id, 1)
+        assert "Lock granularity" in result2["title"]
+
+    def test_create_task_from_finding_invalid_index(self, orch):
+        run = ExploreRun(id="r1", module_id="m1", category="c", findings=[])
+        orch.db.save_explore_run(run)
+        result = orch.create_task_from_finding("r1", 0)
+        assert "error" in result
+
+    def test_create_task_from_finding_bad_run_id(self, orch):
+        result = orch.create_task_from_finding("nonexistent", 0)
+        assert "error" in result
+
+    def test_full_pipeline_init_and_explore(self, orch):
+        """End-to-end: init map → start exploration → verify results."""
+        # 1. Init map
+        map_modules = json.loads(MOCK_MAP_OUTPUT)["modules"]
+        mock_map_run = _mock_agent_run(output=MOCK_MAP_OUTPUT)
+        with patch.object(ExplorerAgent, "init_map", return_value=(mock_map_run, map_modules)):
+            init_result = orch.init_explore_map()
+        assert init_result["modules_created"] == 3
+
+        # 2. Start exploration (synchronous execution for testing)
+        explore_findings = json.loads(MOCK_EXPLORE_OUTPUT)["findings"]
+        explore_summary = json.loads(MOCK_EXPLORE_OUTPUT)["summary"]
+        mock_explore_run = _mock_agent_run(output=MOCK_EXPLORE_OUTPUT)
+
+        # Replace pool.submit with direct execution
+        def sync_submit(fn, *args):
+            fn(*args)
+        orch._pool.submit = sync_submit
+
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            return_value=(mock_explore_run, explore_findings, explore_summary),
+        ):
+            start_result = orch.start_exploration()
+
+        # Only leaf modules explored: "Exec Module" and "Frontend" (2 leaves × 2 cats = 4)
+        assert start_result["started"] == 4
+
+        # Verify all leaf modules are DONE for both categories
+        modules = orch.db.get_all_explore_modules()
+        leaves = [m for m in modules if m.depth > 0 or
+                  not any(c.parent_id == m.id for c in modules)]
+        for leaf in leaves:
+            for cat in ["performance", "concurrency"]:
+                assert leaf.category_status[cat] == ExploreStatus.DONE.value
+
+        # Verify runs created
+        all_runs = orch.db.get_all_explore_runs()
+        assert len(all_runs) == 4
+
+        # Verify tasks created (each run has 1 major finding → 4 tasks)
+        tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
+        assert len(tasks) == 4
+
+    def test_auto_task_severity_threshold(self, orch):
+        """Only findings >= configured severity create auto-tasks."""
+        orch.config["explore"]["auto_task_severity"] = "critical"
+        mod_data = orch.add_explore_module(name="X", path="x")
+
+        findings = [
+            {"severity": "major", "title": "Major issue",
+             "description": "d", "file_path": "f", "line_number": 1,
+             "suggested_fix": "s"},
+            {"severity": "critical", "title": "Critical issue",
+             "description": "d", "file_path": "f", "line_number": 2,
+             "suggested_fix": "s"},
+        ]
+        mock_run = _mock_agent_run()
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            return_value=(mock_run, findings, "summary"),
+        ):
+            orch._run_exploration(mod_data["id"], "performance", "perf_hunter")
+
+        tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
+        assert len(tasks) == 1
+        assert "Critical issue" in tasks[0].title
+
+    def test_auto_task_severity_info_creates_all(self, orch):
+        """auto_task_severity=info means all findings create tasks."""
+        orch.config["explore"]["auto_task_severity"] = "info"
+        mod_data = orch.add_explore_module(name="X", path="x")
+
+        findings = [
+            {"severity": "info", "title": "Info", "description": "d",
+             "file_path": "f", "line_number": 1, "suggested_fix": "s"},
+            {"severity": "minor", "title": "Minor", "description": "d",
+             "file_path": "f", "line_number": 2, "suggested_fix": "s"},
+        ]
+        mock_run = _mock_agent_run()
+        with patch.object(
+            ExplorerAgent, "explore_module",
+            return_value=(mock_run, findings, "summary"),
+        ):
+            orch._run_exploration(mod_data["id"], "performance", "perf_hunter")
+
+        tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
+        assert len(tasks) == 2

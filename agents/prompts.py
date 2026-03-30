@@ -327,3 +327,135 @@ Depending on the material type:
 
 {REVIEW_REQUIREMENTS}
 """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPLORER AGENT  (autonomous code quality exploration)
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXPLORER_PERSONALITIES = {
+    "perf_hunter": {
+        "name": "Performance Hunter",
+        "category": "performance",
+        "focus": "performance bottlenecks, unnecessary copies, O(n²) algorithms, "
+                 "hot path inefficiencies, missing caching opportunities",
+        "model_preference": "very_complex",
+    },
+    "concurrency_auditor": {
+        "name": "Concurrency Auditor",
+        "category": "concurrency",
+        "focus": "race conditions, deadlocks, missing locks, unsafe shared state, "
+                 "lock ordering violations, atomic operation misuse",
+        "model_preference": "very_complex",
+    },
+    "maintainability_critic": {
+        "name": "Maintainability Critic",
+        "category": "maintainability",
+        "focus": "code smells, overly complex functions (>50 lines), god classes, "
+                 "poor naming, missing abstractions, copy-paste duplication",
+        "model_preference": "very_complex",
+    },
+    "error_handling_inspector": {
+        "name": "Error Handling Inspector",
+        "category": "error_handling",
+        "focus": "unchecked return values, swallowed exceptions, missing error paths, "
+                 "resource leaks on error, inconsistent error reporting",
+        "model_preference": "very_complex",
+    },
+    "security_scout": {
+        "name": "Security Scout",
+        "category": "security",
+        "focus": "injection vulnerabilities, unsafe deserialization, hardcoded secrets, "
+                 "path traversal, buffer overflows, privilege escalation",
+        "model_preference": "very_complex",
+    },
+}
+
+DEFAULT_EXPLORE_CATEGORIES = [
+    "performance", "concurrency", "error_handling", "maintainability", "security",
+]
+
+
+def explorer_prompt(
+    module_name: str,
+    module_path: str,
+    module_description: str,
+    category: str,
+    personality_name: str,
+    personality_focus: str,
+    repo_path: str,
+) -> str:
+    """Prompt for a single exploration run on one module x one category."""
+    return f"""You are a code exploration agent — a **{personality_name}**.
+
+## Assignment
+Explore the module "{module_name}" located at `{module_path}/` in the repository
+at `{repo_path}`.
+
+Module description: {module_description}
+
+## Your Focus
+You are specifically looking for **{category}** issues. Focus on:
+{personality_focus}
+
+## Instructions
+1. List the files in `{module_path}/` and understand the module structure
+2. Read key files — focus on implementation files, not just headers
+3. Trace important code paths relevant to your focus area
+4. For each issue found, provide:
+   - severity: "critical" / "major" / "minor" / "info"
+   - title: one-line summary
+   - description: detailed explanation with evidence
+   - file_path: relative path to the affected file
+   - line_number: approximate line (0 if not specific)
+   - suggested_fix: brief description of what should change
+5. If you find NO issues, that's fine — say so explicitly
+
+## Output Format
+Output ONLY valid JSON (no markdown fences):
+{{"summary": "One paragraph summarizing what you explored and found",
+  "findings": [
+    {{"severity": "major",
+      "title": "Potential race condition in FooManager::update()",
+      "description": "The method reads shared_map_ without holding mu_...",
+      "file_path": "be/src/vec/exec/foo_manager.cpp",
+      "line_number": 142,
+      "suggested_fix": "Hold mu_ for the entire read-modify-write sequence"}}
+  ]}}
+
+If no issues found:
+{{"summary": "Explored N files in module {module_name}, no {category} issues identified.", "findings": []}}
+"""
+
+
+def map_init_prompt(repo_path: str, max_depth: int = 2) -> str:
+    """Prompt for analyzing the repo and producing a hierarchical module map."""
+    return f"""You are a code architecture analysis agent.
+
+## Task
+Analyze the repository at `{repo_path}` and produce a hierarchical module map.
+
+## Instructions
+1. List the top-level directories
+2. For each significant directory, explore its subdirectories (up to depth {max_depth})
+3. Skip vendor, build output, test fixtures, and generated code directories
+4. For each module, provide:
+   - name: human-readable name
+   - path: relative directory path
+   - description: 1-2 sentence summary of what this module does
+   - children: nested modules (same structure)
+
+## Output Format
+Output ONLY valid JSON (no markdown fences):
+{{"modules": [
+    {{"name": "Query Execution Engine",
+      "path": "be/src/vec/exec",
+      "description": "Vectorized query execution operators and expression evaluation",
+      "children": [
+        {{"name": "Aggregate Operators",
+          "path": "be/src/vec/exec/agg",
+          "description": "Hash and streaming aggregation implementations",
+          "children": []}}
+      ]}}
+  ]}}
+"""

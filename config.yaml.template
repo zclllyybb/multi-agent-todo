@@ -59,6 +59,21 @@ publish:
   # Remote to push completed branches to
   remote: origin
 
+# Code exploration system
+explore:
+  # Model for map initialization and exploration agents
+  explorer_model: your-provider/explorer-model
+  map_model: your-provider/explorer-model
+  # Categories to explore per module
+  categories:
+    - performance
+    - concurrency
+    - error_handling
+    - maintainability
+    - security
+  # Auto-create tasks for findings at or above this severity (critical/major/minor/info)
+  auto_task_severity: major
+
 # Logging
 logging:
   level: INFO

@@ -378,6 +378,146 @@ async def api_dispatch_all():
     return {"dispatched": dispatched, "total_pending": len(pending)}
 
 
+# ── Exploration API ──────────────────────────────────────────────────
+
+@app.get("/api/explore/modules")
+async def api_explore_modules():
+    """Return all explore modules (flat list; frontend builds tree from parent_id)."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    modules = orchestrator.db.get_all_explore_modules()
+    return [m.to_dict() for m in modules]
+
+
+@app.get("/api/explore/modules/{module_id}")
+async def api_explore_module_detail(module_id: str):
+    """Return a single module with its exploration runs."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    module = orchestrator.db.get_explore_module(module_id)
+    if not module:
+        return JSONResponse({"error": "Module not found"}, status_code=404)
+    runs = orchestrator.db.get_explore_runs_for_module(module_id)
+    return {
+        "module": module.to_dict(),
+        "runs": [r.to_dict() for r in runs],
+    }
+
+
+@app.post("/api/explore/init-map")
+async def api_init_explore_map():
+    """Trigger map initialization agent (returns immediately, runs in background)."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    orchestrator._pool.submit(orchestrator.init_explore_map)
+    return {"status": "initializing"}
+
+
+@app.post("/api/explore/start")
+async def api_start_exploration(request: Request):
+    """Start exploration on selected modules x categories."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    result = orchestrator.start_exploration(
+        module_ids=body.get("module_ids"),
+        categories=body.get("categories"),
+    )
+    return result
+
+
+@app.post("/api/explore/modules")
+async def api_add_explore_module(request: Request):
+    """Manually add a module to the exploration map."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    name = body.get("name", "").strip()
+    path = body.get("path", "").strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    result = orchestrator.add_explore_module(
+        name=name,
+        path=path,
+        parent_id=body.get("parent_id", ""),
+        description=body.get("description", ""),
+    )
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@app.post("/api/explore/modules/{module_id}/update")
+async def api_update_explore_module(module_id: str, request: Request):
+    """Update module name, description, or reset category status."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    result = orchestrator.update_explore_module(module_id, body)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    return result
+
+
+@app.delete("/api/explore/modules/{module_id}")
+async def api_delete_explore_module(module_id: str):
+    """Delete a module and all its descendants."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    result = orchestrator.delete_explore_module(module_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    return result
+
+
+@app.get("/api/explore/runs")
+async def api_explore_runs():
+    """List recent exploration runs."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    runs = orchestrator.db.get_all_explore_runs()
+    return [r.to_dict() for r in runs[:100]]
+
+
+@app.get("/api/explore/runs/{run_id}")
+async def api_explore_run_detail(run_id: str):
+    """Get full details of one exploration run."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    run = orchestrator.db.get_explore_run(run_id)
+    if not run:
+        return JSONResponse({"error": "Run not found"}, status_code=404)
+    rd = run.to_dict()
+    rd.pop("output", None)
+    rd.pop("prompt", None)
+    return rd
+
+
+@app.post("/api/explore/runs/{run_id}/create-task")
+async def api_create_task_from_finding(run_id: str, request: Request):
+    """Create a Task from a specific finding in an explore run."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    finding_index = body.get("finding_index", -1)
+    result = orchestrator.create_task_from_finding(run_id, finding_index)
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@app.get("/api/explore/categories")
+async def api_explore_categories():
+    """Return the configured exploration categories."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    return {"categories": orchestrator._get_explore_categories()}
+
+
 # ── Dashboard HTML ───────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -562,6 +702,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .modal-wide .tab-content.active { max-height: 65vh; overflow-y: auto; }
   .dialog-msg { font-size: 13px; color: var(--text); white-space: pre-wrap; }
   .modal-danger { border-color: rgba(248,81,73,0.45); box-shadow: 0 0 0 1px rgba(248,81,73,0.15) inset; }
+
+  /* Explore tree */
+  .exp-node { margin-left: 0; }
+  .exp-node-inner { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+    border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.1s; }
+  .exp-node-inner:hover { background: rgba(88,166,255,0.06); }
+  .exp-node-inner.selected { background: rgba(88,166,255,0.12); border-left: 3px solid var(--accent); }
+  .exp-toggle { width: 16px; text-align: center; color: var(--text-dim); font-size: 10px;
+    cursor: pointer; flex-shrink: 0; user-select: none; }
+  .exp-name { font-weight: 500; flex-shrink: 0; }
+  .exp-path { color: var(--text-dim); font-size: 11px; font-family: monospace; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .exp-cats { display: flex; gap: 3px; flex-shrink: 0; }
+  .exp-cat-dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.15); }
+  .exp-cat-dot[title]:hover { transform: scale(1.3); }
+  .exp-children { margin-left: 20px; border-left: 1px solid var(--border); }
+  .exp-detail-cats { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .exp-cat-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+  .exp-cat-label { font-size: 12px; font-weight: 600; min-width: 110px; }
+  .exp-cat-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+  .exp-finding { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 8px; }
+  .exp-finding-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .exp-finding-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .exp-finding-meta { font-size: 11px; color: var(--text-dim); font-family: monospace; }
+  .sev-critical { color: var(--red); border-color: var(--red); }
+  .sev-major { color: var(--orange); border-color: var(--orange); }
+  .sev-minor { color: var(--yellow); border-color: var(--yellow); }
+  .sev-info { color: var(--text-dim); border-color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -586,6 +756,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="tab-bar" id="main-tab-bar">
     <div class="tab active" onclick="switchMainTab(this,'main-tasks')">Tasks</div>
     <div class="tab" onclick="switchMainTab(this,'main-todos')">Scanned TODOs <span id="todo-badge"></span></div>
+    <div class="tab" onclick="switchMainTab(this,'main-explore')">Explore</div>
     <div class="tab" onclick="switchMainTab(this,'main-sysinfo')">System Info</div>
   </div>
 
@@ -602,6 +773,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- System Info panel -->
   <div id="main-sysinfo" style="display:none">
     <div id="sysinfo-content" style="padding:8px 0"><span style="color:var(--text-dim)">Loading...</span></div>
+  </div>
+
+  <!-- Explore panel -->
+  <div id="main-explore" style="display:none">
+    <div class="actions" style="margin-bottom:12px">
+      <button class="btn btn-primary" id="explore-init-btn" onclick="initExploreMap()">&#9881; Initialize Map</button>
+      <button class="btn" style="color:var(--green)" id="explore-start-btn" onclick="startExploration()">&#9654; Start Exploration</button>
+      <button class="btn" onclick="showAddModuleModal()">+ Add Module</button>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-start">
+      <!-- Module tree (left pane) -->
+      <div id="explore-tree" style="flex:1;min-width:0;max-height:70vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+        <span style="color:var(--text-dim);font-size:12px">No modules yet. Click "Initialize Map" to scan the repository.</span>
+      </div>
+      <!-- Module detail (right pane) -->
+      <div id="explore-detail" style="flex:1;min-width:0;max-height:70vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--surface)">
+        <span style="color:var(--text-dim);font-size:12px">Select a module to view details.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Module Modal -->
+  <div class="modal-overlay" id="add-module-modal">
+    <div class="modal">
+      <h2>Add Module</h2>
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:4px">Module Name</label>
+      <input id="add-mod-name" placeholder="e.g. Query Optimizer" />
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:4px">Path (relative to repo root)</label>
+      <input id="add-mod-path" placeholder="e.g. be/src/optimizer" />
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:4px">Description</label>
+      <textarea id="add-mod-desc" placeholder="What does this module do?" style="height:60px"></textarea>
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:4px">Parent Module</label>
+      <select id="add-mod-parent" style="width:100%;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);margin-bottom:12px">
+        <option value="">(root level)</option>
+      </select>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="doAddModule()">Add</button>
+        <button class="btn" onclick="closeModals()">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <!-- TODOs panel -->
@@ -1494,10 +1705,11 @@ async function arbitrate(id, action) {
 function switchMainTab(el, panelId) {
   document.getElementById('main-tab-bar').querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
-  ['main-tasks','main-todos','main-sysinfo'].forEach(id => {
+  ['main-tasks','main-todos','main-explore','main-sysinfo'].forEach(id => {
     document.getElementById(id).style.display = (id === panelId) ? '' : 'none';
   });
   if (panelId === 'main-todos') loadTodos();
+  if (panelId === 'main-explore') loadExploreModules();
   if (panelId === 'main-sysinfo') loadSysInfo();
 }
 
@@ -1954,6 +2166,286 @@ async function deleteSelected() {
   if (!await uiConfirm(`Delete ${ids.length} TODO item(s)?`, 'Confirm Deletion')) return;
   await api('/api/todos/delete', {method:'POST', body: JSON.stringify({ids})});
   await loadTodos();
+}
+
+// ── Explore System ──────────────────────────────────────────────────
+
+let _exploreModules = [];
+let _selectedModuleId = null;
+const _catColors = {
+  performance: '#f85149',
+  concurrency: '#d29922',
+  error_handling: '#f0883e',
+  maintainability: '#58a6ff',
+  security: '#bc8cff',
+};
+
+function catColor(cat) { return _catColors[cat] || 'var(--text-dim)'; }
+
+function statusDotColor(status) {
+  if (status === 'done') return 'var(--green)';
+  if (status === 'in_progress') return 'var(--yellow)';
+  if (status === 'stale') return 'var(--orange)';
+  return 'rgba(255,255,255,0.15)';
+}
+
+async function loadExploreModules() {
+  try {
+    _exploreModules = await api('/api/explore/modules');
+  } catch(e) { _exploreModules = []; }
+  renderExploreTree();
+  if (_selectedModuleId) showModuleDetail(_selectedModuleId);
+}
+
+function renderExploreTree() {
+  const tree = document.getElementById('explore-tree');
+  if (!_exploreModules.length) {
+    tree.innerHTML = '<span style="color:var(--text-dim);font-size:12px">No modules yet. Click "Initialize Map" to scan the repository.</span>';
+    return;
+  }
+  const byParent = {};
+  for (const m of _exploreModules) {
+    const pid = m.parent_id || '';
+    (byParent[pid] = byParent[pid] || []).push(m);
+  }
+
+  function renderNode(mod) {
+    const children = byParent[mod.id] || [];
+    const hasChildren = children.length > 0;
+    const catStatus = mod.category_status || {};
+    const dots = Object.entries(catStatus).map(([cat, st]) =>
+      `<span class="exp-cat-dot" style="background:${statusDotColor(st)};border-color:${catColor(cat)}" title="${cat}: ${st}"></span>`
+    ).join('');
+    const sel = mod.id === _selectedModuleId ? ' selected' : '';
+    let html = `<div class="exp-node" data-id="${mod.id}">
+      <div class="exp-node-inner${sel}" onclick="selectModule('${mod.id}')">
+        <span class="exp-toggle" onclick="event.stopPropagation();toggleExpNode(this)">${hasChildren ? '&#9660;' : '&nbsp;'}</span>
+        <span class="exp-name">${esc(mod.name)}</span>
+        <span class="exp-path" title="${esc(mod.path)}">${esc(mod.path)}</span>
+        <span class="exp-cats">${dots}</span>
+      </div>`;
+    if (hasChildren) {
+      html += `<div class="exp-children">`;
+      for (const child of children) html += renderNode(child);
+      html += `</div>`;
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  const roots = byParent[''] || byParent[undefined] || [];
+  tree.innerHTML = roots.map(r => renderNode(r)).join('');
+}
+
+function toggleExpNode(toggleEl) {
+  const node = toggleEl.closest('.exp-node');
+  const children = node.querySelector('.exp-children');
+  if (!children) return;
+  const collapsed = children.style.display === 'none';
+  children.style.display = collapsed ? '' : 'none';
+  toggleEl.innerHTML = collapsed ? '&#9660;' : '&#9654;';
+}
+
+function selectModule(moduleId) {
+  _selectedModuleId = moduleId;
+  // Update selected state in tree
+  document.querySelectorAll('.exp-node-inner').forEach(el => el.classList.remove('selected'));
+  const node = document.querySelector(`.exp-node[data-id="${moduleId}"] > .exp-node-inner`);
+  if (node) node.classList.add('selected');
+  showModuleDetail(moduleId);
+}
+
+async function showModuleDetail(moduleId) {
+  const panel = document.getElementById('explore-detail');
+  panel.innerHTML = '<span style="color:var(--text-dim);font-size:12px">Loading...</span>';
+  try {
+    const data = await api(`/api/explore/modules/${moduleId}`);
+    const m = data.module;
+    const runs = data.runs || [];
+
+    let html = `<div style="margin-bottom:12px">
+      <h3 style="font-size:16px;font-weight:600;margin-bottom:4px">${esc(m.name)}</h3>
+      <div style="font-family:monospace;font-size:12px;color:var(--text-dim);margin-bottom:6px">${esc(m.path)}</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${esc(m.description || 'No description')}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-sm" style="color:var(--green)" onclick="exploreModule('${m.id}')">&#9654; Explore</button>
+        <button class="btn btn-sm" style="color:var(--red)" onclick="deleteModule('${m.id}')">&#128465; Delete</button>
+        <button class="btn btn-sm" onclick="resetModuleStatuses('${m.id}')">&#8634; Reset</button>
+      </div>
+    </div>`;
+
+    // Category grid
+    const catStatus = m.category_status || {};
+    const catNotes = m.category_notes || {};
+    html += `<div style="margin-bottom:16px"><h4 style="font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Categories</h4>`;
+    html += `<div class="exp-detail-cats">`;
+    for (const [cat, st] of Object.entries(catStatus)) {
+      const note = catNotes[cat] || '';
+      const stColor = statusDotColor(st);
+      const stBg = st === 'done' ? 'rgba(63,185,80,0.1)' : st === 'in_progress' ? 'rgba(210,153,34,0.1)' : 'transparent';
+      html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg}">
+        <span class="exp-cat-label" style="color:${catColor(cat)}">${cat.replace(/_/g,' ')}</span>
+        <span class="exp-cat-status" style="color:${stColor}">${st}</span>
+        <span style="flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(note)}">${esc(note.slice(0,80)) || '-'}</span>
+      </div>`;
+    }
+    html += `</div></div>`;
+
+    // Runs & findings
+    if (runs.length) {
+      html += `<h4 style="font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Exploration Runs (${runs.length})</h4>`;
+      for (const run of runs) {
+        const findings = run.findings || [];
+        html += `<div style="margin-bottom:12px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+          <div style="padding:10px 12px;background:rgba(255,255,255,0.02);display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+            <div>
+              <span style="font-weight:600;color:${catColor(run.category)}">${run.category.replace(/_/g,' ')}</span>
+              <span style="font-size:11px;color:var(--text-dim);margin-left:8px">${esc(run.personality)}</span>
+              <span style="font-size:11px;color:var(--text-dim);margin-left:8px">${run.duration_sec.toFixed(1)}s</span>
+            </div>
+            <div>
+              <span style="font-size:12px;color:${findings.length ? 'var(--yellow)' : 'var(--green)'}">${findings.length} finding${findings.length !== 1 ? 's' : ''}</span>
+            </div>
+          </div>
+          <div style="display:none;padding:12px">`;
+        if (run.summary) {
+          html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">${esc(run.summary)}</div>`;
+        }
+        for (let fi = 0; fi < findings.length; fi++) {
+          const f = findings[fi];
+          html += `<div class="exp-finding" style="border-left:3px solid">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+              <div class="exp-finding-title sev-${f.severity}">[${f.severity}] ${esc(f.title)}</div>
+              <button class="btn btn-sm" style="font-size:10px;flex-shrink:0" onclick="createTaskFromFinding('${run.id}',${fi})">&#8594; Task</button>
+            </div>
+            <div class="exp-finding-desc">${esc(f.description)}</div>
+            <div class="exp-finding-meta">${esc(f.file_path)}${f.line_number ? ':' + f.line_number : ''}</div>
+            ${f.suggested_fix ? `<div style="font-size:11px;color:var(--accent);margin-top:4px"><b>Fix:</b> ${esc(f.suggested_fix)}</div>` : ''}
+          </div>`;
+        }
+        html += `</div></div>`;
+      }
+    }
+
+    panel.innerHTML = html;
+  } catch(e) {
+    panel.innerHTML = `<span style="color:var(--red)">${esc(String(e))}</span>`;
+  }
+}
+
+async function initExploreMap() {
+  const btn = document.getElementById('explore-init-btn');
+  if (!await uiConfirm('This will re-scan the repository and replace the current module map. Continue?', 'Initialize Explore Map')) return;
+  btn.disabled = true; btn.textContent = 'Initializing...';
+  try {
+    await api('/api/explore/init-map', {method:'POST'});
+    await uiAlert('Map initialization started in background. Refresh in a moment to see results.', 'Map Init Started');
+  } catch(e) {
+    await uiAlert('Init failed: ' + e, 'Error');
+  } finally {
+    btn.disabled = false; btn.innerHTML = '&#9881; Initialize Map';
+  }
+  setTimeout(loadExploreModules, 3000);
+}
+
+async function startExploration() {
+  const btn = document.getElementById('explore-start-btn');
+  btn.disabled = true; btn.textContent = 'Starting...';
+  try {
+    const res = await api('/api/explore/start', {method:'POST'});
+    if (res.started > 0) {
+      await uiAlert(`Started ${res.started} exploration run(s). Progress will update in the module detail view.`, 'Exploration Started');
+    } else {
+      await uiAlert('No TODO categories found to explore. All modules may already be explored.', 'Nothing to Explore');
+    }
+  } catch(e) {
+    await uiAlert('Start failed: ' + e, 'Error');
+  } finally {
+    btn.disabled = false; btn.innerHTML = '&#9654; Start Exploration';
+  }
+  setTimeout(loadExploreModules, 2000);
+}
+
+async function exploreModule(moduleId) {
+  try {
+    const res = await api('/api/explore/start', {method:'POST', body: JSON.stringify({module_ids: [moduleId]})});
+    await uiAlert(`Started ${res.started} exploration run(s) for this module.`, 'Exploration Started');
+    setTimeout(() => showModuleDetail(moduleId), 2000);
+  } catch(e) {
+    await uiAlert('Explore failed: ' + e, 'Error');
+  }
+}
+
+async function deleteModule(moduleId) {
+  if (!await uiConfirm('Delete this module and all its children?', 'Delete Module')) return;
+  try {
+    await fetch(`/api/explore/modules/${moduleId}`, {method:'DELETE'});
+    _selectedModuleId = null;
+    document.getElementById('explore-detail').innerHTML = '<span style="color:var(--text-dim);font-size:12px">Module deleted.</span>';
+    await loadExploreModules();
+  } catch(e) {
+    await uiAlert('Delete failed: ' + e, 'Error');
+  }
+}
+
+async function resetModuleStatuses(moduleId) {
+  if (!await uiConfirm('Reset all category statuses to TODO for this module?', 'Reset Module')) return;
+  try {
+    const mod = _exploreModules.find(m => m.id === moduleId);
+    if (!mod) return;
+    const resetStatus = {};
+    for (const cat of Object.keys(mod.category_status || {})) resetStatus[cat] = 'todo';
+    await api(`/api/explore/modules/${moduleId}/update`, {method:'POST', body: JSON.stringify({category_status: resetStatus})});
+    await loadExploreModules();
+    showModuleDetail(moduleId);
+  } catch(e) {
+    await uiAlert('Reset failed: ' + e, 'Error');
+  }
+}
+
+async function createTaskFromFinding(runId, findingIndex) {
+  try {
+    const res = await api(`/api/explore/runs/${runId}/create-task`, {
+      method:'POST', body: JSON.stringify({finding_index: findingIndex})
+    });
+    if (res.error) { await uiAlert(res.error, 'Error'); return; }
+    await uiAlert(`Task created: ${res.title}`, 'Task Created');
+    refresh();
+  } catch(e) {
+    await uiAlert('Failed: ' + e, 'Error');
+  }
+}
+
+function showAddModuleModal() {
+  // Populate parent select
+  const sel = document.getElementById('add-mod-parent');
+  sel.innerHTML = '<option value="">(root level)</option>';
+  for (const m of _exploreModules) {
+    const indent = '  '.repeat(m.depth || 0);
+    sel.innerHTML += `<option value="${m.id}">${indent}${esc(m.name)} (${esc(m.path)})</option>`;
+  }
+  document.getElementById('add-mod-name').value = '';
+  document.getElementById('add-mod-path').value = '';
+  document.getElementById('add-mod-desc').value = '';
+  document.getElementById('add-module-modal').classList.add('active');
+}
+
+async function doAddModule() {
+  const name = document.getElementById('add-mod-name').value.trim();
+  const path = document.getElementById('add-mod-path').value.trim();
+  const desc = document.getElementById('add-mod-desc').value.trim();
+  const parentId = document.getElementById('add-mod-parent').value;
+  if (!name) { await uiAlert('Name is required.'); return; }
+  try {
+    const res = await api('/api/explore/modules', {method:'POST', body: JSON.stringify({
+      name, path, description: desc, parent_id: parentId
+    })});
+    if (res.error) { await uiAlert(res.error, 'Error'); return; }
+    closeModals();
+    await loadExploreModules();
+  } catch(e) {
+    await uiAlert('Add failed: ' + e, 'Error');
+  }
 }
 
 initOverlayClose();

@@ -1,7 +1,9 @@
 """Orchestrator: dispatches tasks to agents, manages lifecycle and parallelism."""
 
+import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -10,11 +12,15 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Dict, List, Optional, Set
 
 from agents.coder import CoderAgent
+from agents.explorer import ExplorerAgent
 from agents.planner import PlannerAgent
 from agents.reviewer import ReviewerAgent
 from core.database import Database
 from core.dep_tracker import DependencyTracker
-from core.models import AgentRun, ModelOutputError, Task, TaskPriority, TaskSource, TaskStatus, TodoItem, TodoItemStatus
+from core.models import (
+    AgentRun, ExploreModule, ExploreRun, ExploreStatus, ModelOutputError,
+    Task, TaskPriority, TaskSource, TaskStatus, TodoItem, TodoItemStatus,
+)
 from core.opencode_client import OpenCodeClient
 from core.worktree import WorktreeManager
 
@@ -1485,3 +1491,317 @@ class Orchestrator:
         poll_interval = self.config["orchestrator"]["poll_interval"]
         while self.running:
             time.sleep(poll_interval)
+
+    # ── Exploration System ────────────────────────────────────────────────
+
+    def _get_explore_categories(self) -> List[str]:
+        from agents.prompts import DEFAULT_EXPLORE_CATEGORIES
+        return self.config.get("explore", {}).get(
+            "categories", DEFAULT_EXPLORE_CATEGORIES
+        )
+
+    def _get_explorer_model(self) -> str:
+        return self.config.get("explore", {}).get(
+            "explorer_model",
+            self.config["opencode"].get("planner_model", ""),
+        )
+
+    def init_explore_map(self) -> dict:
+        """Run the map-init agent to discover the project module structure.
+
+        Clears existing modules and replaces them with the agent's output.
+        Returns ``{"modules_created": N}``.
+        """
+        repo_path = self.config["repo"]["path"]
+        model = self.config.get("explore", {}).get(
+            "map_model", self._get_explorer_model()
+        )
+        explorer = ExplorerAgent(model=model, client=self.client)
+
+        try:
+            run, modules_data = explorer.init_map(repo_path)
+        except Exception as e:
+            log.error("Map init failed: %s", e)
+            return {"error": str(e)}
+
+        # Save the agent run for audit
+        agent_run = AgentRun(
+            task_id="__map_init__",
+            agent_type="explorer_map_init",
+            model=model,
+            prompt=run.prompt,
+            output=run.output,
+            exit_code=run.exit_code,
+            duration_sec=run.duration_sec,
+            session_id=run.session_id,
+        )
+        self.db.save_agent_run(agent_run)
+
+        # Clear old map
+        self.db.delete_all_explore_modules()
+
+        categories = self._get_explore_categories()
+
+        def _create_modules(items, parent_id="", depth=0):
+            created = []
+            for i, item in enumerate(items):
+                mod = ExploreModule(
+                    name=item.get("name", ""),
+                    path=item.get("path", ""),
+                    parent_id=parent_id,
+                    depth=depth,
+                    description=item.get("description", ""),
+                    category_status={c: ExploreStatus.TODO.value for c in categories},
+                    category_notes={c: "" for c in categories},
+                    sort_order=i,
+                )
+                self.db.save_explore_module(mod)
+                created.append(mod)
+                children = item.get("children", [])
+                if children:
+                    created.extend(_create_modules(children, mod.id, depth + 1))
+            return created
+
+        all_modules = _create_modules(modules_data)
+        log.info("Explore map initialized: %d modules created", len(all_modules))
+        return {"modules_created": len(all_modules)}
+
+    def start_exploration(
+        self,
+        module_ids: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+    ) -> dict:
+        """Start exploration on selected modules x categories.
+
+        Picks leaf modules with TODO cells if *module_ids* is empty.
+        Returns ``{"started": N}``.
+        """
+        from agents.prompts import EXPLORER_PERSONALITIES
+
+        all_modules = self.db.get_all_explore_modules()
+        if module_ids:
+            modules = [m for m in all_modules if m.id in set(module_ids)]
+        else:
+            # Pick leaf modules (no children) with at least one TODO cell
+            child_parent_ids = {m.parent_id for m in all_modules}
+            modules = [m for m in all_modules if m.id not in child_parent_ids]
+
+        cats = categories or self._get_explore_categories()
+        started = 0
+
+        for mod in modules:
+            for cat in cats:
+                # Re-read from DB to avoid stale overwrites when runs
+                # complete synchronously (or very fast).
+                fresh = self.db.get_explore_module(mod.id)
+                if fresh.category_status.get(cat) != ExploreStatus.TODO.value:
+                    continue
+                # Mark IN_PROGRESS
+                fresh.category_status[cat] = ExploreStatus.IN_PROGRESS.value
+                fresh.updated_at = time.time()
+                self.db.save_explore_module(fresh)
+
+                personality_key = self._pick_personality_for_category(cat)
+                self._pool.submit(
+                    self._run_exploration, mod.id, cat, personality_key
+                )
+                started += 1
+
+        log.info("Exploration started: %d runs queued", started)
+        return {"started": started}
+
+    def _pick_personality_for_category(self, category: str) -> str:
+        """Select a personality whose ``category`` matches the given one."""
+        from agents.prompts import EXPLORER_PERSONALITIES
+
+        candidates = [
+            key for key, info in EXPLORER_PERSONALITIES.items()
+            if info.get("category") == category
+        ]
+        if candidates:
+            return random.choice(candidates)
+        # Fallback: pick any
+        return random.choice(list(EXPLORER_PERSONALITIES.keys()))
+
+    def _run_exploration(self, module_id: str, category: str,
+                         personality_key: str):
+        """Execute a single exploration run (called in thread pool)."""
+        from agents.prompts import EXPLORER_PERSONALITIES
+
+        try:
+            module = self.db.get_explore_module(module_id)
+            assert module is not None, f"module {module_id} vanished from DB"
+            personality = EXPLORER_PERSONALITIES[personality_key]
+            repo_path = self.config["repo"]["path"]
+            model = self._get_explorer_model()
+
+            explorer = ExplorerAgent(model=model, client=self.client)
+            run, findings, summary = explorer.explore_module(
+                module=module,
+                category=category,
+                personality_focus=personality["focus"],
+                personality_name=personality["name"],
+                repo_path=repo_path,
+            )
+
+            # Save ExploreRun
+            explore_run = ExploreRun(
+                module_id=module_id,
+                category=category,
+                personality=personality_key,
+                model=model,
+                prompt=run.prompt,
+                output=run.output,
+                session_id=run.session_id,
+                findings=findings,
+                summary=summary,
+                issue_count=len(findings),
+                exit_code=run.exit_code,
+                duration_sec=run.duration_sec,
+            )
+            self.db.save_explore_run(explore_run)
+
+            # Update module status
+            module = self.db.get_explore_module(module_id)
+            module.category_status[category] = ExploreStatus.DONE.value
+            module.category_notes[category] = summary
+            module.updated_at = time.time()
+            self.db.save_explore_module(module)
+
+            # Auto-create tasks for severe findings
+            auto_severity = self.config.get("explore", {}).get(
+                "auto_task_severity", "major"
+            )
+            severity_levels = ["critical", "major", "minor", "info"]
+            threshold_idx = severity_levels.index(auto_severity) if auto_severity in severity_levels else 1
+            for finding in findings:
+                sev = finding.get("severity", "info")
+                if sev in severity_levels[:threshold_idx + 1]:
+                    self._create_explore_task(module, category, finding)
+
+            log.info(
+                "Exploration complete: module=%s category=%s findings=%d",
+                module.name, category, len(findings),
+            )
+
+        except Exception as e:
+            log.error(
+                "Exploration failed: module=%s category=%s: %s\n%s",
+                module_id, category, e, traceback.format_exc(),
+            )
+            # Reset status so it can be retried
+            module = self.db.get_explore_module(module_id)
+            if module:
+                module.category_status[category] = ExploreStatus.TODO.value
+                module.updated_at = time.time()
+                self.db.save_explore_module(module)
+
+    @staticmethod
+    def _build_explore_task(module_name: str, module_path: str,
+                            category: str, finding: dict) -> "Task":
+        """Build a Task object from an exploration finding (no DB save)."""
+        return Task(
+            title=f"[Explore/{category}] {finding['title']}",
+            description=(
+                f"**Found by exploration** in module `{module_name}` ({module_path})\n"
+                f"**Category**: {category}\n"
+                f"**Severity**: {finding['severity']}\n\n"
+                f"{finding['description']}\n\n"
+                f"**Suggested fix**: {finding.get('suggested_fix', 'N/A')}"
+            ),
+            priority=(
+                TaskPriority.HIGH if finding["severity"] == "critical"
+                else TaskPriority.MEDIUM
+            ),
+            source=TaskSource.EXPLORE,
+            file_path=finding.get("file_path", ""),
+            line_number=finding.get("line_number", 0),
+        )
+
+    def _create_explore_task(self, module: ExploreModule, category: str,
+                             finding: dict):
+        """Create and persist a Task from an exploration finding."""
+        task = self._build_explore_task(
+            module.name, module.path, category, finding
+        )
+        self.db.save_task(task)
+        log.info("Created explore task [%s]: %s", task.id, task.title)
+
+    def update_explore_module(self, module_id: str, updates: dict) -> dict:
+        """Update an explore module's editable fields.
+
+        *updates* may contain: name, description, category_status, category_notes.
+        """
+        module = self.db.get_explore_module(module_id)
+        if not module:
+            return {"error": "Module not found"}
+        if "name" in updates:
+            module.name = updates["name"]
+        if "description" in updates:
+            module.description = updates["description"]
+        if "category_status" in updates:
+            for cat, status in updates["category_status"].items():
+                module.category_status[cat] = status
+        if "category_notes" in updates:
+            for cat, note in updates["category_notes"].items():
+                module.category_notes[cat] = note
+        module.updated_at = time.time()
+        self.db.save_explore_module(module)
+        return module.to_dict()
+
+    def add_explore_module(self, name: str, path: str, parent_id: str = "",
+                           description: str = "") -> dict:
+        """Manually add a module to the exploration map."""
+        # Determine depth from parent
+        depth = 0
+        if parent_id:
+            parent = self.db.get_explore_module(parent_id)
+            if not parent:
+                return {"error": "Parent module not found"}
+            depth = parent.depth + 1
+
+        categories = self._get_explore_categories()
+        module = ExploreModule(
+            name=name,
+            path=path,
+            parent_id=parent_id,
+            depth=depth,
+            description=description,
+            category_status={c: ExploreStatus.TODO.value for c in categories},
+            category_notes={c: "" for c in categories},
+        )
+        self.db.save_explore_module(module)
+        return module.to_dict()
+
+    def delete_explore_module(self, module_id: str) -> dict:
+        """Delete a module and all its descendants from the map."""
+        module = self.db.get_explore_module(module_id)
+        if not module:
+            return {"error": "Module not found"}
+        # Recursively delete children
+        children = self.db.get_child_modules(module_id)
+        for child in children:
+            self.delete_explore_module(child.id)
+        self.db.delete_explore_module(module_id)
+        return {"deleted": True}
+
+    def create_task_from_finding(self, run_id: str, finding_index: int) -> dict:
+        """Create a Task from a specific finding in an ExploreRun."""
+        explore_run = self.db.get_explore_run(run_id)
+        if not explore_run:
+            return {"error": "Explore run not found"}
+        if finding_index < 0 or finding_index >= len(explore_run.findings):
+            return {"error": "Invalid finding index"}
+
+        finding = explore_run.findings[finding_index]
+        module = self.db.get_explore_module(explore_run.module_id)
+        module_name = module.name if module else "unknown"
+        module_path = module.path if module else ""
+
+        task = self._build_explore_task(
+            module_name, module_path, explore_run.category, finding
+        )
+        self.db.save_task(task)
+        log.info("Created task [%s] from explore run [%s] finding #%d",
+                 task.id, run_id, finding_index)
+        return task.to_dict()
