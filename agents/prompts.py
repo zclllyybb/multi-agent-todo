@@ -401,6 +401,7 @@ Module description: {module_description}
 You are specifically looking for **{category}** issues. Focus on:
 {effective_focus}
 You should first understand the overall logic, composition, and the role of each part of the module. Choose a part that has not been handled by predecessors and that you believe is worth in-depth exploration. For the part you choose to explore in-depth, you should fully understand its code logic and conduct open exploration, assuming that there are flaws in this part of the code related to the issues at hand, and identify the most worthy points to fix.
+Minor issues can be ignored, focusing only on places that clearly affect code quality and reliability. Any place can be assumed to be wrong, and any issue of any size can be explored with effort.
 If the issue you discover is not obvious, you must provide evidence. For example, for concurrency conflicts, you must specify exactly which operations might access the related resources simultaneously and that they indeed do so concurrently; for performance issues, there must be no other guarantees that make the complexity here better than it appears; and so on.
 After finding the issue, you should come up with reasonable improvement methods and reconfirm them by combining the problem and the improvement approach: the problem exists and has improvement value, and the improvement method is feasible.
 
