@@ -1,5 +1,7 @@
 """Tests for core/opencode_client.py: pure parsing methods (no subprocess)."""
 
+import subprocess
+
 import pytest
 
 from core.opencode_client import OpenCodeClient
@@ -248,3 +250,44 @@ class TestExtractLastTextBlock:
             (["final answer"], [], "stop"),
         )
         assert client.extract_last_text_block(output) == "final answer"
+
+
+class TestExecTimeout:
+
+    def test_exec_timeout_keeps_partial_output_for_session_id(self, client, tmp_path, monkeypatch):
+        class _Tail:
+            def __init__(self, text):
+                self._text = text
+
+            def read(self):
+                return self._text
+
+        class _FakeProc:
+            def __init__(self):
+                self.stdout = _Tail('{"type":"text","part":{"text":"tail"}}\n')
+                self.stderr = _Tail("")
+                self.returncode = None
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired(
+                    cmd=["opencode"],
+                    timeout=timeout,
+                    output='{"sessionID":"ses_timeout_1"}\n',
+                    stderr="",
+                )
+
+            def kill(self):
+                return None
+
+            def wait(self):
+                self.returncode = -1
+                return -1
+
+        monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
+
+        output, exit_code, _ = client._exec(["opencode", "run"], str(tmp_path))
+
+        assert exit_code == -1
+        assert "TIMEOUT after 10s" in output
+        assert '{"sessionID":"ses_timeout_1"}' in output
+        assert client.extract_session_id(output) == "ses_timeout_1"

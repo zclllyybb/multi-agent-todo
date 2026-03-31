@@ -799,3 +799,78 @@ class TestNoRecursiveSplit:
         assert len(children) == 2
         # Coder should NOT have been called on the parent
         orch._default_coder.implement_task.assert_not_called()
+
+
+class TestCoderRunFailureClassification:
+
+    def _make_execute_orchestrator(self, tmp_db):
+        from core.orchestrator import Orchestrator
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {
+            "repo": {"path": "/r", "base_branch": "master",
+                     "worktree_dir": "/wt", "worktree_hooks": []},
+            "opencode": {"planner_model": "m", "coder_model_default": "m",
+                         "reviewer_models": [], "coder_model_by_complexity": {}},
+            "orchestrator": {"max_retries": 0, "max_workers": 1,
+                              "max_parallel_tasks": 4},
+            "database": {"path": ":memory:"}, "publish": {"remote": "origin"},
+        }
+        orch.db = tmp_db
+        orch.worktree_mgr = MagicMock()
+        orch.worktree_mgr.create_worktree.return_value = "/wt/branch"
+        orch.client = MagicMock()
+        orch.dep_tracker = MagicMock()
+        orch.dep_tracker.get_children.return_value = set()
+        orch.dep_tracker.is_blocked.return_value = False
+        orch.dep_tracker.resolve_indices.return_value = [[], []]
+        orch._coder_by_complexity = {}
+        orch._default_coder = MagicMock()
+        orch.reviewers = []
+        orch.planner = MagicMock()
+        orch._lock = __import__("threading").Lock()
+        orch._futures = {}
+        orch._executor = MagicMock()
+        return orch
+
+    def test_timeout_error_not_reported_as_incomplete(self, tmp_db, make_task):
+        from core.models import AgentRun
+
+        task = make_task(status=TaskStatus.PENDING, source=TaskSource.MANUAL)
+        tmp_db.save_task(task)
+        orch = self._make_execute_orchestrator(tmp_db)
+
+        plan_run = AgentRun(
+            task_id=task.id,
+            agent_type="planner",
+            model="m",
+            prompt="p",
+            output="o",
+            exit_code=0,
+        )
+        orch.planner.analyze_and_split.return_value = (
+            plan_run,
+            False,
+            "plan text",
+            [],
+            "simple",
+        )
+
+        timeout_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="p",
+            output='{"sessionID":"ses_timeout_case"}\nTIMEOUT after 7200s',
+            exit_code=-1,
+            session_id="ses_timeout_case",
+        )
+        orch._default_coder.implement_task.return_value = (timeout_run, "")
+        orch.client.is_output_complete.return_value = False
+
+        orch._execute_task(task.id)
+
+        saved = tmp_db.get_task(task.id)
+        assert saved.status == TaskStatus.FAILED
+        assert "TIMEOUT after 7200s" in saved.error
+        assert "timed out" in saved.error.lower()
+        assert "incomplete" not in saved.error.lower()

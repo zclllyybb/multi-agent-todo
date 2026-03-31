@@ -64,12 +64,31 @@ class OpenCodeClient:
 
             return stdout, exit_code, duration
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as timeout_err:
+            partial_stdout = timeout_err.stdout or ""
+            partial_stderr = timeout_err.stderr or ""
+            if isinstance(partial_stdout, bytes):
+                partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+            if isinstance(partial_stderr, bytes):
+                partial_stderr = partial_stderr.decode("utf-8", errors="replace")
             proc.kill()
             proc.wait()
+            if proc.stdout is not None:
+                tail = proc.stdout.read() or ""
+                partial_stdout += tail
+            if proc.stderr is not None:
+                tail_err = proc.stderr.read() or ""
+                partial_stderr += tail_err
             duration = time.time() - start
+            if partial_stderr:
+                log.warning("opencode timeout stderr: %s", partial_stderr.strip()[:500])
             log.error("opencode timed out after %ds", self.timeout)
-            return f"TIMEOUT after {self.timeout}s", -1, duration
+            timeout_marker = f"TIMEOUT after {self.timeout}s"
+            merged_output = partial_stdout
+            if merged_output and not merged_output.endswith("\n"):
+                merged_output += "\n"
+            merged_output += timeout_marker
+            return merged_output, -1, duration
         finally:
             with self._proc_lock:
                 self._active_procs.discard(proc)
@@ -137,7 +156,12 @@ class OpenCodeClient:
                     log.error("opencode timed out after %ds", self.timeout)
                     self._terminate_proc(proc)
                     duration = time.time() - start
-                    return f"TIMEOUT after {self.timeout}s", -1, duration, sid, False
+                    timeout_marker = f"TIMEOUT after {self.timeout}s"
+                    timed_out_output = "".join(chunks)
+                    if timed_out_output and not timed_out_output.endswith("\n"):
+                        timed_out_output += "\n"
+                    timed_out_output += timeout_marker
+                    return timed_out_output, -1, duration, sid, False
 
                 ready, _, _ = select.select([stdout], [], [], 0.2)
                 if ready:

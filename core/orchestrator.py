@@ -624,6 +624,69 @@ class Orchestrator:
         log.debug("Task [%s] revised with feedback: %s", task_id, feedback)
         return {"ok": True, "task_id": task_id}
 
+    def resume_task(self, task_id: str, message: str = "Continue") -> dict:
+        """Resume a failed task from the last coder session with user input.
+
+        This is intended for mid-run interruptions (timeout/process crash).
+        The first resumed coder invocation sends *message* directly into the
+        existing session (e.g. "Continue"), then proceeds with normal
+        code→review flow.
+        """
+        task = self.db.get_task(task_id)
+        if not task:
+            return {"error": "Task not found"}
+        if task.status != TaskStatus.FAILED:
+            return {"error": f"Cannot resume task in {task.status.value} state"}
+        if task.task_mode != "develop":
+            return {"error": "Resume is only supported for develop-mode tasks"}
+        if not task.worktree_path:
+            return {"error": "Task has no worktree; cannot resume coder session"}
+
+        coder_session_id = self._latest_coder_session_id(task)
+        if not coder_session_id:
+            return {
+                "error": (
+                    "No coder session found for this task. "
+                    "Use Revise with feedback to restart the loop."
+                )
+            }
+
+        resume_message = (message or "").strip() or "Continue"
+
+        manual_run = AgentRun(
+            task_id=task_id,
+            agent_type="manual_review",
+            model="user",
+            prompt="",
+            output=resume_message,
+            exit_code=0,
+            duration_sec=0.0,
+        )
+        self.db.save_agent_run(manual_run)
+
+        task.user_feedback = resume_message
+        task.review_pass = False
+        task.status = TaskStatus.PENDING
+        task.error = ""
+        task.completed_at = 0.0
+        task.updated_at = time.time()
+        self.db.save_task(task)
+
+        if not self._dispatch_resume(task_id, resume_message):
+            return {"error": "Task could not be resumed right now (already running or at parallel limit)"}
+
+        log.info(
+            "Resume task [%s] using coder session=%s message=%r",
+            task_id,
+            coder_session_id,
+            resume_message,
+        )
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "session_id": coder_session_id,
+        }
+
     def resolve_arbitration(self, task_id: str, action: str,
                             feedback: str = "") -> dict:
         """Resolve a NEEDS_ARBITRATION task via human decision.
@@ -684,7 +747,32 @@ class Orchestrator:
             log.info("Dispatched revise for task: %s", task_id)
             return True
 
-    def _revise_task_pipeline(self, task_id: str):
+    def _dispatch_resume(self, task_id: str, first_message: str) -> bool:
+        """Submit a resume-task: continue coder session with a raw first message."""
+        with self._lock:
+            if task_id in self._futures:
+                log.warning("Task already running: %s", task_id)
+                return False
+            max_p = self.config["orchestrator"]["max_parallel_tasks"]
+            if len(self._futures) >= max_p:
+                log.warning("Max parallel tasks reached (%d)", max_p)
+                return False
+            future = self._pool.submit(
+                self._revise_task_pipeline,
+                task_id,
+                first_message,
+                True,
+            )
+            self._futures[task_id] = future
+            log.info("Dispatched resume for task: %s", task_id)
+            return True
+
+    def _revise_task_pipeline(
+        self,
+        task_id: str,
+        first_coder_message: str = "",
+        first_message_raw: bool = False,
+    ):
         """Coder→reviewer loop for a revised task (skips planning + worktree creation)."""
         task = self.db.get_task(task_id)
         if not task:
@@ -698,13 +786,10 @@ class Orchestrator:
                      task.id, coder.model, worktree_path)
 
             # Recover the last coder session id so the coder retains full context
-            coder_session_id = ""
-            coder_sessions = task.session_ids.get("coder", [])
-            if coder_sessions:
-                coder_session_id = coder_sessions[-1]
+            coder_session_id = self._latest_coder_session_id(task)
 
             # Read the user's manual feedback (stored separately from model review output)
-            user_feedback = task.user_feedback
+            user_feedback = first_coder_message or task.user_feedback
 
             for attempt in range(task.max_retries + 1):
                 task = self.db.get_task(task_id)
@@ -720,11 +805,19 @@ class Orchestrator:
                 # Always use retry_with_feedback since coder already has task context.
                 # First attempt: send user_feedback; subsequent attempts: send model reviewer output.
                 coder_feedback = user_feedback if attempt == 0 else task.review_output
-                code_run, code_text = coder.retry_with_feedback(
-                    task, worktree_path,
-                    review_feedback=coder_feedback,
-                    session_id=coder_session_id,
-                )
+                if attempt == 0 and first_message_raw:
+                    code_run, code_text = coder.continue_session(
+                        task,
+                        worktree_path,
+                        user_message=coder_feedback,
+                        session_id=coder_session_id,
+                    )
+                else:
+                    code_run, code_text = coder.retry_with_feedback(
+                        task, worktree_path,
+                        review_feedback=coder_feedback,
+                        session_id=coder_session_id,
+                    )
                 self.db.save_agent_run(code_run)
                 task.code_output = code_text
                 if code_run.session_id:
@@ -732,6 +825,8 @@ class Orchestrator:
                     task.session_ids.setdefault("coder", []).append(code_run.session_id)
                 task.updated_at = time.time()
                 self.db.save_task(task)
+
+                self._ensure_coder_run_success(code_run, attempt + 1)
 
                 # Re-check cancellation
                 task = self.db.get_task(task_id)
@@ -1243,6 +1338,46 @@ class Orchestrator:
                     f"Todo [{item.id}] analyzer failed after retry: {second_err}"
                 ) from second_err
 
+    def _latest_coder_session_id(self, task: Task) -> str:
+        """Return the latest known coder session id for a task."""
+        coder_sessions = task.session_ids.get("coder", [])
+        if coder_sessions:
+            return coder_sessions[-1]
+
+        runs = self.db.get_runs_for_task(task.id)
+        for run in sorted(runs, key=lambda r: r.created_at, reverse=True):
+            if run.agent_type == "coder" and run.session_id:
+                return run.session_id
+        return ""
+
+    def _ensure_coder_run_success(self, code_run: AgentRun, attempt: int):
+        """Validate coder run result and raise an accurate failure error."""
+        if code_run.exit_code == 0:
+            if self.client.is_output_complete(code_run.output):
+                return
+            raise RuntimeError(
+                f"Coder output is incomplete — the last step has no "
+                f"'stop' finish reason (session={code_run.session_id}, "
+                f"attempt={attempt}). The model may have been truncated "
+                f"or crashed mid-step."
+            )
+
+        timeout_marker = ""
+        for line in reversed(code_run.output.splitlines()):
+            if line.startswith("TIMEOUT after "):
+                timeout_marker = line.strip()
+                break
+        if timeout_marker:
+            raise RuntimeError(
+                f"Coder run timed out: {timeout_marker} "
+                f"(session={code_run.session_id}, attempt={attempt})."
+            )
+
+        raise RuntimeError(
+            f"Coder run failed with exit_code={code_run.exit_code} "
+            f"(session={code_run.session_id}, attempt={attempt})."
+        )
+
     def _execute_task(self, task_id: str):
         """Full pipeline: plan → code → review (with retry)."""
         task = self.db.get_task(task_id)
@@ -1415,16 +1550,7 @@ class Orchestrator:
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
-                # Validate coder output: the last step must end with
-                # finish_reason='stop'.  A missing stop means the model
-                # output was truncated or the process died mid-step.
-                if not self.client.is_output_complete(code_run.output):
-                    raise RuntimeError(
-                        f"Coder output is incomplete — the last step has no "
-                        f"'stop' finish reason (session={code_run.session_id}, "
-                        f"attempt={attempt + 1}).  The model may have been "
-                        f"truncated or crashed mid-step."
-                    )
+                self._ensure_coder_run_success(code_run, attempt + 1)
 
                 # Re-check cancellation before starting review
                 task = self.db.get_task(task_id)

@@ -65,6 +65,23 @@ class CoderAgent(BaseAgent):
         output_text = self.get_text(run)
         return run, output_text
 
+    def continue_session(
+        self,
+        task: Task,
+        worktree_path: str,
+        user_message: str,
+        session_id: str,
+    ) -> Tuple[AgentRun, str]:
+        """Continue an existing coder session with a raw user-provided message."""
+        run = self.run(
+            user_message,
+            worktree_path,
+            task_id=task.id,
+            session_id=session_id,
+        )
+        output_text = self.get_text(run)
+        return run, output_text
+
     def retry_with_feedback(
         self, task: Task, worktree_path: str,
         review_feedback: str, session_id: str,

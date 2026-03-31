@@ -179,7 +179,7 @@ def coder_implement(title: str, description: str, file_path: str,
     if plan_output:
         parts += [
             "",
-            "## Implementation Plan",
+            "## Implementation Plan(Suggestion, not necessarily followed)",
             plan_output,
         ]
     parts += [

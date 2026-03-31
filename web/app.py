@@ -258,6 +258,19 @@ async def api_revise_task(task_id: str, request: Request):
     return result
 
 
+@app.post("/api/tasks/{task_id}/resume")
+async def api_resume_task(task_id: str, request: Request):
+    """Resume a failed task from the last coder session."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    message = body.get("message", "").strip() or "Continue"
+    result = orchestrator.resume_task(task_id, message)
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
+
+
 @app.post("/api/tasks/{task_id}/arbitrate")
 async def api_arbitrate_task(task_id: str, request: Request):
     """Resolve a NEEDS_ARBITRATION task: approve, revise, or reject."""
@@ -1573,6 +1586,15 @@ async function showDetail(id) {
     </div>`;
   }
   // Revise section for completed/failed tasks with a worktree
+  if (['failed','review_failed'].includes(t.status) && t.worktree_path) {
+    html += `<div class="detail-section" style="margin-top:16px;border:1px solid var(--yellow);border-radius:8px;padding:12px">
+      <h3 style="margin-top:0">Resume Failed Run</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Continue from the last coder session after timeout/interruption. Use <code>Continue</code> or provide a custom resume instruction.</p>
+      <textarea id="resume-message-${t.id}" style="width:100%;height:80px;font-size:13px;margin-bottom:8px">Continue</textarea>
+      <button class="btn" id="resume-btn-${t.id}" style="color:var(--yellow);border-color:var(--yellow)" onclick="resumeTask('${t.id}')">Resume Run</button>
+    </div>`;
+  }
+
   if (['completed','failed','review_failed'].includes(t.status) && t.worktree_path) {
     html += `<div class="detail-section" style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:12px">
       <h3 style="margin-top:0">Revise Task</h3>
@@ -1950,6 +1972,27 @@ async function reviseTask(id) {
     }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Revise'; }
+  }
+}
+
+async function resumeTask(id) {
+  const textarea = document.getElementById('resume-message-' + id);
+  const message = textarea ? textarea.value.trim() : '';
+  const btn = document.getElementById('resume-btn-' + id);
+  if (btn) { btn.disabled = true; btn.textContent = 'Resuming...'; }
+  try {
+    const res = await api(`/api/tasks/${id}/resume`, {
+      method:'POST',
+      body: JSON.stringify({message: message || 'Continue'}),
+    });
+    if (res.error) {
+      await uiAlert('Resume failed: ' + res.error);
+    } else {
+      closeModals();
+      refresh();
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Resume Run'; }
   }
 }
 

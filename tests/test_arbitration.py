@@ -188,3 +188,107 @@ class TestNeedsArbitrationInCleanAndRevise:
         saved = tmp_db.get_task(task.id)
         assert saved.status == TaskStatus.PENDING
         assert saved.user_feedback == "Fix the issue please"
+
+
+class TestResumeTask:
+    """Tests for manual resume of failed coder runs."""
+
+    def test_resume_failed_task_dispatches_resume_pipeline(self, tmp_db, make_task):
+        task = make_task(
+            status=TaskStatus.FAILED,
+            worktree_path="/wt/task",
+            branch_name="agent/task-r1",
+            task_mode="develop",
+            session_ids={"coder": ["ses_resume_1"]},
+            error="Coder run timed out",
+        )
+        tmp_db.save_task(task)
+        orch = _make_orchestrator(tmp_db)
+        orch._dispatch_resume = MagicMock(return_value=True)
+
+        result = orch.resume_task(task.id, "Continue")
+
+        assert result.get("ok") is True
+        assert result["session_id"] == "ses_resume_1"
+        saved = tmp_db.get_task(task.id)
+        assert saved.status == TaskStatus.PENDING
+        assert saved.error == ""
+        assert saved.user_feedback == "Continue"
+
+        runs = tmp_db.get_runs_for_task(task.id)
+        manual_runs = [r for r in runs if r.agent_type == "manual_review"]
+        assert len(manual_runs) == 1
+        assert manual_runs[0].output == "Continue"
+        orch._dispatch_resume.assert_called_once_with(task.id, "Continue")
+
+    def test_resume_requires_failed_status(self, tmp_db, make_task):
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            worktree_path="/wt/task",
+            task_mode="develop",
+            session_ids={"coder": ["ses_resume_2"]},
+        )
+        tmp_db.save_task(task)
+        orch = _make_orchestrator(tmp_db)
+
+        result = orch.resume_task(task.id, "Continue")
+
+        assert "error" in result
+        assert "Cannot resume" in result["error"]
+
+    def test_resume_pipeline_raw_continue_completes_task(self, tmp_db, make_task):
+        from core.models import AgentRun
+
+        task = make_task(
+            status=TaskStatus.PENDING,
+            worktree_path="/wt/task",
+            branch_name="agent/task-r2",
+            task_mode="develop",
+            max_retries=0,
+            session_ids={"coder": ["ses_resume_raw"]},
+        )
+        tmp_db.save_task(task)
+        orch = _make_orchestrator(tmp_db)
+
+        code_output = (
+            '{"type":"step_start"}\n'
+            '{"type":"text","part":{"text":"done"}}\n'
+            '{"type":"step_finish","part":{"reason":"stop"}}\n'
+        )
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="Continue",
+            output=code_output,
+            exit_code=0,
+            session_id="ses_resume_raw",
+        )
+        orch._default_coder.continue_session.return_value = (code_run, "done")
+        orch.client.is_output_complete.return_value = True
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review",
+        )
+        reviewer.review_changes.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._revise_task_pipeline(task.id, "Continue", True)
+
+        saved = tmp_db.get_task(task.id)
+        assert saved.status == TaskStatus.COMPLETED
+        assert saved.review_pass is True
+        assert saved.code_output == "done"
+        orch._default_coder.continue_session.assert_called_once()
+        call_args, call_kwargs = orch._default_coder.continue_session.call_args
+        assert call_args[1] == "/wt/task"
+        assert call_kwargs["user_message"] == "Continue"
+        assert call_kwargs["session_id"] == "ses_resume_raw"
