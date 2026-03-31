@@ -529,6 +529,7 @@ async def api_start_exploration(request: Request):
     result = orchestrator.start_exploration(
         module_ids=body.get("module_ids"),
         categories=body.get("categories"),
+        focus_point=body.get("focus_point", ""),
     )
     return result
 
@@ -862,7 +863,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .sev-minor { color: var(--yellow); border-color: var(--yellow); }
   .sev-info { color: var(--text-dim); border-color: var(--text-dim); }
 
-  .explore-filters { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  .explore-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:12px; }
   .explore-filter-card { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--surface); }
   .explore-filter-card h4 { margin:0 0 8px 0; font-size:12px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; }
   .explore-filter-hint { margin-top:6px; font-size:11px; color:var(--text-dim); }
@@ -945,6 +946,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <h4>Categories</h4>
         <div id="explore-category-filters" class="explore-category-filters"></div>
         <div class="explore-filter-hint">Select categories to run/cancel</div>
+      </div>
+      <div class="explore-filter-card">
+        <h4>Focus Point</h4>
+        <input id="explore-focus-point" placeholder="e.g. hash table resize path contention" style="width:100%;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px" />
+        <div class="explore-filter-hint">Optional: custom concern within selected module/category scope</div>
       </div>
     </div>
     <div id="explore-queue" class="explore-queue-panel"></div>
@@ -1769,6 +1775,7 @@ function renderExploreInitState() {
       ${init.session_id ? ` · session: <code>${esc(init.session_id)}</code>` : ''}
       ${init.model ? ` · model: <code>${esc(init.model)}</code>` : ''}
     </div>
+    ${init.map_review_required ? `<div style="margin-top:6px;font-size:11px;color:var(--yellow)">Map review requested${init.map_review_reason ? `: ${esc(init.map_review_reason)}` : ''}</div>` : ''}
     ${init.error ? `<div style="margin-top:6px;font-size:11px;color:var(--red)">${esc(init.error)}</div>` : ''}
     ${output ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">Live init output</summary><div class="explore-init-log">${esc(output)}</div></details>` : ''}
   `;
@@ -2585,6 +2592,11 @@ function getModuleDetailSelectedCategories(moduleId) {
   ).map(x => x.value);
 }
 
+function getExploreFocusPoint() {
+  const el = document.getElementById('explore-focus-point');
+  return el ? el.value.trim() : '';
+}
+
 function renderExploreFilters() {
   const moduleSelect = document.getElementById('explore-module-select');
   if (moduleSelect) {
@@ -2643,6 +2655,7 @@ function renderExploreQueue() {
       <div style="min-width:0">
         <div><span style="color:${catColor(j.category)}">${(j.category || '').replace(/_/g, ' ')}</span> · ${esc(j.module_name || j.module_id || '')}</div>
         <div class="meta">${esc(j.module_path || '')} · ${state} @ ${whenTxt}</div>
+        ${j.focus_point ? `<div class="meta">focus: ${esc(j.focus_point)}</div>` : ''}
       </div>
       <button class="btn btn-sm" style="color:var(--red)" onclick="cancelExploreJob('${j.module_id}','${j.category}')">Cancel</button>
     </div>`;
@@ -2807,6 +2820,17 @@ async function showModuleDetail(moduleId) {
         if (run.summary) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">${esc(run.summary)}</div>`;
         }
+        html += `<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+          ${run.focus_point ? `focus: ${esc(run.focus_point)} · ` : ''}
+          actionability: ${run.actionability_score >= 0 ? Number(run.actionability_score).toFixed(1) : '-'} / 10 ·
+          reliability: ${run.reliability_score >= 0 ? Number(run.reliability_score).toFixed(1) : '-'} / 10
+        </div>`;
+        if (run.supplemental_note) {
+          html += `<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">note: ${esc(run.supplemental_note)}</div>`;
+        }
+        if (run.map_review_required) {
+          html += `<div style="font-size:11px;color:var(--yellow);margin-bottom:8px">map review requested${run.map_review_reason ? `: ${esc(run.map_review_reason)}` : ''}</div>`;
+        }
         for (let fi = 0; fi < findings.length; fi++) {
           const f = findings[fi];
           html += `<div class="exp-finding" style="border-left:3px solid">
@@ -2874,12 +2898,14 @@ async function startExploration() {
   try {
     const moduleIds = getSelectedExploreModules();
     const categories = getSelectedExploreCategories();
+    const focusPoint = getExploreFocusPoint();
     if (!categories.length) {
       await uiAlert('Select at least one category before starting exploration.', 'No Category Selected');
       return;
     }
     const payload = { categories };
     if (moduleIds.length) payload.module_ids = moduleIds;
+    if (focusPoint) payload.focus_point = focusPoint;
     const res = await api('/api/explore/start', {method:'POST', body: JSON.stringify(payload)});
     if (res && res.error) {
       await uiAlert(String(res.error), 'Start Exploration');
@@ -2894,7 +2920,8 @@ async function startExploration() {
     const summary = document.getElementById('explore-start-summary');
     if (summary) summary.textContent = extra.join(' · ');
     if (res.started > 0) {
-      await uiAlert(`Started ${res.started} run(s): running=${res.running || 0}, queued=${res.queue?.counts?.queued || 0}.`, 'Exploration Started');
+      const focusText = (res.focus_point || focusPoint) ? ` Focus: ${(res.focus_point || focusPoint)}` : '';
+      await uiAlert(`Started ${res.started} run(s): running=${res.running || 0}, queued=${res.queue?.counts?.queued || 0}.${focusText}`, 'Exploration Started');
     } else {
       await uiAlert('No TODO categories matched the current filters.', 'Nothing to Explore');
     }
@@ -2917,13 +2944,16 @@ async function exploreModule(moduleId) {
       return;
     }
     const categories = getModuleDetailSelectedCategories(moduleId);
+    const focusPoint = getExploreFocusPoint();
     if (!categories.length) {
       await uiAlert('Select at least one category in the module detail first.', 'No Category Selected');
       return;
     }
+    const payload = {module_ids: [moduleId], categories};
+    if (focusPoint) payload.focus_point = focusPoint;
     const res = await api('/api/explore/start', {
       method:'POST',
-      body: JSON.stringify({module_ids: [moduleId], categories}),
+      body: JSON.stringify(payload),
     });
     if (res && res.error) {
       await uiAlert(String(res.error), 'Start Exploration');

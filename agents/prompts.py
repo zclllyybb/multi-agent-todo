@@ -384,19 +384,31 @@ def explorer_prompt(
     personality_name: str,
     personality_focus: str,
     repo_path: str,
+    focus_point: str = "",
+    prior_note: str = "",
 ) -> str:
     """Prompt for a single exploration run on one module x one category."""
+    effective_focus = focus_point.strip() or personality_focus
+    prior_note_text = prior_note.strip() or "(none)"
     return f"""You are a code exploration agent — a **{personality_name}**.
 
 ## Assignment
-Explore the module "{module_name}" located at `{module_path}/` in the repository
-at `{repo_path}`.
+You are a top software engineer, adept at discovering any critical quality issues. Explore the module "{module_name}" located at `{module_path}/` in the repository at `{repo_path}`.
 
 Module description: {module_description}
 
 ## Your Focus
 You are specifically looking for **{category}** issues. Focus on:
-{personality_focus}
+{effective_focus}
+You should first understand the overall logic, composition, and the role of each part of the module. Choose a part that has not been handled by predecessors and that you believe is worth in-depth exploration. For the part you choose to explore in-depth, you should fully understand its code logic and conduct open exploration, assuming that there are flaws in this part of the code related to the issues at hand, and identify the most worthy points to fix.
+If the issue you discover is not obvious, you must provide evidence. For example, for concurrency conflicts, you must specify exactly which operations might access the related resources simultaneously and that they indeed do so concurrently; for performance issues, there must be no other guarantees that make the complexity here better than it appears; and so on.
+After finding the issue, you should come up with reasonable improvement methods and reconfirm them by combining the problem and the improvement approach: the problem exists and has improvement value, and the improvement method is feasible.
+
+## Prior Exploration Context (same module + category)
+{prior_note_text}
+
+Use this context to avoid repeating previous exploration and to produce a
+useful additive supplement.
 
 ## Instructions
 1. List the files in `{module_path}/` and understand the module structure
@@ -410,10 +422,26 @@ You are specifically looking for **{category}** issues. Focus on:
    - line_number: approximate line (0 if not specific)
    - suggested_fix: brief description of what should change
 5. If you find NO issues, that's fine — say so explicitly
+6. Score your result quality:
+   - actionability_score: 0-10 (how worth addressing)
+   - reliability_score: 0-10 (confidence of analysis)
+7. Write `supplemental_note`: concise additive note for future explorers of
+   the same module and category
+8. If you believe module structure should be changed (split/merge/rename/move
+   modules in the architecture map), set:
+   - map_review_required: true
+   - map_review_reason: one concise sentence
+   Otherwise set map_review_required to false and map_review_reason to ""
 
 ## Output Format
 Output ONLY valid JSON (no markdown fences):
 {{"summary": "One paragraph summarizing what you explored and found",
+  "focus_point": "The concrete focus point you actually explored",
+  "actionability_score": 7.5,
+  "reliability_score": 8.0,
+  "supplemental_note": "Short additive note visible to future explorers",
+  "map_review_required": false,
+  "map_review_reason": "",
   "findings": [
     {{"severity": "major",
       "title": "Potential race condition in FooManager::update()",
@@ -424,7 +452,14 @@ Output ONLY valid JSON (no markdown fences):
   ]}}
 
 If no issues found:
-{{"summary": "Explored N files in module {module_name}, no {category} issues identified.", "findings": []}}
+{{"summary": "Explored N files in module {module_name}, no {category} issues identified.",
+  "focus_point": "...",
+  "actionability_score": 1.0,
+  "reliability_score": 8.5,
+  "supplemental_note": "...",
+  "map_review_required": false,
+  "map_review_reason": "",
+  "findings": []}}
 """
 
 

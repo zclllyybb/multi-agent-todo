@@ -232,6 +232,14 @@ class ExploreRun:
     output: str = ""
     session_id: str = ""
 
+    # Exploration intent / evaluation metadata
+    focus_point: str = ""
+    actionability_score: float = -1.0   # 0-10: how worth addressing
+    reliability_score: float = -1.0     # 0-10: confidence of analysis
+    supplemental_note: str = ""        # concise note for future explorers
+    map_review_required: bool = False
+    map_review_reason: str = ""
+
     # Parsed results
     findings: List[dict] = field(default_factory=list)
     summary: str = ""
@@ -251,6 +259,12 @@ class ExploreRun:
         d.setdefault("findings", [])
         d.setdefault("summary", "")
         d.setdefault("issue_count", 0)
+        d.setdefault("focus_point", "")
+        d.setdefault("actionability_score", -1.0)
+        d.setdefault("reliability_score", -1.0)
+        d.setdefault("supplemental_note", "")
+        d.setdefault("map_review_required", False)
+        d.setdefault("map_review_reason", "")
         return cls(**d)
 
 

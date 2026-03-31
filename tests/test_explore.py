@@ -323,6 +323,37 @@ class TestExplorerAgentParsing:
         with pytest.raises(ModelOutputError, match="invalid JSON|no JSON object found"):
             ExplorerAgent._parse_output("{broken json here")
 
+    def test_parse_output_metadata_with_scores_and_review_flags(self):
+        text = json.dumps({
+            "summary": "checked lock paths",
+            "focus_point": "lock contention in scanner",
+            "actionability_score": 8.4,
+            "reliability_score": 7.2,
+            "supplemental_note": "Lock scope can be narrowed in two call paths.",
+            "map_review_required": True,
+            "map_review_reason": "scanner module should be split by responsibility",
+            "findings": [],
+        })
+        meta = ExplorerAgent.parse_output_metadata(text)
+        assert meta["summary"] == "checked lock paths"
+        assert meta["focus_point"] == "lock contention in scanner"
+        assert meta["actionability_score"] == 8.4
+        assert meta["reliability_score"] == 7.2
+        assert meta["supplemental_note"].startswith("Lock scope")
+        assert meta["map_review_required"] is True
+        assert "split" in meta["map_review_reason"]
+
+    def test_parse_output_metadata_clamps_scores(self):
+        text = json.dumps({
+            "summary": "x",
+            "actionability_score": 13,
+            "reliability_score": -5,
+            "findings": [],
+        })
+        meta = ExplorerAgent.parse_output_metadata(text)
+        assert meta["actionability_score"] == 10.0
+        assert meta["reliability_score"] == 0.0
+
     def test_parse_output_with_surrounding_text(self):
         text = "Here is my analysis:\n" + MOCK_EXPLORE_OUTPUT + "\nDone."
         findings, summary = ExplorerAgent._parse_output(text)
@@ -599,6 +630,24 @@ class TestOrchestratorExplore:
 
         result = orch.start_exploration(module_ids=[mod["id"]])
         assert result["started"] == 2  # 2 categories
+
+    def test_start_exploration_focus_point_propagated_to_jobs(self, orch):
+        self._mark_map_ready(orch)
+        mod = orch.add_explore_module(name="A", path="a")
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(
+            module_ids=[mod["id"]],
+            categories=["performance"],
+            focus_point="hash map resize contention",
+        )
+
+        assert result["started"] == 1
+        assert result["focus_point"] == "hash map resize contention"
+        queue = orch.get_exploration_queue_state()
+        assert queue["counts"]["running"] == 1
+        assert queue["running"][0]["focus_point"] == "hash map resize contention"
 
     def test_start_exploration_skips_non_todo(self, orch):
         self._mark_map_ready(orch)
@@ -1016,3 +1065,70 @@ class TestExplorationFullFlow:
 
         tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
         assert len(tasks) == 2
+
+    def test_run_exploration_persists_scores_and_adds_visible_note(self, orch):
+        mod_data = orch.add_explore_module(name="Exec", path="be/src/exec")
+        mod_id = mod_data["id"]
+
+        output = json.dumps({
+            "summary": "Checked scanner hot paths",
+            "focus_point": "allocator pressure",
+            "actionability_score": 8.5,
+            "reliability_score": 7.0,
+            "supplemental_note": "Previous copy issue remains after reset.",
+            "map_review_required": False,
+            "map_review_reason": "",
+            "findings": [],
+        })
+        mock_run = _mock_agent_run(output=output)
+        with patch.object(
+            ExplorerAgent,
+            "explore_module",
+            return_value=(mock_run, [], "Checked scanner hot paths"),
+        ):
+            orch._run_exploration(mod_id, "performance", "perf_hunter")
+
+        runs = orch.db.get_explore_runs_for_module(mod_id)
+        assert len(runs) == 1
+        assert runs[0].focus_point == "allocator pressure"
+        assert runs[0].actionability_score == 8.5
+        assert runs[0].reliability_score == 7.0
+        assert runs[0].supplemental_note.startswith("Previous copy issue")
+
+        updated = orch.db.get_explore_module(mod_id)
+        note = updated.category_notes["performance"]
+        assert "focus: allocator pressure" in note
+        assert "actionability: 8.5/10" in note
+        assert "reliability: 7.0/10" in note
+        assert "summary: Checked scanner hot paths" in note
+
+    def test_run_exploration_map_review_request_triggers_map_init_review(self, orch):
+        mod_data = orch.add_explore_module(name="Exec", path="be/src/exec")
+        mod_id = mod_data["id"]
+
+        output = json.dumps({
+            "summary": "layout mismatch found",
+            "focus_point": "module boundary",
+            "actionability_score": 6.0,
+            "reliability_score": 6.5,
+            "supplemental_note": "Consider splitting planner and executor.",
+            "map_review_required": True,
+            "map_review_reason": "split exec module into planner/executor",
+            "findings": [],
+        })
+        mock_run = _mock_agent_run(output=output)
+        with patch.object(
+            ExplorerAgent,
+            "explore_module",
+            return_value=(mock_run, [], "layout mismatch found"),
+        ):
+            with patch.object(orch, "start_init_explore_map", return_value={"accepted": True}) as mock_review:
+                orch._run_exploration(mod_id, "maintainability", "maintainability_critic")
+
+        mock_review.assert_called_once()
+        kwargs = mock_review.call_args.kwargs
+        assert "review_reason" in kwargs
+        assert "split exec module" in kwargs["review_reason"]
+
+        state = orch.get_explore_init_state()
+        assert state["status"] in ("review_required", "done", "in_progress")

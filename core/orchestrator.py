@@ -1808,6 +1808,10 @@ class Orchestrator:
             "error": "",
             "cancel_requested": False,
             "modules_created": 0,
+            "map_review_required": False,
+            "map_review_reason": "",
+            "map_review_module_id": "",
+            "map_review_category": "",
             "repo_name": self._repo_name(),
             "repo_path": self.config["repo"]["path"],
         }
@@ -1834,6 +1838,10 @@ class Orchestrator:
         default_state["repo_name"] = self._repo_name()
         default_state["repo_path"] = self.config["repo"]["path"]
         default_state["cancel_requested"] = False
+        default_state["map_review_required"] = bool(default_state.get("map_review_required", False))
+        default_state["map_review_reason"] = str(default_state.get("map_review_reason", ""))
+        default_state["map_review_module_id"] = str(default_state.get("map_review_module_id", ""))
+        default_state["map_review_category"] = str(default_state.get("map_review_category", ""))
         with self._lock:
             self._explore_map_state = default_state
         self._persist_explore_map_state()
@@ -1897,6 +1905,7 @@ class Orchestrator:
                 job.setdefault("queued_at", now)
                 job.setdefault("started_at", 0.0)
                 job.setdefault("session_id", "")
+                job.setdefault("focus_point", "")
                 job.setdefault("task_id", f"__explore__:{job['module_id']}:{job['category']}")
                 job["state"] = "queued"
                 job["resume_with_continue"] = bool(job.get("session_id")) and prev_state == "running"
@@ -1989,6 +1998,72 @@ class Orchestrator:
         module.updated_at = time.time()
         self.db.save_explore_module(module)
 
+    @staticmethod
+    def _append_explore_note(existing: str, new_note: str, max_chars: int = 8000) -> str:
+        if not existing.strip():
+            merged = new_note.strip()
+        elif not new_note.strip():
+            merged = existing.strip()
+        else:
+            merged = f"{existing.strip()}\n\n{new_note.strip()}"
+        if len(merged) <= max_chars:
+            return merged
+        return merged[-max_chars:]
+
+    @staticmethod
+    def _build_explore_note_entry(
+        summary: str,
+        focus_point: str,
+        actionability_score: float,
+        reliability_score: float,
+        supplemental_note: str,
+    ) -> str:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        parts = [f"[{ts}]"]
+        if focus_point:
+            parts.append(f"focus: {focus_point}")
+        if actionability_score >= 0:
+            parts.append(f"actionability: {actionability_score:.1f}/10")
+        if reliability_score >= 0:
+            parts.append(f"reliability: {reliability_score:.1f}/10")
+        if summary:
+            parts.append(f"summary: {summary}")
+        if supplemental_note:
+            parts.append(f"note: {supplemental_note}")
+        return " | ".join(parts)
+
+    @staticmethod
+    def _build_map_review_prompt(review_reason: str) -> str:
+        return (
+            "Please review and update the repository module map based on the new "
+            f"exploration signal: {review_reason}\n"
+            "Re-check module boundaries, split/merge opportunities, and naming. "
+            "Return the full latest module map JSON in the same schema as map initialization."
+        )
+
+    def _request_explore_map_review(self, module: ExploreModule, category: str, reason: str):
+        review_reason = reason.strip() or (
+            f"Explorer requested module structure review for {module.name} ({module.path}) in {category}."
+        )
+        now = time.time()
+        with self._lock:
+            self._explore_map_state.update({
+                "status": "review_required",
+                "updated_at": now,
+                "map_review_required": True,
+                "map_review_reason": review_reason,
+                "map_review_module_id": module.id,
+                "map_review_category": category,
+            })
+        self._persist_explore_map_state()
+
+        review_result = self.start_init_explore_map(review_reason=review_reason)
+        if not review_result.get("accepted", False):
+            log.warning(
+                "Map review was requested but init-map could not start now: %s",
+                review_result.get("error", "unknown"),
+            )
+
     def _is_explore_cancel_requested(self, key: str) -> bool:
         with self._lock:
             return key in self._explore_cancel_requested
@@ -2051,6 +2126,7 @@ class Orchestrator:
                 "queued_at": job.get("queued_at", 0.0),
                 "started_at": job.get("started_at", 0.0),
                 "session_id": job.get("session_id", ""),
+                "focus_point": job.get("focus_point", ""),
                 "category_status": status,
             }
 
@@ -2219,6 +2295,10 @@ class Orchestrator:
                     "error": "",
                     "cancel_requested": False,
                     "modules_created": modules_created,
+                    "map_review_required": False,
+                    "map_review_reason": "",
+                    "map_review_module_id": "",
+                    "map_review_category": "",
                 })
             self._persist_explore_map_state()
             log.info("Explore map initialized: %d modules created", modules_created)
@@ -2236,7 +2316,7 @@ class Orchestrator:
             log.error("Map init failed: %s", e)
             return {"error": str(e)}
 
-    def start_init_explore_map(self) -> dict:
+    def _start_init_explore_map(self, review_reason: str = "") -> dict:
         with self._lock:
             if self._explore_map_state.get("status") == "in_progress":
                 return {
@@ -2247,6 +2327,9 @@ class Orchestrator:
 
             model = self.config.get("explore", {}).get("map_model", self._get_explorer_model())
             now = time.time()
+            review_reason = review_reason.strip()
+            review_message = self._build_map_review_prompt(review_reason) if review_reason else ""
+            review_session_id = str(self._explore_map_state.get("session_id", "")) if review_message else ""
             self._explore_map_cancel_requested = False
             self._explore_map_state.update({
                 "status": "in_progress",
@@ -2259,11 +2342,23 @@ class Orchestrator:
                 "error": "",
                 "cancel_requested": False,
                 "modules_created": 0,
+                "map_review_required": bool(review_message),
+                "map_review_reason": review_reason,
+                "map_review_module_id": "",
+                "map_review_category": "",
             })
-            self._explore_map_future = self._pool.submit(self._run_init_explore_map_job, model)
+            self._explore_map_future = self._pool.submit(
+                self._run_init_explore_map_job,
+                model,
+                review_message,
+                review_session_id,
+            )
 
         self._persist_explore_map_state()
         return {"accepted": True, "state": self.get_explore_init_state()}
+
+    def start_init_explore_map(self, review_reason: str = "") -> dict:
+        return self._start_init_explore_map(review_reason=review_reason)
 
     def cancel_init_explore_map(self) -> dict:
         with self._lock:
@@ -2278,7 +2373,12 @@ class Orchestrator:
             self._persist_explore_map_state()
         return {"cancel_requested": bool(in_progress), "state": self.get_explore_init_state()}
 
-    def _run_init_explore_map_job(self, model: str):
+    def _run_init_explore_map_job(
+        self,
+        model: str,
+        review_message: str = "",
+        review_session_id: str = "",
+    ):
         repo_path = self.config["repo"]["path"]
         explorer = ExplorerAgent(model=model, client=self.client)
         last_persist_at = 0.0
@@ -2300,6 +2400,8 @@ class Orchestrator:
             run, modules_data = explorer.init_map_streaming(
                 repo_path=repo_path,
                 task_id=self._explore_map_task_id,
+                session_id=review_session_id,
+                message_override=review_message or None,
                 on_output=_on_output,
                 should_cancel=lambda: self._explore_map_cancel_requested,
             )
@@ -2316,6 +2418,10 @@ class Orchestrator:
                     "error": "",
                     "cancel_requested": False,
                     "modules_created": modules_created,
+                    "map_review_required": False,
+                    "map_review_reason": "",
+                    "map_review_module_id": "",
+                    "map_review_category": "",
                 })
             self._persist_explore_map_state()
             log.info("Explore map initialized: %d modules created", modules_created)
@@ -2341,6 +2447,7 @@ class Orchestrator:
         self,
         module_ids: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
+        focus_point: str = "",
     ) -> dict:
         """Start exploration on selected modules x categories.
 
@@ -2376,6 +2483,7 @@ class Orchestrator:
         queued_now = 0
         rejected_in_progress = 0
         skipped_non_todo = 0
+        focus_point = str(focus_point or "").strip()
 
         next_jobs: List[dict] = []
         with self._lock:
@@ -2408,6 +2516,7 @@ class Orchestrator:
                         "queued_at": time.time(),
                         "started_at": 0.0,
                         "session_id": "",
+                        "focus_point": focus_point,
                         "resume_with_continue": False,
                     }
                     self._explore_queue.append(job)
@@ -2436,6 +2545,7 @@ class Orchestrator:
             "rejected_in_progress": rejected_in_progress,
             "skipped_non_todo": skipped_non_todo,
             "invalid_categories": invalid_categories,
+            "focus_point": focus_point,
             "queue": self.get_exploration_queue_state(),
         }
 
@@ -2476,10 +2586,13 @@ class Orchestrator:
             model = self._get_explorer_model()
             task_id = f"__explore__:{module_id}:{category}"
             session_id = ""
+            focus_point = ""
+            prior_note = str(module.category_notes.get(category, ""))
             resume_with_continue = False
             if job is not None:
                 task_id = str(job.get("task_id", task_id))
                 session_id = str(job.get("session_id", ""))
+                focus_point = str(job.get("focus_point", "")).strip()
                 resume_with_continue = bool(job.get("resume_with_continue", False))
 
             explorer = ExplorerAgent(model=model, client=self.client)
@@ -2491,6 +2604,8 @@ class Orchestrator:
                     personality_focus=personality["focus"],
                     personality_name=personality["name"],
                     repo_path=repo_path,
+                    focus_point=focus_point,
+                    prior_note=prior_note,
                 )
             else:
                 persist_box = {"last": 0.0}
@@ -2509,6 +2624,8 @@ class Orchestrator:
                     personality_focus=personality["focus"],
                     personality_name=personality["name"],
                     repo_path=repo_path,
+                    focus_point=focus_point,
+                    prior_note=prior_note,
                     task_id=task_id,
                     session_id=session_id,
                     message_override="Continue" if (resume_with_continue and session_id) else None,
@@ -2531,6 +2648,29 @@ class Orchestrator:
                 log.info("Exploration cancelled: module=%s category=%s", module_id, category)
                 return
 
+            run_text = run.output if isinstance(run.output, str) else ""
+            metadata = {
+                "summary": summary,
+                "focus_point": focus_point,
+                "actionability_score": -1.0,
+                "reliability_score": -1.0,
+                "supplemental_note": "",
+                "map_review_required": False,
+                "map_review_reason": "",
+            }
+            try:
+                parsed_meta = ExplorerAgent.parse_output_metadata(run_text)
+                metadata.update(parsed_meta)
+            except ModelOutputError as meta_err:
+                log.warning(
+                    "Explore metadata parse failed: module=%s category=%s err=%s",
+                    module_id,
+                    category,
+                    meta_err,
+                )
+
+            summary = metadata["summary"] or summary
+
             # Save ExploreRun
             explore_run = ExploreRun(
                 module_id=module_id,
@@ -2540,6 +2680,12 @@ class Orchestrator:
                 prompt=run.prompt,
                 output=run.output,
                 session_id=run.session_id,
+                focus_point=metadata["focus_point"] or focus_point,
+                actionability_score=metadata["actionability_score"],
+                reliability_score=metadata["reliability_score"],
+                supplemental_note=metadata["supplemental_note"],
+                map_review_required=metadata["map_review_required"],
+                map_review_reason=metadata["map_review_reason"],
                 findings=findings,
                 summary=summary,
                 issue_count=len(findings),
@@ -2566,9 +2712,26 @@ class Orchestrator:
             # Update module status
             module = self.db.get_explore_module(module_id)
             module.category_status[category] = ExploreStatus.DONE.value
-            module.category_notes[category] = summary
+            note_entry = self._build_explore_note_entry(
+                summary=summary,
+                focus_point=metadata["focus_point"] or focus_point,
+                actionability_score=metadata["actionability_score"],
+                reliability_score=metadata["reliability_score"],
+                supplemental_note=metadata["supplemental_note"],
+            )
+            module.category_notes[category] = self._append_explore_note(
+                module.category_notes.get(category, ""),
+                note_entry,
+            )
             module.updated_at = time.time()
             self.db.save_explore_module(module)
+
+            if metadata["map_review_required"]:
+                self._request_explore_map_review(
+                    module=module,
+                    category=category,
+                    reason=metadata["map_review_reason"],
+                )
 
             # Auto-create tasks for severe findings
             auto_severity = self.config.get("explore", {}).get(

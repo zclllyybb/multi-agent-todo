@@ -15,12 +15,26 @@ class ExplorerAgent(BaseAgent):
     agent_type: str = "explorer"
 
     @staticmethod
+    def _clamp_score(value, default: float = -1.0) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return default
+        if score < 0.0:
+            return 0.0
+        if score > 10.0:
+            return 10.0
+        return score
+
+    @staticmethod
     def _build_explore_prompt(
         module: ExploreModule,
         category: str,
         personality_focus: str,
         personality_name: str,
         repo_path: str,
+        focus_point: str = "",
+        prior_note: str = "",
     ) -> str:
         from agents.prompts import explorer_prompt
         return explorer_prompt(
@@ -31,6 +45,8 @@ class ExplorerAgent(BaseAgent):
             personality_name=personality_name,
             personality_focus=personality_focus,
             repo_path=repo_path,
+            focus_point=focus_point,
+            prior_note=prior_note,
         )
 
     def explore_module(
@@ -40,6 +56,8 @@ class ExplorerAgent(BaseAgent):
         personality_focus: str,
         personality_name: str,
         repo_path: str,
+        focus_point: str = "",
+        prior_note: str = "",
     ) -> Tuple[AgentRun, List[dict], str]:
         """Explore a module for a specific category of issues.
 
@@ -53,11 +71,43 @@ class ExplorerAgent(BaseAgent):
             personality_focus=personality_focus,
             personality_name=personality_name,
             repo_path=repo_path,
+            focus_point=focus_point,
+            prior_note=prior_note,
         )
         run = self.run(prompt, repo_path)
         text = self.get_text(run)
         findings, summary = self._parse_output(text)
         return run, findings, summary
+
+    @staticmethod
+    def parse_output_metadata(text: str) -> dict:
+        """Extract exploration metadata from explorer JSON output."""
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise ModelOutputError(
+                f"explorer: no JSON object found in model output "
+                f"(first 200 chars: {text[:200]!r})"
+            )
+        try:
+            data = json.loads(match.group())
+        except json.JSONDecodeError as e:
+            raise ModelOutputError(
+                f"explorer: invalid JSON in model output: {e}"
+            ) from e
+
+        return {
+            "summary": str(data.get("summary", "")),
+            "focus_point": str(data.get("focus_point", "")).strip(),
+            "actionability_score": ExplorerAgent._clamp_score(
+                data.get("actionability_score", -1.0)
+            ),
+            "reliability_score": ExplorerAgent._clamp_score(
+                data.get("reliability_score", -1.0)
+            ),
+            "supplemental_note": str(data.get("supplemental_note", "")).strip(),
+            "map_review_required": bool(data.get("map_review_required", False)),
+            "map_review_reason": str(data.get("map_review_reason", "")).strip(),
+        }
 
     def explore_module_streaming(
         self,
@@ -66,6 +116,8 @@ class ExplorerAgent(BaseAgent):
         personality_focus: str,
         personality_name: str,
         repo_path: str,
+        focus_point: str = "",
+        prior_note: str = "",
         task_id: str = "",
         session_id: str = "",
         message_override: Optional[str] = None,
@@ -78,6 +130,8 @@ class ExplorerAgent(BaseAgent):
             personality_focus=personality_focus,
             personality_name=personality_name,
             repo_path=repo_path,
+            focus_point=focus_point,
+            prior_note=prior_note,
         )
         run = self.client.run_streaming(
             message=prompt,
