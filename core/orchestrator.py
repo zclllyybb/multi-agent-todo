@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Dict, List, Optional, Set
 
@@ -88,6 +89,24 @@ class Orchestrator:
         #  in the DB still have status=analyzing until we overwrite them.)
         self._recover_stuck_analyzing()
 
+        # Exploration scheduling state (separate logical queue, using shared thread pool)
+        self._explore_parallel_limit = self._get_explore_parallel_limit()
+        self._explore_queue: List[dict] = []
+        self._explore_running: Dict[str, dict] = {}
+        self._explore_cancel_requested: Set[str] = set()
+        self._explore_seq = 0
+
+        # Explore map initialization state (persisted in DB for UI + restart recovery)
+        self._explore_map_state_key = "explore_map_init_state"
+        self._explore_map_task_id = "__map_init__"
+        self._explore_map_state = self._default_explore_map_state()
+        self._explore_map_cancel_requested = False
+        self._explore_map_future: Optional[Future] = None
+
+        # Recovery: restore persisted explore map state and queue jobs.
+        self._load_explore_map_state()
+        self._recover_explore_queue_jobs()
+
     def _recover_stuck_analyzing(self):
         """Reset any TodoItems whose status is 'analyzing' (left by a previous crash)."""
         items = self.db.get_all_todo_items()
@@ -101,6 +120,32 @@ class Orchestrator:
         if recovered:
             log.warning(
                 "Recovered %d TODO item(s) stuck in ANALYZING state (server restart)",
+                recovered,
+            )
+
+    def _recover_stuck_exploration(self, active_keys: Optional[Set[str]] = None):
+        """Reset stale ExploreModule cells left in IN_PROGRESS by previous daemon exit."""
+        active_keys = active_keys or set()
+        modules = self.db.get_all_explore_modules()
+        recovered = 0
+        for m in modules:
+            changed = False
+            for cat, st in list(m.category_status.items()):
+                if st == ExploreStatus.IN_PROGRESS.value:
+                    key = self._explore_job_key(m.id, cat)
+                    if key in active_keys:
+                        continue
+                    m.category_status[cat] = ExploreStatus.TODO.value
+                    # Keep old note for diagnostics unless emptying is preferred.
+                    # We clear to avoid stale "in-progress" semantics in UI.
+                    m.category_notes[cat] = ""
+                    changed = True
+                    recovered += 1
+            if changed:
+                self.db.save_explore_module(m)
+        if recovered:
+            log.warning(
+                "Recovered %d explore cell(s) stuck in IN_PROGRESS (server restart)",
                 recovered,
             )
 
@@ -1576,6 +1621,8 @@ class Orchestrator:
     def stop(self):
         """Stop the orchestrator and kill any running opencode processes."""
         self.running = False
+        self.cancel_init_explore_map()
+        self.cancel_exploration(include_running=True)
         self.client.kill_all()
         self._pool.shutdown(wait=False)
         log.info("Orchestrator stopped")
@@ -1600,27 +1647,395 @@ class Orchestrator:
             self.config["opencode"].get("planner_model", ""),
         )
 
-    def init_explore_map(self) -> dict:
-        """Run the map-init agent to discover the project module structure.
-
-        Clears existing modules and replaces them with the agent's output.
-        Returns ``{"modules_created": N}``.
-        """
-        repo_path = self.config["repo"]["path"]
-        model = self.config.get("explore", {}).get(
-            "map_model", self._get_explorer_model()
+    def _get_explore_parallel_limit(self) -> int:
+        raw = self.config.get("explore", {}).get(
+            "max_parallel_runs",
+            self.config.get("orchestrator", {}).get("max_parallel_tasks", 1),
         )
-        explorer = ExplorerAgent(model=model, client=self.client)
-
         try:
-            run, modules_data = explorer.init_map(repo_path)
-        except Exception as e:
-            log.error("Map init failed: %s", e)
-            return {"error": str(e)}
+            limit = int(raw)
+        except (TypeError, ValueError):
+            limit = 1
+        return max(1, limit)
 
-        # Save the agent run for audit
+    def _repo_name(self) -> str:
+        repo_path = self.config["repo"]["path"]
+        base = os.path.basename(os.path.abspath(repo_path.rstrip("/")))
+        return base or repo_path
+
+    @staticmethod
+    def _trim_stream_output(output: str, max_chars: int = 240000) -> str:
+        if len(output) <= max_chars:
+            return output
+        return output[-max_chars:]
+
+    def _default_explore_map_state(self) -> dict:
+        now = time.time()
+        return {
+            "status": "idle",
+            "started_at": 0.0,
+            "finished_at": 0.0,
+            "updated_at": now,
+            "session_id": "",
+            "model": "",
+            "output": "",
+            "error": "",
+            "cancel_requested": False,
+            "modules_created": 0,
+            "repo_name": self._repo_name(),
+            "repo_path": self.config["repo"]["path"],
+        }
+
+    def _persist_explore_map_state(self):
+        with self._lock:
+            state = dict(self._explore_map_state)
+        self.db.save_state(self._explore_map_state_key, state)
+
+    def _load_explore_map_state(self):
+        persisted = self.db.get_state(self._explore_map_state_key)
+        default_state = self._default_explore_map_state()
+        if persisted:
+            default_state.update(persisted)
+        elif self.db.get_all_explore_modules():
+            default_state["status"] = "done"
+            default_state["finished_at"] = time.time()
+
+        if default_state.get("status") == "in_progress":
+            default_state["status"] = "failed"
+            default_state["error"] = "map init interrupted by daemon restart"
+            default_state["finished_at"] = time.time()
+
+        default_state["repo_name"] = self._repo_name()
+        default_state["repo_path"] = self.config["repo"]["path"]
+        default_state["cancel_requested"] = False
+        with self._lock:
+            self._explore_map_state = default_state
+        self._persist_explore_map_state()
+
+    def _persist_explore_job(self, job: dict):
+        payload = {k: v for k, v in job.items() if not str(k).startswith("_")}
+        self.db.save_explore_queue_job(payload)
+
+    def _recover_explore_queue_jobs(self):
+        persisted_jobs = self.db.get_explore_queue_jobs()
+        if not persisted_jobs:
+            self._recover_stuck_exploration()
+            return
+
+        valid_jobs: List[dict] = []
+        active_keys: Set[str] = set()
+        for job in persisted_jobs:
+            module_id = str(job.get("module_id", ""))
+            category = str(job.get("category", ""))
+            if not module_id or not category:
+                job_id = str(job.get("job_id", ""))
+                if job_id:
+                    self.db.delete_explore_queue_job(job_id)
+                continue
+
+            module = self.db.get_explore_module(module_id)
+            if not module or category not in module.category_status:
+                job_id = str(job.get("job_id", ""))
+                if job_id:
+                    self.db.delete_explore_queue_job(job_id)
+                continue
+
+            key = self._explore_job_key(module_id, category)
+            if key in active_keys:
+                job_id = str(job.get("job_id", ""))
+                if job_id:
+                    self.db.delete_explore_queue_job(job_id)
+                continue
+
+            active_keys.add(key)
+            valid_jobs.append(job)
+
+        self._recover_stuck_exploration(active_keys=active_keys)
+
+        if not valid_jobs:
+            return
+
+        now = time.time()
+        with self._lock:
+            for job in valid_jobs:
+                prev_state = str(job.get("state", "queued"))
+                qid = int(job.get("queue_id", 0) or 0)
+                if qid <= 0:
+                    qid = self._next_explore_seq_locked()
+                    job["queue_id"] = qid
+                else:
+                    self._explore_seq = max(self._explore_seq, qid)
+
+                job.setdefault("job_id", uuid.uuid4().hex)
+                job.setdefault("personality_key", self._pick_personality_for_category(job["category"]))
+                job.setdefault("queued_at", now)
+                job.setdefault("started_at", 0.0)
+                job.setdefault("session_id", "")
+                job.setdefault("task_id", f"__explore__:{job['module_id']}:{job['category']}")
+                job["state"] = "queued"
+                job["resume_with_continue"] = bool(job.get("session_id")) and prev_state == "running"
+                if not job.get("queued_at"):
+                    job["queued_at"] = now
+                job["started_at"] = 0.0
+
+                module = self.db.get_explore_module(job["module_id"])
+                if module and module.category_status.get(job["category"]) != ExploreStatus.IN_PROGRESS.value:
+                    module.category_status[job["category"]] = ExploreStatus.IN_PROGRESS.value
+                    module.updated_at = now
+                    self.db.save_explore_module(module)
+
+                self._explore_queue.append(job)
+                self._persist_explore_job(job)
+
+            to_submit = self._dispatch_explore_queue_locked()
+
+        self._submit_explore_jobs(to_submit)
+        log.warning("Recovered %d exploration queue job(s) from DB", len(valid_jobs))
+
+    def is_explore_map_ready(self) -> bool:
+        with self._lock:
+            init_status = self._explore_map_state.get("status", "idle")
+        if init_status == "in_progress":
+            return False
+        if init_status == "done":
+            return bool(self.db.get_all_explore_modules())
+        return False
+
+    def get_explore_init_state(self) -> dict:
+        with self._lock:
+            state = dict(self._explore_map_state)
+        output = state.get("output", "")
+        readable = self.client.format_readable_text(output) if output else ""
+        if not isinstance(readable, str):
+            readable = str(readable)
+        state["readable_output"] = readable
+        state["map_ready"] = self.is_explore_map_ready()
+        return state
+
+    def get_explore_status(self) -> dict:
+        return {
+            "repo_name": self._repo_name(),
+            "repo_path": self.config["repo"]["path"],
+            "categories": self._get_explore_categories(),
+            "map_ready": self.is_explore_map_ready(),
+            "map_init": self.get_explore_init_state(),
+        }
+
+    @staticmethod
+    def _explore_job_key(module_id: str, category: str) -> str:
+        return f"{module_id}:{category}"
+
+    def _list_target_modules_for_explore(
+        self,
+        module_ids: Optional[List[str]],
+        leaf_only_when_empty: bool = True,
+    ) -> List[ExploreModule]:
+        all_modules = self.db.get_all_explore_modules()
+        if module_ids:
+            selected = set(module_ids)
+            return [m for m in all_modules if m.id in selected]
+        if not leaf_only_when_empty:
+            return all_modules
+        child_parent_ids = {m.parent_id for m in all_modules if m.parent_id}
+        return [m for m in all_modules if m.id not in child_parent_ids]
+
+    def _validate_explore_categories(self, categories: Optional[List[str]]) -> tuple[List[str], List[str]]:
+        configured = self._get_explore_categories()
+        configured_set = set(configured)
+        if not categories:
+            return configured, []
+        requested = [c for c in categories if isinstance(c, str) and c.strip()]
+        valid = [c for c in requested if c in configured_set]
+        invalid = [c for c in requested if c not in configured_set]
+        return valid, invalid
+
+    def _next_explore_seq_locked(self) -> int:
+        self._explore_seq += 1
+        return self._explore_seq
+
+    def _set_module_category_status(self, module_id: str, category: str, status: str, note: Optional[str] = None):
+        module = self.db.get_explore_module(module_id)
+        if not module:
+            return
+        module.category_status[category] = status
+        if note is not None:
+            module.category_notes[category] = note
+        module.updated_at = time.time()
+        self.db.save_explore_module(module)
+
+    def _is_explore_cancel_requested(self, key: str) -> bool:
+        with self._lock:
+            return key in self._explore_cancel_requested
+
+    def _clear_explore_cancel_flag(self, key: str):
+        with self._lock:
+            self._explore_cancel_requested.discard(key)
+
+    def _dispatch_explore_queue_locked(self) -> List[dict]:
+        to_submit: List[dict] = []
+        while self._explore_queue and len(self._explore_running) < self._explore_parallel_limit:
+            job = self._explore_queue.pop(0)
+            key = self._explore_job_key(job["module_id"], job["category"])
+            job["state"] = "running"
+            job["started_at"] = time.time()
+            self._explore_running[key] = job
+            self._persist_explore_job(job)
+            to_submit.append(job)
+        return to_submit
+
+    def _submit_explore_jobs(self, jobs: List[dict]):
+        for job in jobs:
+            self._pool.submit(self._run_exploration_job, job)
+
+    def _run_exploration_job(self, job: dict):
+        key = self._explore_job_key(job["module_id"], job["category"])
+        next_jobs: List[dict] = []
+        try:
+            self._run_exploration(
+                job["module_id"],
+                job["category"],
+                job["personality_key"],
+                job=job,
+            )
+        finally:
+            self.db.delete_explore_queue_job(job["job_id"])
+            with self._lock:
+                self._explore_running.pop(key, None)
+                next_jobs = self._dispatch_explore_queue_locked()
+            self._submit_explore_jobs(next_jobs)
+
+    def get_exploration_queue_state(self) -> dict:
+        with self._lock:
+            queued_jobs = [dict(j) for j in self._explore_queue]
+            running_jobs = [dict(j) for j in self._explore_running.values()]
+
+        def _decorate(job: dict) -> dict:
+            module = self.db.get_explore_module(job["module_id"])
+            status = "unknown"
+            if module:
+                status = module.category_status.get(job["category"], "unknown")
+            return {
+                "queue_id": job.get("queue_id", 0),
+                "module_id": job["module_id"],
+                "module_name": module.name if module else "(deleted)",
+                "module_path": module.path if module else "",
+                "category": job["category"],
+                "personality_key": job["personality_key"],
+                "state": job.get("state", "queued"),
+                "queued_at": job.get("queued_at", 0.0),
+                "started_at": job.get("started_at", 0.0),
+                "session_id": job.get("session_id", ""),
+                "category_status": status,
+            }
+
+        queued = [_decorate(j) for j in queued_jobs]
+        running = [_decorate(j) for j in running_jobs]
+        queued.sort(key=lambda x: x["queue_id"])
+        running.sort(key=lambda x: x["started_at"])
+        return {
+            "max_parallel_runs": self._explore_parallel_limit,
+            "running": running,
+            "queued": queued,
+            "counts": {
+                "running": len(running),
+                "queued": len(queued),
+                "total": len(running) + len(queued),
+            },
+        }
+
+    def cancel_exploration(
+        self,
+        module_ids: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+        include_running: bool = True,
+    ) -> dict:
+        modules = self._list_target_modules_for_explore(
+            module_ids,
+            leaf_only_when_empty=False,
+        )
+        cats, invalid_categories = self._validate_explore_categories(categories)
+        if not cats:
+            return {
+                "cancelled": 0,
+                "cancelled_running": 0,
+                "cancelled_queued": 0,
+                "reset_stale": 0,
+                "invalid_categories": invalid_categories,
+            }
+
+        module_map = {m.id: m for m in modules}
+        target_keys = {
+            self._explore_job_key(m.id, cat)
+            for m in modules
+            for cat in cats
+            if cat in m.category_status
+        }
+
+        cancelled_queued = 0
+        cancelled_running = 0
+        next_jobs: List[dict] = []
+        with self._lock:
+            kept = []
+            for job in self._explore_queue:
+                key = self._explore_job_key(job["module_id"], job["category"])
+                if key in target_keys:
+                    cancelled_queued += 1
+                    self.db.delete_explore_queue_job(job["job_id"])
+                else:
+                    kept.append(job)
+            self._explore_queue = kept
+
+            for key in target_keys:
+                if key in self._explore_running and include_running:
+                    self._explore_cancel_requested.add(key)
+                    cancelled_running += 1
+                    running_job = self._explore_running[key]
+                    task_id = running_job.get("task_id", "")
+                    if task_id:
+                        self.client.kill_task(task_id)
+
+            next_jobs = self._dispatch_explore_queue_locked()
+
+        self._submit_explore_jobs(next_jobs)
+
+        for key in target_keys:
+            if key in self._explore_running:
+                continue
+            module_id, category = key.split(":", 1)
+            module = module_map.get(module_id) or self.db.get_explore_module(module_id)
+            if not module:
+                continue
+            if module.category_status.get(category) == ExploreStatus.IN_PROGRESS.value:
+                self._set_module_category_status(module_id, category, ExploreStatus.TODO.value, "")
+
+        reset_stale = 0
+        for module in module_map.values():
+            changed = False
+            for cat in cats:
+                if module.category_status.get(cat) == ExploreStatus.IN_PROGRESS.value:
+                    key = self._explore_job_key(module.id, cat)
+                    if key not in self._explore_running:
+                        module.category_status[cat] = ExploreStatus.TODO.value
+                        module.category_notes[cat] = ""
+                        reset_stale += 1
+                        changed = True
+            if changed:
+                module.updated_at = time.time()
+                self.db.save_explore_module(module)
+
+        cancelled = cancelled_queued + cancelled_running + reset_stale
+        return {
+            "cancelled": cancelled,
+            "cancelled_running": cancelled_running,
+            "cancelled_queued": cancelled_queued,
+            "reset_stale": reset_stale,
+            "invalid_categories": invalid_categories,
+            "queue": self.get_exploration_queue_state(),
+        }
+
+    def _apply_explore_map(self, run: AgentRun, modules_data: List[dict], model: str) -> int:
         agent_run = AgentRun(
-            task_id="__map_init__",
+            task_id=self._explore_map_task_id,
             agent_type="explorer_map_init",
             model=model,
             prompt=run.prompt,
@@ -1631,13 +2046,11 @@ class Orchestrator:
         )
         self.db.save_agent_run(agent_run)
 
-        # Clear old map
         self.db.delete_all_explore_modules()
-
         categories = self._get_explore_categories()
 
-        def _create_modules(items, parent_id="", depth=0):
-            created = []
+        def _create_modules(items: List[dict], parent_id: str = "", depth: int = 0) -> int:
+            created = 0
             for i, item in enumerate(items):
                 mod = ExploreModule(
                     name=item.get("name", ""),
@@ -1650,15 +2063,153 @@ class Orchestrator:
                     sort_order=i,
                 )
                 self.db.save_explore_module(mod)
-                created.append(mod)
+                created += 1
                 children = item.get("children", [])
                 if children:
-                    created.extend(_create_modules(children, mod.id, depth + 1))
+                    created += _create_modules(children, mod.id, depth + 1)
             return created
 
-        all_modules = _create_modules(modules_data)
-        log.info("Explore map initialized: %d modules created", len(all_modules))
-        return {"modules_created": len(all_modules)}
+        created_count = _create_modules(modules_data)
+        return created_count
+
+    def init_explore_map(self) -> dict:
+        """Synchronous map-init entrypoint (used by tests)."""
+        repo_path = self.config["repo"]["path"]
+        model = self.config.get("explore", {}).get("map_model", self._get_explorer_model())
+        explorer = ExplorerAgent(model=model, client=self.client)
+
+        try:
+            run, modules_data = explorer.init_map(repo_path)
+            modules_created = self._apply_explore_map(run, modules_data, model)
+            with self._lock:
+                self._explore_map_state.update({
+                    "status": "done",
+                    "started_at": time.time() - run.duration_sec,
+                    "finished_at": time.time(),
+                    "updated_at": time.time(),
+                    "session_id": run.session_id,
+                    "model": model,
+                    "output": self._trim_stream_output(run.output),
+                    "error": "",
+                    "cancel_requested": False,
+                    "modules_created": modules_created,
+                })
+            self._persist_explore_map_state()
+            log.info("Explore map initialized: %d modules created", modules_created)
+            return {"modules_created": modules_created}
+        except Exception as e:
+            with self._lock:
+                self._explore_map_state.update({
+                    "status": "failed",
+                    "finished_at": time.time(),
+                    "updated_at": time.time(),
+                    "error": str(e),
+                    "cancel_requested": False,
+                })
+            self._persist_explore_map_state()
+            log.error("Map init failed: %s", e)
+            return {"error": str(e)}
+
+    def start_init_explore_map(self) -> dict:
+        with self._lock:
+            if self._explore_map_state.get("status") == "in_progress":
+                return {
+                    "accepted": False,
+                    "error": "Map initialization already in progress",
+                    "state": dict(self._explore_map_state),
+                }
+
+            model = self.config.get("explore", {}).get("map_model", self._get_explorer_model())
+            now = time.time()
+            self._explore_map_cancel_requested = False
+            self._explore_map_state.update({
+                "status": "in_progress",
+                "started_at": now,
+                "finished_at": 0.0,
+                "updated_at": now,
+                "session_id": "",
+                "model": model,
+                "output": "",
+                "error": "",
+                "cancel_requested": False,
+                "modules_created": 0,
+            })
+            self._explore_map_future = self._pool.submit(self._run_init_explore_map_job, model)
+
+        self._persist_explore_map_state()
+        return {"accepted": True, "state": self.get_explore_init_state()}
+
+    def cancel_init_explore_map(self) -> dict:
+        with self._lock:
+            in_progress = self._explore_map_state.get("status") == "in_progress"
+            self._explore_map_cancel_requested = in_progress
+            if in_progress:
+                self._explore_map_state["cancel_requested"] = True
+                self._explore_map_state["updated_at"] = time.time()
+
+        if in_progress:
+            self.client.kill_task(self._explore_map_task_id)
+            self._persist_explore_map_state()
+        return {"cancel_requested": bool(in_progress), "state": self.get_explore_init_state()}
+
+    def _run_init_explore_map_job(self, model: str):
+        repo_path = self.config["repo"]["path"]
+        explorer = ExplorerAgent(model=model, client=self.client)
+        last_persist_at = 0.0
+
+        def _on_output(chunk: str, sid: str):
+            nonlocal last_persist_at
+            now = time.time()
+            with self._lock:
+                output = self._explore_map_state.get("output", "") + chunk
+                self._explore_map_state["output"] = self._trim_stream_output(output)
+                if sid:
+                    self._explore_map_state["session_id"] = sid
+                self._explore_map_state["updated_at"] = now
+            if now - last_persist_at >= 0.5:
+                self._persist_explore_map_state()
+                last_persist_at = now
+
+        try:
+            run, modules_data = explorer.init_map_streaming(
+                repo_path=repo_path,
+                task_id=self._explore_map_task_id,
+                on_output=_on_output,
+                should_cancel=lambda: self._explore_map_cancel_requested,
+            )
+            modules_created = self._apply_explore_map(run, modules_data, model)
+            now = time.time()
+            with self._lock:
+                self._explore_map_cancel_requested = False
+                self._explore_map_state.update({
+                    "status": "done",
+                    "finished_at": now,
+                    "updated_at": now,
+                    "session_id": run.session_id,
+                    "output": self._trim_stream_output(run.output),
+                    "error": "",
+                    "cancel_requested": False,
+                    "modules_created": modules_created,
+                })
+            self._persist_explore_map_state()
+            log.info("Explore map initialized: %d modules created", modules_created)
+        except Exception as e:
+            now = time.time()
+            cancelled = self._explore_map_cancel_requested
+            with self._lock:
+                self._explore_map_cancel_requested = False
+                self._explore_map_state.update({
+                    "status": "cancelled" if cancelled else "failed",
+                    "finished_at": now,
+                    "updated_at": now,
+                    "error": "" if cancelled else str(e),
+                    "cancel_requested": False,
+                })
+            self._persist_explore_map_state()
+            if cancelled:
+                log.info("Map init cancelled")
+            else:
+                log.error("Map init failed: %s", e)
 
     def start_exploration(
         self,
@@ -1670,39 +2221,97 @@ class Orchestrator:
         Picks leaf modules with TODO cells if *module_ids* is empty.
         Returns ``{"started": N}``.
         """
-        from agents.prompts import EXPLORER_PERSONALITIES
+        modules = self._list_target_modules_for_explore(module_ids)
+        cats, invalid_categories = self._validate_explore_categories(categories)
+        if not self.is_explore_map_ready():
+            return {
+                "started": 0,
+                "queued": 0,
+                "running": len(self._explore_running),
+                "rejected_in_progress": 0,
+                "skipped_non_todo": 0,
+                "invalid_categories": invalid_categories,
+                "error": "Explore map is not ready. Initialize map first.",
+                "map_ready": False,
+                "queue": self.get_exploration_queue_state(),
+            }
+        if not cats:
+            return {
+                "started": 0,
+                "queued": 0,
+                "running": len(self._explore_running),
+                "rejected_in_progress": 0,
+                "skipped_non_todo": 0,
+                "invalid_categories": invalid_categories,
+                "queue": self.get_exploration_queue_state(),
+            }
 
-        all_modules = self.db.get_all_explore_modules()
-        if module_ids:
-            modules = [m for m in all_modules if m.id in set(module_ids)]
-        else:
-            # Pick leaf modules (no children) with at least one TODO cell
-            child_parent_ids = {m.parent_id for m in all_modules}
-            modules = [m for m in all_modules if m.id not in child_parent_ids]
-
-        cats = categories or self._get_explore_categories()
         started = 0
+        queued_now = 0
+        rejected_in_progress = 0
+        skipped_non_todo = 0
 
-        for mod in modules:
-            for cat in cats:
-                # Re-read from DB to avoid stale overwrites when runs
-                # complete synchronously (or very fast).
-                fresh = self.db.get_explore_module(mod.id)
-                if fresh.category_status.get(cat) != ExploreStatus.TODO.value:
-                    continue
-                # Mark IN_PROGRESS
-                fresh.category_status[cat] = ExploreStatus.IN_PROGRESS.value
-                fresh.updated_at = time.time()
-                self.db.save_explore_module(fresh)
+        next_jobs: List[dict] = []
+        with self._lock:
+            for mod in modules:
+                for cat in cats:
+                    fresh = self.db.get_explore_module(mod.id)
+                    if not fresh:
+                        continue
+                    status = fresh.category_status.get(cat)
+                    if status == ExploreStatus.IN_PROGRESS.value:
+                        rejected_in_progress += 1
+                        continue
+                    if status != ExploreStatus.TODO.value:
+                        skipped_non_todo += 1
+                        continue
 
-                personality_key = self._pick_personality_for_category(cat)
-                self._pool.submit(
-                    self._run_exploration, mod.id, cat, personality_key
-                )
-                started += 1
+                    fresh.category_status[cat] = ExploreStatus.IN_PROGRESS.value
+                    fresh.updated_at = time.time()
+                    self.db.save_explore_module(fresh)
 
-        log.info("Exploration started: %d runs queued", started)
-        return {"started": started}
+                    personality_key = self._pick_personality_for_category(cat)
+                    job = {
+                        "job_id": uuid.uuid4().hex,
+                        "queue_id": self._next_explore_seq_locked(),
+                        "module_id": mod.id,
+                        "category": cat,
+                        "personality_key": personality_key,
+                        "task_id": f"__explore__:{mod.id}:{cat}",
+                        "state": "queued",
+                        "queued_at": time.time(),
+                        "started_at": 0.0,
+                        "session_id": "",
+                        "resume_with_continue": False,
+                    }
+                    self._explore_queue.append(job)
+                    self._persist_explore_job(job)
+                    started += 1
+                    queued_now += 1
+
+            next_jobs = self._dispatch_explore_queue_locked()
+            running_now = len(self._explore_running)
+
+        self._submit_explore_jobs(next_jobs)
+
+        log.info(
+            "Exploration scheduling: started=%d queued_now=%d running_now=%d "
+            "rejected_in_progress=%d skipped_non_todo=%d",
+            started,
+            queued_now,
+            running_now,
+            rejected_in_progress,
+            skipped_non_todo,
+        )
+        return {
+            "started": started,
+            "queued": queued_now,
+            "running": running_now,
+            "rejected_in_progress": rejected_in_progress,
+            "skipped_non_todo": skipped_non_todo,
+            "invalid_categories": invalid_categories,
+            "queue": self.get_exploration_queue_state(),
+        }
 
     def _pick_personality_for_category(self, category: str) -> str:
         """Select a personality whose ``category`` matches the given one."""
@@ -1718,9 +2327,20 @@ class Orchestrator:
         return random.choice(list(EXPLORER_PERSONALITIES.keys()))
 
     def _run_exploration(self, module_id: str, category: str,
-                         personality_key: str):
+                         personality_key: str, job: Optional[dict] = None):
         """Execute a single exploration run (called in thread pool)."""
         from agents.prompts import EXPLORER_PERSONALITIES
+
+        key = self._explore_job_key(module_id, category)
+        if self._is_explore_cancel_requested(key):
+            self._set_module_category_status(
+                module_id,
+                category,
+                ExploreStatus.TODO.value,
+                "",
+            )
+            self._clear_explore_cancel_flag(key)
+            return
 
         try:
             module = self.db.get_explore_module(module_id)
@@ -1728,15 +2348,62 @@ class Orchestrator:
             personality = EXPLORER_PERSONALITIES[personality_key]
             repo_path = self.config["repo"]["path"]
             model = self._get_explorer_model()
+            task_id = f"__explore__:{module_id}:{category}"
+            session_id = ""
+            resume_with_continue = False
+            if job is not None:
+                task_id = str(job.get("task_id", task_id))
+                session_id = str(job.get("session_id", ""))
+                resume_with_continue = bool(job.get("resume_with_continue", False))
 
             explorer = ExplorerAgent(model=model, client=self.client)
-            run, findings, summary = explorer.explore_module(
-                module=module,
-                category=category,
-                personality_focus=personality["focus"],
-                personality_name=personality["name"],
-                repo_path=repo_path,
-            )
+            stream_mode = job is not None and isinstance(self.client, OpenCodeClient)
+            if not stream_mode:
+                run, findings, summary = explorer.explore_module(
+                    module=module,
+                    category=category,
+                    personality_focus=personality["focus"],
+                    personality_name=personality["name"],
+                    repo_path=repo_path,
+                )
+            else:
+                persist_box = {"last": 0.0}
+
+                def _on_output(_chunk: str, sid: str):
+                    now = time.time()
+                    if sid and sid != job.get("session_id"):
+                        job["session_id"] = sid
+                    if now - persist_box["last"] >= 0.5:
+                        self._persist_explore_job(job)
+                        persist_box["last"] = now
+
+                run, findings, summary = explorer.explore_module_streaming(
+                    module=module,
+                    category=category,
+                    personality_focus=personality["focus"],
+                    personality_name=personality["name"],
+                    repo_path=repo_path,
+                    task_id=task_id,
+                    session_id=session_id,
+                    message_override="Continue" if (resume_with_continue and session_id) else None,
+                    on_output=_on_output,
+                    should_cancel=lambda: self._is_explore_cancel_requested(key),
+                )
+
+            if job is not None and run.session_id:
+                job["session_id"] = run.session_id
+                self._persist_explore_job(job)
+
+            if run.exit_code == -2:
+                module = self.db.get_explore_module(module_id)
+                if module:
+                    module.category_status[category] = ExploreStatus.TODO.value
+                    module.category_notes[category] = ""
+                    module.updated_at = time.time()
+                    self.db.save_explore_module(module)
+                self._clear_explore_cancel_flag(key)
+                log.info("Exploration cancelled: module=%s category=%s", module_id, category)
+                return
 
             # Save ExploreRun
             explore_run = ExploreRun(
@@ -1754,6 +2421,21 @@ class Orchestrator:
                 duration_sec=run.duration_sec,
             )
             self.db.save_explore_run(explore_run)
+
+            if self._is_explore_cancel_requested(key):
+                module = self.db.get_explore_module(module_id)
+                if module:
+                    module.category_status[category] = ExploreStatus.TODO.value
+                    module.category_notes[category] = ""
+                    module.updated_at = time.time()
+                    self.db.save_explore_module(module)
+                self._clear_explore_cancel_flag(key)
+                log.info(
+                    "Exploration cancelled after run completion: module=%s category=%s",
+                    module_id,
+                    category,
+                )
+                return
 
             # Update module status
             module = self.db.get_explore_module(module_id)
@@ -1789,6 +2471,8 @@ class Orchestrator:
                 module.category_status[category] = ExploreStatus.TODO.value
                 module.updated_at = time.time()
                 self.db.save_explore_module(module)
+        finally:
+            self._clear_explore_cancel_flag(key)
 
     @staticmethod
     def _build_explore_task(module_name: str, module_path: str,

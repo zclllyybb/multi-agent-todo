@@ -453,6 +453,12 @@ class TestOrchestratorExplore:
             o = Orchestrator(config)
         return o
 
+    @staticmethod
+    def _mark_map_ready(orch):
+        orch._explore_map_state["status"] = "done"
+        orch._explore_map_state["finished_at"] = time.time()
+        orch._persist_explore_map_state()
+
     def test_get_explore_categories(self, orch):
         cats = orch._get_explore_categories()
         assert cats == ["performance", "concurrency"]
@@ -571,6 +577,7 @@ class TestOrchestratorExplore:
 
     def test_start_exploration_selects_leaf_todo_modules(self, orch):
         """start_exploration with no args picks leaf modules with TODO cells."""
+        self._mark_map_ready(orch)
         # Create a parent and a child (leaf)
         parent = orch.add_explore_module(name="P", path="p")
         child = orch.add_explore_module(name="C", path="p/c", parent_id=parent["id"])
@@ -585,6 +592,7 @@ class TestOrchestratorExplore:
         assert len(submitted) == 2
 
     def test_start_exploration_with_specific_modules(self, orch):
+        self._mark_map_ready(orch)
         mod = orch.add_explore_module(name="A", path="a")
         submitted = []
         orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
@@ -593,6 +601,7 @@ class TestOrchestratorExplore:
         assert result["started"] == 2  # 2 categories
 
     def test_start_exploration_skips_non_todo(self, orch):
+        self._mark_map_ready(orch)
         mod_data = orch.add_explore_module(name="A", path="a")
         mod = orch.db.get_explore_module(mod_data["id"])
         mod.category_status["performance"] = ExploreStatus.DONE.value
@@ -605,6 +614,7 @@ class TestOrchestratorExplore:
         assert result["started"] == 1  # only concurrency remains TODO
 
     def test_start_exploration_specific_categories(self, orch):
+        self._mark_map_ready(orch)
         mod = orch.add_explore_module(name="A", path="a")
         submitted = []
         orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
@@ -613,6 +623,162 @@ class TestOrchestratorExplore:
             module_ids=[mod["id"]], categories=["performance"]
         )
         assert result["started"] == 1
+
+    def test_start_exploration_rejects_duplicate_in_progress(self, orch):
+        self._mark_map_ready(orch)
+        mod_data = orch.add_explore_module(name="A", path="a")
+        mod = orch.db.get_explore_module(mod_data["id"])
+        mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
+        orch.db.save_explore_module(mod)
+
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(
+            module_ids=[mod_data["id"]],
+            categories=["performance", "concurrency"],
+        )
+        assert result["started"] == 1
+        assert result["rejected_in_progress"] == 1
+        assert result["skipped_non_todo"] == 0
+        assert len(submitted) == 1
+
+    def test_start_exploration_queues_when_parallel_limit_reached(self, orch):
+        self._mark_map_ready(orch)
+        orch._explore_parallel_limit = 1
+        m1 = orch.add_explore_module(name="A", path="a")
+        m2 = orch.add_explore_module(name="B", path="b")
+
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(
+            module_ids=[m1["id"], m2["id"]],
+            categories=["performance"],
+        )
+        assert result["started"] == 2
+        assert result["running"] == 1
+        assert result["queue"]["counts"]["queued"] == 1
+        assert len(submitted) == 1
+
+    def test_cancel_exploration_resets_stale_in_progress_cells(self, orch):
+        self._mark_map_ready(orch)
+        mod_data = orch.add_explore_module(name="A", path="a")
+        mod = orch.db.get_explore_module(mod_data["id"])
+        mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
+        orch.db.save_explore_module(mod)
+
+        result = orch.cancel_exploration(
+            module_ids=[mod_data["id"]],
+            categories=["performance"],
+        )
+
+        assert result["cancelled"] == 1
+        assert result["reset_stale"] == 1
+        updated = orch.db.get_explore_module(mod_data["id"])
+        assert updated.category_status["performance"] == ExploreStatus.TODO.value
+
+    def test_recover_stuck_exploration_on_startup(self, tmp_path):
+        config = _make_orchestrator_config(tmp_path)
+        with patch("core.orchestrator.OpenCodeClient"):
+            from core.orchestrator import Orchestrator
+            orch = Orchestrator(config)
+
+        mod_data = orch.add_explore_module(name="A", path="a")
+        mod = orch.db.get_explore_module(mod_data["id"])
+        mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
+        orch.db.save_explore_module(mod)
+
+        with patch("core.orchestrator.OpenCodeClient"):
+            from core.orchestrator import Orchestrator
+            restarted = Orchestrator(config)
+
+        recovered = restarted.db.get_explore_module(mod_data["id"])
+        assert recovered.category_status["performance"] == ExploreStatus.TODO.value
+
+    def test_start_exploration_rejected_before_map_ready(self, orch):
+        mod = orch.add_explore_module(name="A", path="a")
+        result = orch.start_exploration(module_ids=[mod["id"]], categories=["performance"])
+        assert result["started"] == 0
+        assert result["map_ready"] is False
+        assert "error" in result
+
+    def test_init_map_non_reentrant_and_cancellable(self, orch):
+        def _fake_init_map_streaming(self, repo_path, max_depth=2, task_id="", session_id="",
+                                     message_override=None, on_output=None, should_cancel=None):
+            if on_output:
+                on_output('{"sessionID":"ses_init"}\n', "ses_init")
+            for _ in range(30):
+                if should_cancel and should_cancel():
+                    raise RuntimeError("map init cancelled")
+                time.sleep(0.01)
+            run = _mock_agent_run(output=MOCK_MAP_OUTPUT, session_id="ses_init")
+            return run, json.loads(MOCK_MAP_OUTPUT)["modules"]
+
+        with patch.object(ExplorerAgent, "init_map_streaming", new=_fake_init_map_streaming):
+            first = orch.start_init_explore_map()
+            assert first["accepted"] is True
+
+            second = orch.start_init_explore_map()
+            assert second["accepted"] is False
+
+            cancel = orch.cancel_init_explore_map()
+            assert cancel["cancel_requested"] is True
+
+            for _ in range(100):
+                state = orch.get_explore_init_state()
+                if state["status"] != "in_progress":
+                    break
+                time.sleep(0.01)
+
+            state = orch.get_explore_init_state()
+            assert state["status"] == "cancelled"
+
+    def test_recover_exploration_queue_job_with_continue(self, tmp_path):
+        from core.orchestrator import Orchestrator
+
+        class _DummyPool:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, fn, *args):
+                self.submitted.append((fn, args))
+                return MagicMock()
+
+            def shutdown(self, wait=False):
+                return None
+
+        config = _make_orchestrator_config(tmp_path)
+        with patch("core.orchestrator.OpenCodeClient"), \
+             patch("core.orchestrator.ThreadPoolExecutor", side_effect=lambda max_workers: _DummyPool()):
+            orch = Orchestrator(config)
+
+        mod_data = orch.add_explore_module(name="A", path="a")
+        mod = orch.db.get_explore_module(mod_data["id"])
+        mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
+        orch.db.save_explore_module(mod)
+        orch.db.save_explore_queue_job({
+            "job_id": "job_resume_1",
+            "queue_id": 1,
+            "module_id": mod_data["id"],
+            "category": "performance",
+            "personality_key": "perf_hunter",
+            "task_id": f"__explore__:{mod_data['id']}:performance",
+            "state": "running",
+            "queued_at": time.time() - 10,
+            "started_at": time.time() - 9,
+            "session_id": "ses_resume",
+        })
+
+        with patch("core.orchestrator.OpenCodeClient"), \
+             patch("core.orchestrator.ThreadPoolExecutor", side_effect=lambda max_workers: _DummyPool()):
+            restarted = Orchestrator(config)
+
+        queue_state = restarted.get_exploration_queue_state()
+        assert queue_state["counts"]["running"] == 1
+        running_job = next(iter(restarted._explore_running.values()))
+        assert running_job["session_id"] == "ses_resume"
+        assert running_job["resume_with_continue"] is True
 
 
 # ═══════════════════════════════════════════════════════════════════════

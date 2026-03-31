@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from agents.base import BaseAgent
 from core.models import AgentRun, ExploreModule, ModelOutputError
@@ -13,6 +13,25 @@ log = logging.getLogger(__name__)
 
 class ExplorerAgent(BaseAgent):
     agent_type: str = "explorer"
+
+    @staticmethod
+    def _build_explore_prompt(
+        module: ExploreModule,
+        category: str,
+        personality_focus: str,
+        personality_name: str,
+        repo_path: str,
+    ) -> str:
+        from agents.prompts import explorer_prompt
+        return explorer_prompt(
+            module_name=module.name,
+            module_path=module.path,
+            module_description=module.description,
+            category=category,
+            personality_name=personality_name,
+            personality_focus=personality_focus,
+            repo_path=repo_path,
+        )
 
     def explore_module(
         self,
@@ -28,18 +47,50 @@ class ExplorerAgent(BaseAgent):
         *findings_list* items have keys: severity, title, description,
         file_path, line_number, suggested_fix.
         """
-        from agents.prompts import explorer_prompt
-
-        prompt = explorer_prompt(
-            module_name=module.name,
-            module_path=module.path,
-            module_description=module.description,
+        prompt = self._build_explore_prompt(
+            module=module,
             category=category,
-            personality_name=personality_name,
             personality_focus=personality_focus,
+            personality_name=personality_name,
             repo_path=repo_path,
         )
         run = self.run(prompt, repo_path)
+        text = self.get_text(run)
+        findings, summary = self._parse_output(text)
+        return run, findings, summary
+
+    def explore_module_streaming(
+        self,
+        module: ExploreModule,
+        category: str,
+        personality_focus: str,
+        personality_name: str,
+        repo_path: str,
+        task_id: str = "",
+        session_id: str = "",
+        message_override: Optional[str] = None,
+        on_output: Optional[Callable[[str, str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[AgentRun, List[dict], str]:
+        prompt = message_override or self._build_explore_prompt(
+            module=module,
+            category=category,
+            personality_focus=personality_focus,
+            personality_name=personality_name,
+            repo_path=repo_path,
+        )
+        run = self.client.run_streaming(
+            message=prompt,
+            work_dir=repo_path,
+            model=self.model,
+            agent_type=self.agent_type,
+            task_id=task_id,
+            session_id=session_id,
+            on_output=on_output,
+            should_cancel=should_cancel,
+        )
+        if run.exit_code == -2:
+            return run, [], ""
         text = self.get_text(run)
         findings, summary = self._parse_output(text)
         return run, findings, summary
@@ -84,6 +135,35 @@ class ExplorerAgent(BaseAgent):
 
         prompt = map_init_prompt(repo_path=repo_path, max_depth=max_depth)
         run = self.run(prompt, repo_path)
+        text = self.get_text(run)
+        modules = self._parse_map_output(text)
+        return run, modules
+
+    def init_map_streaming(
+        self,
+        repo_path: str,
+        max_depth: int = 2,
+        task_id: str = "",
+        session_id: str = "",
+        message_override: Optional[str] = None,
+        on_output: Optional[Callable[[str, str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[AgentRun, List[dict]]:
+        from agents.prompts import map_init_prompt
+
+        prompt = message_override or map_init_prompt(repo_path=repo_path, max_depth=max_depth)
+        run = self.client.run_streaming(
+            message=prompt,
+            work_dir=repo_path,
+            model=self.model,
+            agent_type="explorer_map_init",
+            task_id=task_id,
+            session_id=session_id,
+            on_output=on_output,
+            should_cancel=should_cancel,
+        )
+        if run.exit_code == -2:
+            raise RuntimeError("map init cancelled")
         text = self.get_text(run)
         modules = self._parse_map_output(text)
         return run, modules

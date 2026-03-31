@@ -64,6 +64,8 @@ explore:
   # Model for map initialization and exploration agents
   explorer_model: your-provider/explorer-model
   map_model: your-provider/explorer-model
+  # Max exploration runs executing at once (overflow goes to queue)
+  max_parallel_runs: 2
   # Categories to explore per module
   categories:
     - performance

@@ -62,6 +62,19 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_explore_runs_module
                 ON explore_runs(module_id);
+
+            CREATE TABLE IF NOT EXISTS explore_queue_jobs (
+                id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_explore_queue_jobs_state
+                ON explore_queue_jobs(state);
+
+            CREATE TABLE IF NOT EXISTS orchestrator_state (
+                key TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
         """)
         conn.commit()
         conn.close()
@@ -220,3 +233,49 @@ class Database:
             "SELECT data FROM explore_runs ORDER BY rowid DESC"
         ).fetchall()
         return [ExploreRun.from_dict(json.loads(r[0])) for r in rows]
+
+    # ── Explore Queue Job Persistence ──────────────────────────────────
+
+    def save_explore_queue_job(self, job: dict):
+        state = str(job.get("state", "queued"))
+        self._conn.execute(
+            "INSERT OR REPLACE INTO explore_queue_jobs (id, state, data) VALUES (?, ?, ?)",
+            (job["job_id"], state, json.dumps(job)),
+        )
+        self._conn.commit()
+
+    def get_explore_queue_jobs(self) -> List[dict]:
+        rows = self._conn.execute(
+            "SELECT data FROM explore_queue_jobs ORDER BY rowid"
+        ).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def delete_explore_queue_job(self, job_id: str):
+        self._conn.execute("DELETE FROM explore_queue_jobs WHERE id = ?", (job_id,))
+        self._conn.commit()
+
+    def delete_all_explore_queue_jobs(self):
+        self._conn.execute("DELETE FROM explore_queue_jobs")
+        self._conn.commit()
+
+    # ── Orchestrator State KV ──────────────────────────────────────────
+
+    def save_state(self, key: str, value: dict):
+        self._conn.execute(
+            "INSERT OR REPLACE INTO orchestrator_state (key, data) VALUES (?, ?)",
+            (key, json.dumps(value)),
+        )
+        self._conn.commit()
+
+    def get_state(self, key: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT data FROM orchestrator_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if not row:
+            return None
+        return json.loads(row[0])
+
+    def delete_state(self, key: str):
+        self._conn.execute("DELETE FROM orchestrator_state WHERE key = ?", (key,))
+        self._conn.commit()

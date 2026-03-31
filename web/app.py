@@ -478,11 +478,29 @@ async def api_explore_module_detail(module_id: str):
 
 @app.post("/api/explore/init-map")
 async def api_init_explore_map():
-    """Trigger map initialization agent (returns immediately, runs in background)."""
+    """Trigger map initialization (stateful, non-reentrant)."""
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
-    orchestrator._pool.submit(orchestrator.init_explore_map)
-    return {"status": "initializing"}
+    result = orchestrator.start_init_explore_map()
+    if not result.get("accepted", False):
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@app.post("/api/explore/init-map/cancel")
+async def api_cancel_init_explore_map():
+    """Cancel the current map initialization run."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    return orchestrator.cancel_init_explore_map()
+
+
+@app.get("/api/explore/status")
+async def api_explore_status():
+    """Return repository + map-init status for explore UI state gating."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    return orchestrator.get_explore_status()
 
 
 @app.post("/api/explore/start")
@@ -500,6 +518,31 @@ async def api_start_exploration(request: Request):
         categories=body.get("categories"),
     )
     return result
+
+
+@app.get("/api/explore/queue")
+async def api_explore_queue():
+    """Return current exploration queue/running state."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    return orchestrator.get_exploration_queue_state()
+
+
+@app.post("/api/explore/cancel")
+async def api_cancel_exploration(request: Request):
+    """Cancel exploration jobs by scope; default cancels all categories/modules."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    return orchestrator.cancel_exploration(
+        module_ids=body.get("module_ids"),
+        categories=body.get("categories"),
+        include_running=bool(body.get("include_running", True)),
+    )
 
 
 @app.post("/api/explore/modules")
@@ -740,6 +783,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .ev-time { color: var(--text-dim); font-size: 10px; margin-right: 6px; }
 
   #refresh-indicator { color: var(--text-dim); font-size: 12px; }
+  #refresh-breakdown { color: var(--text-dim); font-size: 11px; margin-left: 10px; }
   .copy-btn { cursor: pointer; color: var(--text-dim); font-size: 11px; margin-left: 8px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spinner { display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.2);
@@ -804,6 +848,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .sev-major { color: var(--orange); border-color: var(--orange); }
   .sev-minor { color: var(--yellow); border-color: var(--yellow); }
   .sev-info { color: var(--text-dim); border-color: var(--text-dim); }
+
+  .explore-filters { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+  .explore-filter-card { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--surface); }
+  .explore-filter-card h4 { margin:0 0 8px 0; font-size:12px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; }
+  .explore-filter-hint { margin-top:6px; font-size:11px; color:var(--text-dim); }
+  .explore-category-filters { display:flex; flex-wrap:wrap; gap:8px; }
+  .explore-cat-chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; border:1px solid var(--border); border-radius:999px; padding:4px 8px; }
+  .explore-cat-chip input { margin:0; }
+
+  .explore-queue-panel { border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:12px; background:var(--surface); }
+  .explore-queue-header { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+  .explore-queue-list { display:flex; flex-direction:column; gap:6px; }
+  .explore-queue-item { border:1px solid var(--border); border-radius:6px; padding:8px; font-size:12px; background:var(--bg); display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .explore-queue-item .meta { color:var(--text-dim); font-size:11px; font-family:monospace; }
+  .explore-queue-item.running { border-left:3px solid var(--yellow); }
+  .explore-queue-item.queued { border-left:3px solid var(--accent); }
+  .explore-init-log { max-height:220px; overflow:auto; font-size:11px; font-family:monospace;
+    white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--border);
+    border-radius:6px; padding:8px; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -812,6 +875,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h1>Multi-Agent TODO Resolver</h1>
     <div>
       <span id="refresh-indicator">Auto-refresh: 5s</span>
+      <span id="refresh-breakdown"></span>
       <button class="btn" onclick="refresh()">Refresh</button>
     </div>
   </header>
@@ -852,8 +916,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="actions" style="margin-bottom:12px">
       <button class="btn btn-primary" id="explore-init-btn" onclick="initExploreMap()">&#9881; Initialize Map</button>
       <button class="btn" style="color:var(--green)" id="explore-start-btn" onclick="startExploration()">&#9654; Start Exploration</button>
+      <button class="btn" style="color:var(--red)" id="explore-cancel-btn" onclick="cancelExplorationByFilters()">&#10005; Cancel Exploration</button>
       <button class="btn" onclick="showAddModuleModal()">+ Add Module</button>
+      <span id="explore-repo-label" style="font-size:12px;color:var(--text-dim)"></span>
+      <span id="explore-start-summary" style="font-size:11px;color:var(--text-dim)"></span>
     </div>
+    <div id="explore-init-state" class="explore-queue-panel"></div>
+    <div class="explore-filters">
+      <div class="explore-filter-card">
+        <h4>Target Modules</h4>
+        <select id="explore-module-select" multiple style="width:100%;min-height:92px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px"></select>
+        <div class="explore-filter-hint">No selection = all leaf modules</div>
+      </div>
+      <div class="explore-filter-card">
+        <h4>Categories</h4>
+        <div id="explore-category-filters" class="explore-category-filters"></div>
+        <div class="explore-filter-hint">Select categories to run/cancel</div>
+      </div>
+    </div>
+    <div id="explore-queue" class="explore-queue-panel"></div>
     <div style="display:flex;gap:16px;align-items:flex-start">
       <!-- Module tree (left pane) -->
       <div id="explore-tree" style="flex:1;min-width:0;max-height:70vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
@@ -1056,6 +1137,29 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML.replace(/"/g, '&quot;');
+}
+
+function fmtMs(ms) {
+  return `${ms.toFixed(1)}ms`;
+}
+
+function updateRefreshPerfLabel(m) {
+  const indicator = document.getElementById('refresh-indicator');
+  const breakdown = document.getElementById('refresh-breakdown');
+  if (!indicator || !breakdown) return;
+  indicator.textContent = 'Auto-refresh: 5s';
+
+  if (!m) {
+    breakdown.textContent = '';
+    return;
+  }
+
+  if (m.skipped) {
+    breakdown.textContent = `hash-hit total=${fmtMs(m.total_ms)} fetch=${fmtMs(m.fetch_ms)} hash=${fmtMs(m.hash_ms)}`;
+    return;
+  }
+
+  breakdown.textContent = `total=${fmtMs(m.total_ms)} fetch=${fmtMs(m.fetch_ms)} hash=${fmtMs(m.hash_ms)} stats=${fmtMs(m.stats_ms)} tree=${fmtMs(m.tree_ms)} html=${fmtMs(m.rows_ms)} dom=${fmtMs(m.dom_ms)}`;
 }
 
 function copyText(text) {
@@ -1263,7 +1367,9 @@ function renderGitStatus(gs, worktreePath, branchName, taskId) {
 let _lastRefreshHash = '';
 let _currentDetailTaskId = '';
 async function refresh() {
+  const t0 = performance.now();
   const [status, tasks] = await Promise.all([api('/api/status'), api('/api/tasks')]);
+  const tFetch = performance.now();
   // Skip DOM rebuild if data unchanged (fast path for auto-refresh)
   const hash = JSON.stringify([
     status.status_counts,
@@ -1276,7 +1382,16 @@ async function refresh() {
       !!t.actual_worktree_exists,
     ]),
   ]);
-  if (hash === _lastRefreshHash) return;
+  const tHash = performance.now();
+  if (hash === _lastRefreshHash) {
+    updateRefreshPerfLabel({
+      skipped: true,
+      total_ms: tHash - t0,
+      fetch_ms: tFetch - t0,
+      hash_ms: tHash - tFetch,
+    });
+    return;
+  }
   _lastRefreshHash = hash;
 
   const sc = status.status_counts || {};
@@ -1288,6 +1403,7 @@ async function refresh() {
     <div class="stat-card"><div class="num" style="color:#f0a040">${sc.needs_arbitration||0}</div><div class="label">Arbitration</div></div>
     <div class="stat-card"><div class="num" style="color:var(--red)">${(sc.failed||0)+(sc.review_failed||0)}</div><div class="label">Failed</div></div>
   `;
+  const tStats = performance.now();
 
   // Build parent-child tree: roots first, children indented below their parent
   const byId = Object.fromEntries(tasks.map(t => [t.id, t]));
@@ -1310,9 +1426,10 @@ async function refresh() {
     }
   }
   walk(roots, 0);
+  const tTree = performance.now();
 
   const tbody = document.getElementById('task-list');
-  tbody.innerHTML = ordered.map(({t, depth}) => {
+  const rowsHtml = ordered.map(({t, depth}) => {
     const nSes = countSessions(t.session_ids);
     const complexityBadge = t.complexity
       ? `<span style="font-size:10px;margin-left:4px;color:${
@@ -1361,6 +1478,19 @@ async function refresh() {
       </td>
     </tr>`;
   }).join('');
+  const tRows = performance.now();
+  tbody.innerHTML = rowsHtml;
+  const tDom = performance.now();
+  updateRefreshPerfLabel({
+    skipped: false,
+    total_ms: tDom - t0,
+    fetch_ms: tFetch - t0,
+    hash_ms: tHash - tFetch,
+    stats_ms: tStats - tHash,
+    tree_ms: tTree - tStats,
+    rows_ms: tRows - tTree,
+    dom_ms: tDom - tRows,
+  });
 }
 
 async function showDetail(id) {
@@ -1585,6 +1715,54 @@ async function refreshAddTaskBaseBranch() {
   }
 }
 
+function renderExploreInitState() {
+  const panel = document.getElementById('explore-init-state');
+  if (!panel) return;
+  const repoLabel = document.getElementById('explore-repo-label');
+
+  const status = _exploreStatus || _emptyExploreStatus();
+  const init = status.map_init || {};
+  const st = init.status || 'idle';
+  const stColor = st === 'done' ? 'var(--green)' : st === 'in_progress' ? 'var(--yellow)' : st === 'failed' ? 'var(--red)' : 'var(--text-dim)';
+  const startedTxt = init.started_at ? new Date(init.started_at * 1000).toLocaleString() : '-';
+  const finishedTxt = init.finished_at ? new Date(init.finished_at * 1000).toLocaleString() : '-';
+  const output = (init.readable_output || init.output || '').trim();
+
+  if (repoLabel) {
+    const rn = status.repo_name || '-';
+    const rp = status.repo_path || '';
+    repoLabel.innerHTML = `Repo: <strong>${esc(rn)}</strong>${rp ? ` <span style="font-size:11px">(${esc(rp)})</span>` : ''}`;
+  }
+
+  panel.innerHTML = `
+    <div class="explore-queue-header" style="margin-bottom:4px">
+      <div>
+        <strong>Map Initialization</strong>
+        <span style="font-size:11px;color:${stColor};margin-left:8px">${esc(st)}</span>
+      </div>
+      <button class="btn btn-sm" style="color:var(--red)" onclick="cancelInitExploreMap()" ${st === 'in_progress' ? '' : 'disabled'}>Cancel Init</button>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim)">
+      started: ${esc(startedTxt)} · finished: ${esc(finishedTxt)} · modules: ${init.modules_created || 0}
+      ${init.session_id ? ` · session: <code>${esc(init.session_id)}</code>` : ''}
+      ${init.model ? ` · model: <code>${esc(init.model)}</code>` : ''}
+    </div>
+    ${init.error ? `<div style="margin-top:6px;font-size:11px;color:var(--red)">${esc(init.error)}</div>` : ''}
+    ${output ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">Live init output</summary><div class="explore-init-log">${esc(output)}</div></details>` : ''}
+  `;
+
+  const initBtn = document.getElementById('explore-init-btn');
+  if (initBtn) {
+    initBtn.disabled = st === 'in_progress';
+    initBtn.innerHTML = st === 'in_progress' ? '&#9881; Initializing...' : '&#9881; Initialize Map';
+  }
+
+  const startBtn = document.getElementById('explore-start-btn');
+  if (startBtn) {
+    startBtn.disabled = !status.map_ready || st === 'in_progress';
+  }
+}
+
 function showAddTask() {
   document.getElementById('add-modal').classList.add('active');
   refreshAddTaskBaseBranch();
@@ -1803,7 +1981,10 @@ function switchMainTab(el, panelId) {
     document.getElementById(id).style.display = (id === panelId) ? '' : 'none';
   });
   if (panelId === 'main-todos') loadTodos();
-  if (panelId === 'main-explore') loadExploreModules();
+  if (panelId === 'main-explore') {
+    loadExploreModules();
+    loadExploreQueue();
+  }
   if (panelId === 'main-sysinfo') loadSysInfo();
 }
 
@@ -2266,6 +2447,31 @@ async function deleteSelected() {
 
 let _exploreModules = [];
 let _selectedModuleId = null;
+let _exploreCategories = [];
+let _exploreQueue = {
+  running: [],
+  queued: [],
+  counts: { running: 0, queued: 0, total: 0 },
+  max_parallel_runs: 1,
+};
+let _exploreStatus = {
+  repo_name: '',
+  repo_path: '',
+  map_ready: false,
+  map_init: {
+    status: 'idle',
+    started_at: 0,
+    finished_at: 0,
+    updated_at: 0,
+    session_id: '',
+    model: '',
+    output: '',
+    readable_output: '',
+    error: '',
+    cancel_requested: false,
+    modules_created: 0,
+  },
+};
 const _catColors = {
   performance: '#f85149',
   concurrency: '#d29922',
@@ -2283,10 +2489,161 @@ function statusDotColor(status) {
   return 'rgba(255,255,255,0.15)';
 }
 
+function _emptyExploreQueueState() {
+  return {
+    running: [],
+    queued: [],
+    counts: { running: 0, queued: 0, total: 0 },
+    max_parallel_runs: 1,
+  };
+}
+
+function _emptyExploreStatus() {
+  return {
+    repo_name: '',
+    repo_path: '',
+    map_ready: false,
+    map_init: {
+      status: 'idle',
+      started_at: 0,
+      finished_at: 0,
+      updated_at: 0,
+      session_id: '',
+      model: '',
+      output: '',
+      readable_output: '',
+      error: '',
+      cancel_requested: false,
+      modules_created: 0,
+    },
+  };
+}
+
+function _isExploreTabActive() {
+  const panel = document.getElementById('main-explore');
+  return panel && panel.style.display !== 'none';
+}
+
+function getSelectedExploreCategories() {
+  return Array.from(
+    document.querySelectorAll('#explore-category-filters input[type="checkbox"]:checked')
+  ).map(x => x.value);
+}
+
+function getSelectedExploreModules() {
+  const sel = document.getElementById('explore-module-select');
+  if (!sel) return [];
+  return Array.from(sel.selectedOptions || []).map(o => o.value).filter(Boolean);
+}
+
+function getModuleDetailSelectedCategories(moduleId) {
+  return Array.from(
+    document.querySelectorAll(`.exp-module-cat-check[data-module-id="${moduleId}"]:checked`)
+  ).map(x => x.value);
+}
+
+function renderExploreFilters() {
+  const moduleSelect = document.getElementById('explore-module-select');
+  if (moduleSelect) {
+    moduleSelect.innerHTML = '';
+    for (const m of _exploreModules) {
+      const indent = '&nbsp;'.repeat((m.depth || 0) * 2);
+      moduleSelect.innerHTML += `<option value="${m.id}">${indent}${esc(m.name)} (${esc(m.path)})</option>`;
+    }
+  }
+
+  const catWrap = document.getElementById('explore-category-filters');
+  if (catWrap) {
+    if (!_exploreCategories.length) {
+      catWrap.innerHTML = '<span style="color:var(--text-dim);font-size:12px">No categories configured</span>';
+    } else {
+      catWrap.innerHTML = _exploreCategories.map(cat => `
+        <label class="explore-cat-chip" style="border-color:${catColor(cat)}66">
+          <input type="checkbox" value="${cat}" checked>
+          <span style="color:${catColor(cat)}">${cat.replace(/_/g, ' ')}</span>
+        </label>
+      `).join('');
+    }
+  }
+}
+
+function renderExploreQueue() {
+  const panel = document.getElementById('explore-queue');
+  if (!panel) return;
+
+  const queueState = _exploreQueue || _emptyExploreQueueState();
+  const counts = queueState.counts || { running: 0, queued: 0, total: 0 };
+  const running = queueState.running || [];
+  const queued = queueState.queued || [];
+  const rows = [...running, ...queued];
+
+  let html = `<div class="explore-queue-header">
+    <div>
+      <strong>Exploration Queue</strong>
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">parallel=${queueState.max_parallel_runs || 1} running=${counts.running} queued=${counts.queued}</span>
+    </div>
+    <button class="btn btn-sm" style="color:var(--red)" onclick="cancelAllExploration()">Cancel All</button>
+  </div>`;
+
+  if (!rows.length) {
+    html += '<span style="color:var(--text-dim);font-size:12px">No exploration jobs in progress.</span>';
+    panel.innerHTML = html;
+    return;
+  }
+
+  html += '<div class="explore-queue-list">';
+  for (const j of rows) {
+    const state = j.state || 'queued';
+    const when = state === 'running' ? (j.started_at || 0) : (j.queued_at || 0);
+    const whenTxt = when ? new Date(when * 1000).toLocaleTimeString() : '-';
+    html += `<div class="explore-queue-item ${state}">
+      <div style="min-width:0">
+        <div><span style="color:${catColor(j.category)}">${(j.category || '').replace(/_/g, ' ')}</span> · ${esc(j.module_name || j.module_id || '')}</div>
+        <div class="meta">${esc(j.module_path || '')} · ${state} @ ${whenTxt}</div>
+      </div>
+      <button class="btn btn-sm" style="color:var(--red)" onclick="cancelExploreJob('${j.module_id}','${j.category}')">Cancel</button>
+    </div>`;
+  }
+  html += '</div>';
+  panel.innerHTML = html;
+}
+
+async function loadExploreQueue() {
+  try {
+    const [queue, status] = await Promise.all([
+      api('/api/explore/queue'),
+      api('/api/explore/status'),
+    ]);
+    _exploreQueue = queue || _emptyExploreQueueState();
+    _exploreStatus = status || _emptyExploreStatus();
+  } catch(e) {
+    _exploreQueue = _emptyExploreQueueState();
+    _exploreStatus = _emptyExploreStatus();
+  }
+  renderExploreInitState();
+  renderExploreQueue();
+}
+
 async function loadExploreModules() {
   try {
-    _exploreModules = await api('/api/explore/modules');
-  } catch(e) { _exploreModules = []; }
+    const [mods, status, queue] = await Promise.all([
+      api('/api/explore/modules'),
+      api('/api/explore/status'),
+      api('/api/explore/queue'),
+    ]);
+    _exploreModules = Array.isArray(mods) ? mods : [];
+    _exploreStatus = status || _emptyExploreStatus();
+    _exploreCategories = (status && Array.isArray(status.categories)) ? status.categories : [];
+    _exploreQueue = queue || _emptyExploreQueueState();
+  } catch(e) {
+    _exploreModules = [];
+    _exploreStatus = _emptyExploreStatus();
+    _exploreCategories = [];
+    _exploreQueue = _emptyExploreQueueState();
+  }
+  renderExploreFilters();
+  renderExploreInitState();
+  renderExploreQueue();
   renderExploreTree();
   if (_selectedModuleId) showModuleDetail(_selectedModuleId);
 }
@@ -2362,7 +2719,8 @@ async function showModuleDetail(moduleId) {
       <div style="font-family:monospace;font-size:12px;color:var(--text-dim);margin-bottom:6px">${esc(m.path)}</div>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${esc(m.description || 'No description')}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <button class="btn btn-sm" style="color:var(--green)" onclick="exploreModule('${m.id}')">&#9654; Explore</button>
+        <button class="btn btn-sm" style="color:var(--green)" onclick="exploreModule('${m.id}')">&#9654; Explore Selected Categories</button>
+        <button class="btn btn-sm" style="color:var(--red)" onclick="cancelModuleExploration('${m.id}')">&#10005; Cancel Selected Categories</button>
         <button class="btn btn-sm" style="color:var(--red)" onclick="deleteModule('${m.id}')">&#128465; Delete</button>
         <button class="btn btn-sm" onclick="resetModuleStatuses('${m.id}')">&#8634; Reset</button>
       </div>
@@ -2378,6 +2736,7 @@ async function showModuleDetail(moduleId) {
       const stColor = statusDotColor(st);
       const stBg = st === 'done' ? 'rgba(63,185,80,0.1)' : st === 'in_progress' ? 'rgba(210,153,34,0.1)' : 'transparent';
       html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg}">
+        <input type="checkbox" class="exp-module-cat-check" data-module-id="${m.id}" value="${cat}" ${st !== 'done' ? 'checked' : ''}>
         <span class="exp-cat-label" style="color:${catColor(cat)}">${cat.replace(/_/g,' ')}</span>
         <span class="exp-cat-status" style="color:${stColor}">${st}</span>
         <span style="flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(note)}">${esc(note.slice(0,80)) || '-'}</span>
@@ -2428,46 +2787,160 @@ async function showModuleDetail(moduleId) {
 }
 
 async function initExploreMap() {
-  const btn = document.getElementById('explore-init-btn');
+  const st = (_exploreStatus && _exploreStatus.map_init && _exploreStatus.map_init.status) || 'idle';
+  if (st === 'in_progress') {
+    await uiAlert('Map initialization is already running.', 'Initialize Explore Map');
+    return;
+  }
   if (!await uiConfirm('This will re-scan the repository and replace the current module map. Continue?', 'Initialize Explore Map')) return;
-  btn.disabled = true; btn.textContent = 'Initializing...';
   try {
-    await api('/api/explore/init-map', {method:'POST'});
-    await uiAlert('Map initialization started in background. Refresh in a moment to see results.', 'Map Init Started');
+    const res = await api('/api/explore/init-map', {method:'POST'});
+    if (res && res.accepted === false) {
+      await uiAlert(res.error || 'Map initialization is already running.', 'Initialize Explore Map');
+    } else {
+      await uiAlert('Map initialization started.', 'Map Init Started');
+    }
   } catch(e) {
     await uiAlert('Init failed: ' + e, 'Error');
-  } finally {
-    btn.disabled = false; btn.innerHTML = '&#9881; Initialize Map';
   }
-  setTimeout(loadExploreModules, 3000);
+  await loadExploreModules();
+}
+
+async function cancelInitExploreMap() {
+  try {
+    const init = (_exploreStatus && _exploreStatus.map_init) || {};
+    if ((init.status || '') !== 'in_progress') {
+      return;
+    }
+    if (!await uiConfirm('Cancel current map initialization?', 'Cancel Map Initialization')) return;
+    await api('/api/explore/init-map/cancel', {method:'POST'});
+  } catch(e) {
+    await uiAlert('Cancel init failed: ' + e, 'Error');
+  }
+  await loadExploreModules();
 }
 
 async function startExploration() {
   const btn = document.getElementById('explore-start-btn');
+  const init = (_exploreStatus && _exploreStatus.map_init) || {};
+  if (!_exploreStatus.map_ready || init.status === 'in_progress') {
+    await uiAlert('Map is not ready yet. Please finish Initialize Map first.', 'Map Not Ready');
+    return;
+  }
   btn.disabled = true; btn.textContent = 'Starting...';
   try {
-    const res = await api('/api/explore/start', {method:'POST'});
+    const moduleIds = getSelectedExploreModules();
+    const categories = getSelectedExploreCategories();
+    if (!categories.length) {
+      await uiAlert('Select at least one category before starting exploration.', 'No Category Selected');
+      return;
+    }
+    const payload = { categories };
+    if (moduleIds.length) payload.module_ids = moduleIds;
+    const res = await api('/api/explore/start', {method:'POST', body: JSON.stringify(payload)});
+    if (res && res.error) {
+      await uiAlert(String(res.error), 'Start Exploration');
+      return;
+    }
+    const extra = [];
+    if (res.rejected_in_progress) extra.push(`rejected(in_progress): ${res.rejected_in_progress}`);
+    if (res.skipped_non_todo) extra.push(`skipped(non-todo): ${res.skipped_non_todo}`);
+    if (Array.isArray(res.invalid_categories) && res.invalid_categories.length) {
+      extra.push(`invalid: ${res.invalid_categories.join(', ')}`);
+    }
+    const summary = document.getElementById('explore-start-summary');
+    if (summary) summary.textContent = extra.join(' · ');
     if (res.started > 0) {
-      await uiAlert(`Started ${res.started} exploration run(s). Progress will update in the module detail view.`, 'Exploration Started');
+      await uiAlert(`Started ${res.started} run(s): running=${res.running || 0}, queued=${res.queue?.counts?.queued || 0}.`, 'Exploration Started');
     } else {
-      await uiAlert('No TODO categories found to explore. All modules may already be explored.', 'Nothing to Explore');
+      await uiAlert('No TODO categories matched the current filters.', 'Nothing to Explore');
     }
   } catch(e) {
     await uiAlert('Start failed: ' + e, 'Error');
   } finally {
-    btn.disabled = false; btn.innerHTML = '&#9654; Start Exploration';
+    btn.disabled = false;
+    btn.innerHTML = '&#9654; Start Exploration';
+    renderExploreInitState();
   }
-  setTimeout(loadExploreModules, 2000);
+  await loadExploreModules();
+  if (_selectedModuleId) showModuleDetail(_selectedModuleId);
 }
 
 async function exploreModule(moduleId) {
   try {
-    const res = await api('/api/explore/start', {method:'POST', body: JSON.stringify({module_ids: [moduleId]})});
-    await uiAlert(`Started ${res.started} exploration run(s) for this module.`, 'Exploration Started');
-    setTimeout(() => showModuleDetail(moduleId), 2000);
+    const init = (_exploreStatus && _exploreStatus.map_init) || {};
+    if (!_exploreStatus.map_ready || init.status === 'in_progress') {
+      await uiAlert('Map is not ready yet. Please finish Initialize Map first.', 'Map Not Ready');
+      return;
+    }
+    const categories = getModuleDetailSelectedCategories(moduleId);
+    if (!categories.length) {
+      await uiAlert('Select at least one category in the module detail first.', 'No Category Selected');
+      return;
+    }
+    const res = await api('/api/explore/start', {
+      method:'POST',
+      body: JSON.stringify({module_ids: [moduleId], categories}),
+    });
+    if (res && res.error) {
+      await uiAlert(String(res.error), 'Start Exploration');
+      return;
+    }
+    await uiAlert(`Started ${res.started} run(s) for this module.`, 'Exploration Started');
+    await loadExploreModules();
+    showModuleDetail(moduleId);
   } catch(e) {
     await uiAlert('Explore failed: ' + e, 'Error');
   }
+}
+
+async function cancelAllExploration() {
+  if (!await uiConfirm('Cancel all queued/running exploration jobs and reset in-progress states?', 'Cancel All Exploration')) return;
+  await cancelExplorationRequest({}, 'Cancel All Exploration');
+}
+
+async function cancelExplorationByFilters() {
+  const moduleIds = getSelectedExploreModules();
+  const categories = getSelectedExploreCategories();
+  if (!categories.length) {
+    await uiAlert('Select at least one category before cancelling.', 'No Category Selected');
+    return;
+  }
+  const payload = { categories };
+  if (moduleIds.length) payload.module_ids = moduleIds;
+  await cancelExplorationRequest(payload, 'Cancel Exploration');
+}
+
+async function cancelModuleExploration(moduleId) {
+  const categories = getModuleDetailSelectedCategories(moduleId);
+  if (!categories.length) {
+    await uiAlert('Select at least one category in module detail before cancelling.', 'No Category Selected');
+    return;
+  }
+  await cancelExplorationRequest({ module_ids: [moduleId], categories }, 'Cancel Module Exploration');
+  showModuleDetail(moduleId);
+}
+
+async function cancelExploreJob(moduleId, category) {
+  await cancelExplorationRequest({ module_ids: [moduleId], categories: [category] }, 'Cancel Exploration Job');
+  if (_selectedModuleId === moduleId) showModuleDetail(moduleId);
+}
+
+async function cancelExplorationRequest(payload, title) {
+  try {
+    const res = await api('/api/explore/cancel', {
+      method:'POST',
+      body: JSON.stringify(payload || {}),
+    });
+    const summary = document.getElementById('explore-start-summary');
+    if (summary) {
+      summary.textContent = `cancelled=${res.cancelled || 0} (running=${res.cancelled_running || 0}, queued=${res.cancelled_queued || 0}, stale=${res.reset_stale || 0})`;
+    }
+    await uiAlert(`Cancelled ${res.cancelled || 0} exploration item(s).`, title || 'Exploration Cancelled');
+  } catch(e) {
+    await uiAlert('Cancel failed: ' + e, 'Error');
+  }
+  await loadExploreModules();
 }
 
 async function deleteModule(moduleId) {
@@ -2545,6 +3018,9 @@ async function doAddModule() {
 initOverlayClose();
 refresh();
 setInterval(refresh, 5000);
+setInterval(() => {
+  if (_isExploreTabActive()) loadExploreQueue();
+}, 3000);
 </script>
 </body>
 </html>"""

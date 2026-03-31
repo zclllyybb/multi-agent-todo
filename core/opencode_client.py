@@ -4,11 +4,12 @@ import datetime
 import json
 import logging
 import os
+import select
 import signal
 import subprocess
 import threading
 import time
-from typing import Optional, Set, Tuple
+from typing import Callable, Optional, Set, Tuple
 
 from core.models import AgentRun
 
@@ -69,6 +70,103 @@ class OpenCodeClient:
             duration = time.time() - start
             log.error("opencode timed out after %ds", self.timeout)
             return f"TIMEOUT after {self.timeout}s", -1, duration
+        finally:
+            with self._proc_lock:
+                self._active_procs.discard(proc)
+                if task_id and self._task_procs.get(task_id) is proc:
+                    del self._task_procs[task_id]
+
+    def _terminate_proc(self, proc: subprocess.Popen):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        except OSError:
+            pass
+
+    def _exec_streaming(
+        self,
+        cmd: list,
+        work_dir: str,
+        task_id: str = "",
+        on_output: Optional[Callable[[str, str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[str, int, float, str, bool]:
+        """Execute an opencode command while streaming output chunks.
+
+        Returns (output, exit_code, duration, session_id, was_cancelled).
+        """
+        start = time.time()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=work_dir,
+            start_new_session=False,
+            bufsize=1,
+        )
+        with self._proc_lock:
+            self._active_procs.add(proc)
+            if task_id:
+                self._task_procs[task_id] = proc
+
+        chunks: list[str] = []
+        sid = ""
+        cancelled = False
+        deadline = start + self.timeout
+
+        try:
+            stdout = proc.stdout
+            if stdout is None:
+                duration = time.time() - start
+                return "", -1, duration, sid, False
+
+            while True:
+                if should_cancel and should_cancel():
+                    cancelled = True
+                    self._terminate_proc(proc)
+                    break
+
+                if time.time() > deadline:
+                    log.error("opencode timed out after %ds", self.timeout)
+                    self._terminate_proc(proc)
+                    duration = time.time() - start
+                    return f"TIMEOUT after {self.timeout}s", -1, duration, sid, False
+
+                ready, _, _ = select.select([stdout], [], [], 0.2)
+                if ready:
+                    line = stdout.readline()
+                    if line:
+                        chunks.append(line)
+                        maybe_sid = self.extract_session_id(line)
+                        if maybe_sid:
+                            sid = maybe_sid
+                        if on_output:
+                            on_output(line, sid)
+                    elif proc.poll() is not None:
+                        break
+                elif proc.poll() is not None:
+                    break
+
+            remainder = stdout.read() or ""
+            if remainder:
+                chunks.append(remainder)
+                maybe_sid = self.extract_session_id(remainder)
+                if maybe_sid:
+                    sid = maybe_sid
+                if on_output:
+                    on_output(remainder, sid)
+
+            proc.wait()
+            duration = time.time() - start
+            return "".join(chunks), proc.returncode, duration, sid, cancelled
+
         finally:
             with self._proc_lock:
                 self._active_procs.discard(proc)
@@ -154,6 +252,84 @@ class OpenCodeClient:
         log.info(
             "opencode [%s] finished: exit=%d duration=%.1fs session=%s output_len=%d continues=%d",
             agent_type, exit_code, duration, sid, len(output), continue_count,
+        )
+        return run
+
+    def run_streaming(
+        self,
+        message: str,
+        work_dir: str,
+        model: str = "opencode/gpt-5-nano",
+        agent_type: str = "coder",
+        task_id: str = "",
+        session_id: str = "",
+        max_continues: int = 1,
+        on_output: Optional[Callable[[str, str], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> AgentRun:
+        """Run opencode with streaming output and optional cancellation."""
+        total_duration = 0.0
+        output = ""
+        sid = session_id
+        continue_count = 0
+        current_message = message
+
+        while True:
+            cmd = [
+                "opencode", "run",
+                "--model", model,
+                "--dir", work_dir,
+                "--format", "json",
+            ]
+            if sid:
+                cmd.extend(["--session", sid])
+            cmd.append(current_message)
+
+            log.info(
+                "Running opencode(stream) [%s] model=%s dir=%s session=%s",
+                agent_type, model, work_dir, sid,
+            )
+            chunk_out, exit_code, duration, observed_sid, cancelled = self._exec_streaming(
+                cmd=cmd,
+                work_dir=work_dir,
+                task_id=task_id,
+                on_output=on_output,
+                should_cancel=should_cancel,
+            )
+            total_duration += duration
+            output += chunk_out
+            sid = observed_sid or self.extract_session_id(output) or sid
+
+            if cancelled:
+                exit_code = -2
+                break
+
+            if exit_code == 0:
+                break
+
+            if not sid or continue_count >= max_continues:
+                break
+
+            continue_count += 1
+            log.warning(
+                "opencode(stream) [%s] failed (exit=%d), auto-continuing session %s (%d/%d)",
+                agent_type, exit_code, sid, continue_count, max_continues,
+            )
+            current_message = "Continue"
+
+        run = AgentRun(
+            task_id=task_id,
+            agent_type=agent_type,
+            model=model,
+            prompt=message,
+            output=output,
+            exit_code=exit_code,
+            duration_sec=total_duration,
+            session_id=sid,
+        )
+        log.info(
+            "opencode(stream) [%s] finished: exit=%d duration=%.1fs session=%s output_len=%d continues=%d",
+            agent_type, exit_code, total_duration, sid, len(output), continue_count,
         )
         return run
 
