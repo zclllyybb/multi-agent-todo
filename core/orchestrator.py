@@ -2016,6 +2016,9 @@ class Orchestrator:
         focus_point: str,
         actionability_score: float,
         reliability_score: float,
+        explored_scope: str,
+        completion_status: str,
+        completion_reason: str,
         supplemental_note: str,
     ) -> str:
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -2026,6 +2029,13 @@ class Orchestrator:
             parts.append(f"actionability: {actionability_score:.1f}/10")
         if reliability_score >= 0:
             parts.append(f"reliability: {reliability_score:.1f}/10")
+        if explored_scope:
+            parts.append(f"explored: {explored_scope}")
+        if completion_status:
+            completion_text = f"completion: {completion_status}"
+            if completion_reason:
+                completion_text += f" ({completion_reason})"
+            parts.append(completion_text)
         if summary:
             parts.append(f"summary: {summary}")
         if supplemental_note:
@@ -2654,6 +2664,9 @@ class Orchestrator:
                 "focus_point": focus_point,
                 "actionability_score": -1.0,
                 "reliability_score": -1.0,
+                "explored_scope": "",
+                "completion_status": "complete",
+                "completion_reason": "",
                 "supplemental_note": "",
                 "map_review_required": False,
                 "map_review_reason": "",
@@ -2683,6 +2696,9 @@ class Orchestrator:
                 focus_point=metadata["focus_point"] or focus_point,
                 actionability_score=metadata["actionability_score"],
                 reliability_score=metadata["reliability_score"],
+                explored_scope=metadata["explored_scope"],
+                completion_status=metadata["completion_status"],
+                completion_reason=metadata["completion_reason"],
                 supplemental_note=metadata["supplemental_note"],
                 map_review_required=metadata["map_review_required"],
                 map_review_reason=metadata["map_review_reason"],
@@ -2711,12 +2727,26 @@ class Orchestrator:
 
             # Update module status
             module = self.db.get_explore_module(module_id)
-            module.category_status[category] = ExploreStatus.DONE.value
+            if module is None:
+                log.warning(
+                    "Explore result could not be applied because module vanished: module=%s category=%s",
+                    module_id,
+                    category,
+                )
+                return
+            module.category_status[category] = (
+                ExploreStatus.DONE.value
+                if metadata["completion_status"] == "complete"
+                else ExploreStatus.STALE.value
+            )
             note_entry = self._build_explore_note_entry(
                 summary=summary,
                 focus_point=metadata["focus_point"] or focus_point,
                 actionability_score=metadata["actionability_score"],
                 reliability_score=metadata["reliability_score"],
+                explored_scope=metadata["explored_scope"],
+                completion_status=metadata["completion_status"],
+                completion_reason=metadata["completion_reason"],
                 supplemental_note=metadata["supplemental_note"],
             )
             module.category_notes[category] = self._append_explore_note(

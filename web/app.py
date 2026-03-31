@@ -483,9 +483,16 @@ async def api_explore_module_detail(module_id: str):
     if not module:
         return JSONResponse({"error": "Module not found"}, status_code=404)
     runs = orchestrator.db.get_explore_runs_for_module(module_id)
+    client = orchestrator.client
+    parsed_runs = []
+    for r in runs:
+        rd = r.to_dict()
+        rd["parsed"] = client.parse_readable_output(r.output)
+        rd.pop("output", None)
+        parsed_runs.append(rd)
     return {
         "module": module.to_dict(),
-        "runs": [r.to_dict() for r in runs],
+        "runs": parsed_runs,
     }
 
 
@@ -2791,11 +2798,19 @@ async function showModuleDetail(moduleId) {
       const note = catNotes[cat] || '';
       const stColor = statusDotColor(st);
       const stBg = st === 'done' ? 'rgba(63,185,80,0.1)' : st === 'in_progress' ? 'rgba(210,153,34,0.1)' : 'transparent';
-      html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg}">
+      const notePreview = note.length > 120 ? `${esc(note.slice(0,120))}...` : esc(note);
+      html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg};align-items:flex-start">
         <input type="checkbox" class="exp-module-cat-check" data-module-id="${m.id}" value="${cat}" ${st !== 'done' ? 'checked' : ''}>
-        <span class="exp-cat-label" style="color:${catColor(cat)}">${cat.replace(/_/g,' ')}</span>
-        <span class="exp-cat-status" style="color:${stColor}">${st}</span>
-        <span style="flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(note)}">${esc(note.slice(0,80)) || '-'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:${note ? '6px' : '0'}">
+            <span class="exp-cat-label" style="color:${catColor(cat)}">${cat.replace(/_/g,' ')}</span>
+            <span class="exp-cat-status" style="color:${stColor}">${st}</span>
+          </div>
+          ${note ? (note.length > 120
+            ? `<details><summary style="cursor:pointer;font-size:11px;color:var(--text-dim)">${notePreview}</summary><pre style="margin-top:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:11px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word">${esc(note)}</pre></details>`
+            : `<div style="font-size:11px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word">${esc(note)}</div>`)
+            : `<div style="font-size:11px;color:var(--text-dim)">-</div>`}
+        </div>
       </div>`;
     }
     html += `</div></div>`;
@@ -2803,20 +2818,33 @@ async function showModuleDetail(moduleId) {
     // Runs & findings
     if (runs.length) {
       html += `<h4 style="font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Exploration Runs (${runs.length})</h4>`;
-      for (const run of runs) {
+      for (let i = 0; i < runs.length; i++) {
+        const run = runs[i];
         const findings = run.findings || [];
-        html += `<div style="margin-bottom:12px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
-          <div style="padding:10px 12px;background:rgba(255,255,255,0.02);display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+        const sid = run.session_id || (run.parsed && run.parsed.session_id) || '';
+        const exitColor = run.exit_code === 0 ? 'var(--green)' : 'var(--red)';
+        const failStyle = run.exit_code !== 0 ? 'border-left:3px solid var(--red)' : '';
+        const completionColor = run.completion_status === 'complete' ? 'var(--green)' : 'var(--orange)';
+        html += `<div class="run-card" style="${failStyle}">
+          <div class="run-header" onclick="toggleRun(this)">
             <div>
               <span style="font-weight:600;color:${catColor(run.category)}">${run.category.replace(/_/g,' ')}</span>
               <span style="font-size:11px;color:var(--text-dim);margin-left:8px">${esc(run.personality)}</span>
+              <span style="font-size:11px;color:var(--text-dim);margin-left:8px">${fmtTime(run.created_at)}</span>
               <span style="font-size:11px;color:var(--text-dim);margin-left:8px">${run.duration_sec.toFixed(1)}s</span>
             </div>
             <div>
-              <span style="font-size:12px;color:${findings.length ? 'var(--yellow)' : 'var(--green)'}">${findings.length} finding${findings.length !== 1 ? 's' : ''}</span>
+              <span style="font-size:12px;color:${completionColor}">${esc(run.completion_status || 'complete')}</span>
+              <span style="color:${exitColor};font-size:12px;margin-left:8px">exit=${run.exit_code}</span>
+              <span style="font-size:12px;color:${findings.length ? 'var(--yellow)' : 'var(--green)'};margin-left:8px">${findings.length} finding${findings.length !== 1 ? 's' : ''}</span>
+              ${sid ? `<span class="run-meta" style="margin-left:8px">session: ${esc(sid.substring(0,20))}...</span>` : ''}
             </div>
           </div>
-          <div style="display:none;padding:12px">`;
+          <div class="run-body" id="explore-run-body-${i}">`;
+        if (sid) {
+          html += renderSessionBox(sid, `${run.category} explorer session`);
+        }
+        html += renderPromptSection(run.prompt, `explore-${run.id}`);
         if (run.summary) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">${esc(run.summary)}</div>`;
         }
@@ -2825,12 +2853,17 @@ async function showModuleDetail(moduleId) {
           actionability: ${run.actionability_score >= 0 ? Number(run.actionability_score).toFixed(1) : '-'} / 10 ·
           reliability: ${run.reliability_score >= 0 ? Number(run.reliability_score).toFixed(1) : '-'} / 10
         </div>`;
+        if (run.explored_scope) {
+          html += `<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">explored: ${esc(run.explored_scope)}</div>`;
+        }
+        html += `<div style="font-size:11px;color:${completionColor};margin-bottom:8px">completion: ${esc(run.completion_status || 'complete')}${run.completion_reason ? ` · ${esc(run.completion_reason)}` : ''}</div>`;
         if (run.supplemental_note) {
           html += `<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">note: ${esc(run.supplemental_note)}</div>`;
         }
         if (run.map_review_required) {
           html += `<div style="font-size:11px;color:var(--yellow);margin-bottom:8px">map review requested${run.map_review_reason ? `: ${esc(run.map_review_reason)}` : ''}</div>`;
         }
+        html += `<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">Session transcript</summary><div style="margin-top:8px">${renderParsedRun(run.parsed)}</div></details>`;
         for (let fi = 0; fi < findings.length; fi++) {
           const f = findings[fi];
           html += `<div class="exp-finding" style="border-left:3px solid">

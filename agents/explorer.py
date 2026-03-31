@@ -95,6 +95,10 @@ class ExplorerAgent(BaseAgent):
                 f"explorer: invalid JSON in model output: {e}"
             ) from e
 
+        completion_status = str(data.get("completion_status", "complete")).strip().lower()
+        if completion_status not in {"complete", "partial"}:
+            completion_status = "complete"
+
         return {
             "summary": str(data.get("summary", "")),
             "focus_point": str(data.get("focus_point", "")).strip(),
@@ -104,6 +108,9 @@ class ExplorerAgent(BaseAgent):
             "reliability_score": ExplorerAgent._clamp_score(
                 data.get("reliability_score", -1.0)
             ),
+            "explored_scope": str(data.get("explored_scope", "")).strip(),
+            "completion_status": completion_status,
+            "completion_reason": str(data.get("completion_reason", "")).strip(),
             "supplemental_note": str(data.get("supplemental_note", "")).strip(),
             "map_review_required": bool(data.get("map_review_required", False)),
             "map_review_reason": str(data.get("map_review_reason", "")).strip(),

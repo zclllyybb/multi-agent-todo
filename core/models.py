@@ -236,6 +236,9 @@ class ExploreRun:
     focus_point: str = ""
     actionability_score: float = -1.0   # 0-10: how worth addressing
     reliability_score: float = -1.0     # 0-10: confidence of analysis
+    explored_scope: str = ""          # what this run actually covered
+    completion_status: str = "complete"  # complete / partial
+    completion_reason: str = ""       # why the run is or is not complete
     supplemental_note: str = ""        # concise note for future explorers
     map_review_required: bool = False
     map_review_reason: str = ""
@@ -262,6 +265,9 @@ class ExploreRun:
         d.setdefault("focus_point", "")
         d.setdefault("actionability_score", -1.0)
         d.setdefault("reliability_score", -1.0)
+        d.setdefault("explored_scope", "")
+        d.setdefault("completion_status", "complete")
+        d.setdefault("completion_reason", "")
         d.setdefault("supplemental_note", "")
         d.setdefault("map_review_required", False)
         d.setdefault("map_review_reason", "")
