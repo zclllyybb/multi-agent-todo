@@ -322,8 +322,11 @@ class Orchestrator:
           coder_model_default: str
           coder_model_by_complexity: dict  (level -> model)
           reviewer_models: list[str]
+          explorer_model: str
+          map_model: str
         """
         oc = self.config.setdefault("opencode", {})
+        explore = self.config.setdefault("explore", {})
 
         if "planner_model" in updates and updates["planner_model"]:
             model = updates["planner_model"].strip()
@@ -361,39 +364,54 @@ class Orchestrator:
                 oc["reviewer_models"] = cleaned
                 log.info("Updated reviewer models: %s", cleaned)
 
-        # Persist the opencode section back to config.yaml so changes survive restarts
-        self._save_opencode_config()
+        if "explorer_model" in updates and updates["explorer_model"]:
+            model = updates["explorer_model"].strip()
+            explore["explorer_model"] = model
+            log.info("Updated explorer model: %s", model)
 
-    def _save_opencode_config(self):
+        if "map_model" in updates and updates["map_model"]:
+            model = updates["map_model"].strip()
+            explore["map_model"] = model
+            log.info("Updated map model: %s", model)
+
+        # Persist model config changes so they survive restarts.
+        self._save_model_config()
+
+    def _save_model_config(self):
         """Write model config changes back to config.yaml preserving all comments/formatting.
 
         Strategy: parse the file line-by-line and replace only the scalar values
-        for the four model keys, leaving every comment, blank line, and other
-        key intact.  Multi-line structures (coder_model_by_complexity,
+        for the model keys, leaving every comment, blank line, and other key
+        intact. Multi-line structures (coder_model_by_complexity,
         reviewer_models) are replaced block-by-block.
         """
-        config_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "config.yaml",
-        )
+        meta = self.config.get("_meta", {}) if isinstance(self.config, dict) else {}
+        config_path = meta.get("config_path") if isinstance(meta, dict) else None
+        if not config_path:
+            config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config.yaml",
+            )
         try:
             with open(config_path) as f:
                 lines = f.readlines()
 
             oc = self.config["opencode"]
-            new_lines = self._patch_yaml_lines(lines, oc)
+            explore = self.config.get("explore", {})
+            new_lines = self._patch_yaml_lines(lines, oc, explore)
 
             with open(config_path, "w") as f:
                 f.writelines(new_lines)
-            log.info("Persisted opencode model config to %s", config_path)
+            log.info("Persisted model config to %s", config_path)
         except Exception as e:
             log.warning("Could not persist model config to %s: %s", config_path, e)
 
     @staticmethod
-    def _patch_yaml_lines(lines: list, oc: dict) -> list:
+    def _patch_yaml_lines(lines: list, oc: dict, explore: Optional[dict] = None) -> list:
         """Return a copy of lines with opencode model values patched in-place."""
         import re as _re
 
+        explore = explore or {}
         result = list(lines)
         i = 0
         while i < len(result):
@@ -476,6 +494,20 @@ class Orchestrator:
                     new_block.append(f"{child_indent}- {model}\n")
                 result[i:block_end] = new_block
                 i += len(new_block)
+                continue
+
+            # ── explorer_model ─────────────────────────────────────────
+            m = _re.match(r'^(\s*explorer_model\s*:\s*)(.*)$', stripped)
+            if m and "explorer_model" in explore:
+                result[i] = m.group(1) + explore["explorer_model"] + "\n"
+                i += 1
+                continue
+
+            # ── map_model ──────────────────────────────────────────────
+            m = _re.match(r'^(\s*map_model\s*:\s*)(.*)$', stripped)
+            if m and "map_model" in explore:
+                result[i] = m.group(1) + explore["map_model"] + "\n"
+                i += 1
                 continue
 
             i += 1
@@ -1846,6 +1878,36 @@ class Orchestrator:
             self._explore_map_state = default_state
         self._persist_explore_map_state()
 
+    def reset_explore_state(self) -> dict:
+        """Clear explore metadata while preserving already created tasks."""
+        with self._lock:
+            running_jobs = list(self._explore_running.values())
+            self._explore_queue = []
+            self._explore_running = {}
+            self._explore_cancel_requested.clear()
+            map_in_progress = self._explore_map_state.get("status") == "in_progress"
+            self._explore_map_cancel_requested = False
+            self._explore_map_state = self._default_explore_map_state()
+            self._explore_map_future = None
+
+        for job in running_jobs:
+            task_id = str(job.get("task_id", ""))
+            if task_id:
+                self.client.kill_task(task_id)
+        if map_in_progress:
+            self.client.kill_task(self._explore_map_task_id)
+
+        self.db.delete_all_explore_queue_jobs()
+        self.db.delete_all_explore_runs()
+        self.db.delete_all_explore_modules()
+        self.db.delete_state(self._explore_map_state_key)
+        self._persist_explore_map_state()
+        return {
+            "ok": True,
+            "tasks_preserved": True,
+            "map_init": self.get_explore_init_state(),
+        }
+
     def _persist_explore_job(self, job: dict):
         payload = {k: v for k, v in job.items() if not str(k).startswith("_")}
         self.db.save_explore_queue_job(payload)
@@ -2029,6 +2091,13 @@ class Orchestrator:
             parts.append(f"actionability: {actionability_score:.1f}/10")
         if reliability_score >= 0:
             parts.append(f"reliability: {reliability_score:.1f}/10")
+        if explored_scope:
+            parts.append(f"explored: {explored_scope}")
+        if completion_status:
+            completion_text = f"completion: {completion_status}"
+            if completion_reason:
+                completion_text += f" ({completion_reason})"
+            parts.append(completion_text)
         if explored_scope:
             parts.append(f"explored: {explored_scope}")
         if completion_status:
@@ -2370,6 +2439,12 @@ class Orchestrator:
     def start_init_explore_map(self, review_reason: str = "") -> dict:
         return self._start_init_explore_map(review_reason=review_reason)
 
+    def reinitialize_explore_map(self, review_reason: str = "") -> dict:
+        reset = self.reset_explore_state()
+        result = self._start_init_explore_map(review_reason=review_reason)
+        result["reset"] = reset
+        return result
+
     def cancel_init_explore_map(self) -> dict:
         with self._lock:
             in_progress = self._explore_map_state.get("status") == "in_progress"
@@ -2664,6 +2739,9 @@ class Orchestrator:
                 "focus_point": focus_point,
                 "actionability_score": -1.0,
                 "reliability_score": -1.0,
+                "explored_scope": "",
+                "completion_status": "complete",
+                "completion_reason": "",
                 "explored_scope": "",
                 "completion_status": "complete",
                 "completion_reason": "",

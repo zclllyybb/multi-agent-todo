@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from core.models import (
-    ExploreModule, ExploreRun, ExploreStatus, TaskSource, TaskStatus,
+    ExploreModule, ExploreRun, ExploreStatus, Task, TaskSource, TaskStatus,
     ModelOutputError,
 )
 from core.database import Database
@@ -457,9 +457,43 @@ class TestExplorePrompts:
 
 def _make_orchestrator_config(tmp_path):
     """Build a minimal config dict for Orchestrator instantiation."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join([
+            "repo:",
+            "  path: /fake/repo",
+            "  base_branch: master",
+            f"  worktree_dir: {tmp_path}",
+            "  worktree_hooks: []",
+            "opencode:",
+            "  planner_model: test-planner",
+            "  coder_model_by_complexity:",
+            "    simple: test-coder",
+            "  coder_model_default: test-coder",
+            "  reviewer_models:",
+            "    - test-reviewer",
+            "  timeout: 60",
+            "orchestrator:",
+            "  max_parallel_tasks: 2",
+            "  max_retries: 1",
+            "  poll_interval: 999",
+            "explore:",
+            "  explorer_model: test-explorer",
+            "  map_model: test-map-model",
+            "  categories:",
+            "    - performance",
+            "    - concurrency",
+            "  auto_task_severity: major",
+            "database:",
+            f"  path: {tmp_path / 'test.db'}",
+            "hook_env: {}",
+            "",
+        ]),
+        encoding="utf-8",
+    )
     return {
         "repo": {"path": "/fake/repo", "base_branch": "master",
-                 "worktree_dir": str(tmp_path), "worktree_hooks": []},
+                  "worktree_dir": str(tmp_path), "worktree_hooks": []},
         "opencode": {
             "planner_model": "test-planner",
             "coder_model_by_complexity": {"simple": "test-coder"},
@@ -477,6 +511,7 @@ def _make_orchestrator_config(tmp_path):
         },
         "database": {"path": str(tmp_path / "test.db")},
         "hook_env": {},
+        "_meta": {"config_path": str(config_path)},
     }
 
 
@@ -564,6 +599,28 @@ class TestOrchestratorExplore:
             orch.init_explore_map()
         modules = orch.db.get_all_explore_modules()
         assert all(m.id != "old" for m in modules)
+
+    def test_reinitialize_explore_map_resets_explore_metadata_but_keeps_tasks(self, orch):
+        task = Task(title="Keep me", description="persist")
+        orch.db.save_task(task)
+        orch.db.save_explore_module(ExploreModule(id="old", name="Old", path="old"))
+        orch.db.save_explore_run(ExploreRun(module_id="old", category="performance", personality="perf", model="m"))
+        orch.db.save_explore_queue_job({"job_id": "job-old", "module_id": "old", "category": "performance", "state": "queued"})
+        orch.db.save_state(orch._explore_map_state_key, {"status": "done", "session_id": "ses_old"})
+
+        mock_run = _mock_agent_run(output=MOCK_MAP_OUTPUT, session_id="ses_new")
+        with patch.object(ExplorerAgent, "init_map_streaming", return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"])):
+            result = orch.reinitialize_explore_map()
+
+        assert result["accepted"] is True
+        assert result["reset"]["tasks_preserved"] is True
+        assert orch.db.get_task(task.id) is not None
+        assert orch.db.get_explore_module("old") is None
+        assert not orch.db.get_all_explore_runs()
+        assert not orch.db.get_explore_queue_jobs()
+        state = orch.get_explore_init_state()
+        assert state["status"] == "in_progress"
+        assert state["session_id"] == ""
 
     def test_init_explore_map_error(self, orch):
         with patch.object(ExplorerAgent, "init_map", side_effect=RuntimeError("fail")):
@@ -1287,3 +1344,97 @@ class TestExploreModuleDetailApi:
         assert returned["parsed"]["session_id"] == "ses_api"
         assert returned["parsed"]["summary"]["total_steps"] == 1
         assert returned["parsed"]["steps"][0]["events"][0]["content"] == "Exploring scanner and scheduler"
+
+
+class TestModelConfigUpdates:
+    @pytest.fixture
+    def orch(self, tmp_path):
+        config = _make_orchestrator_config(tmp_path)
+        with patch("core.orchestrator.OpenCodeClient"):
+            from core.orchestrator import Orchestrator
+            o = Orchestrator(config)
+        return o
+
+    def test_update_models_updates_and_persists_explore_models(self, orch):
+        with patch.object(orch, "_save_model_config") as save_mock:
+            orch.update_models({
+                "planner_model": "planner-new",
+                "explorer_model": "explorer-new",
+                "map_model": "map-new",
+            })
+
+        assert orch.config["opencode"]["planner_model"] == "planner-new"
+        assert orch.config["explore"]["explorer_model"] == "explorer-new"
+        assert orch.config["explore"]["map_model"] == "map-new"
+        assert orch.planner.model == "planner-new"
+        save_mock.assert_called_once()
+
+    def test_patch_yaml_lines_updates_opencode_and_explore_model_fields(self):
+        from core.orchestrator import Orchestrator
+
+        lines = [
+            "opencode:\n",
+            "  planner_model: old-planner\n",
+            "  coder_model_by_complexity:\n",
+            "    simple: old-simple\n",
+            "  coder_model_default: old-coder\n",
+            "  reviewer_models:\n",
+            "    - old-reviewer\n",
+            "explore:\n",
+            "  explorer_model: old-explorer\n",
+            "  map_model: old-map\n",
+        ]
+
+        patched = Orchestrator._patch_yaml_lines(
+            lines,
+            {
+                "planner_model": "new-planner",
+                "coder_model_by_complexity": {"simple": "new-simple"},
+                "coder_model_default": "new-coder",
+                "reviewer_models": ["new-reviewer-a", "new-reviewer-b"],
+            },
+            {
+                "explorer_model": "new-explorer",
+                "map_model": "new-map",
+            },
+        )
+
+        text = "".join(patched)
+        assert "planner_model: new-planner" in text
+        assert "simple: new-simple" in text
+        assert "coder_model_default: new-coder" in text
+        assert "- new-reviewer-a" in text
+        assert "- new-reviewer-b" in text
+        assert "explorer_model: new-explorer" in text
+        assert "map_model: new-map" in text
+
+    def test_api_config_get_and_post_include_explore_models(self, orch):
+        from web import app as web_app
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            before = asyncio.run(web_app.api_config())
+            assert before["planner_model"] == "test-planner"
+            assert before["explorer_model"] == "test-explorer"
+            assert before["map_model"] == "test-map-model"
+
+            request = MagicMock()
+
+            async def _json():
+                return {
+                    "planner_model": "planner-api",
+                    "explorer_model": "explorer-api",
+                    "map_model": "map-api",
+                }
+
+            request.json = _json
+            response = asyncio.run(web_app.api_update_config(request))
+            assert response["ok"] is True
+
+            after = asyncio.run(web_app.api_config())
+            assert after["planner_model"] == "planner-api"
+            assert after["explorer_model"] == "explorer-api"
+            assert after["map_model"] == "map-api"
+        finally:
+            web_app.set_orchestrator(original)

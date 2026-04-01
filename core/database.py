@@ -234,6 +234,10 @@ class Database:
         ).fetchall()
         return [ExploreRun.from_dict(json.loads(r[0])) for r in rows]
 
+    def delete_all_explore_runs(self):
+        self._conn.execute("DELETE FROM explore_runs")
+        self._conn.commit()
+
     # ── Explore Queue Job Persistence ──────────────────────────────────
 
     def save_explore_queue_job(self, job: dict):

@@ -52,6 +52,7 @@ def load_config(config_path: str = None) -> dict:
         with open(config_path) as f:
             user_config = yaml.safe_load(f) or {}
         _deep_merge(config, user_config)
+    config["_meta"] = {"config_path": config_path}
     return config
 
 

@@ -61,14 +61,17 @@ class TestLoadConfig:
         config = load_config(str(cfg_file))
         assert config["web"]["port"] == 9999
         assert config["orchestrator"]["max_parallel_tasks"] == 10
+        assert config["_meta"]["config_path"] == str(cfg_file)
         # Default keys still present
         assert "repo" in config
         assert "database" in config
 
     def test_missing_file_uses_defaults(self, tmp_path):
-        config = load_config(str(tmp_path / "nonexistent.yaml"))
+        missing = tmp_path / "nonexistent.yaml"
+        config = load_config(str(missing))
         assert config["orchestrator"]["max_parallel_tasks"] == 3
         assert config["web"]["port"] == 8778
+        assert config["_meta"]["config_path"] == str(missing)
 
     def test_partial_override_keeps_defaults(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"

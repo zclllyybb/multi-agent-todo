@@ -484,7 +484,8 @@ def map_init_prompt(repo_path: str, max_depth: int = 2) -> str:
     return f"""You are a code architecture analysis agent.
 
 ## Task
-Analyze the repository at `{repo_path}` and produce a hierarchical module map.
+Analyze the repository at `{repo_path}` and produce a hierarchical module map. Modules should be split by functional semantics rather than by path.
+The system should be thoroughly decomposed by function, but neither too detailed nor too coarse. For example, the operator system should split out all specific operators, the import system should split out all import methods, but the function system should not be split into all functions. What should be listed must be detailed listed.
 
 ## Instructions
 1. List the top-level directories
@@ -492,7 +493,7 @@ Analyze the repository at `{repo_path}` and produce a hierarchical module map.
 3. Skip vendor, build output, test fixtures, and generated code directories
 4. For each module, provide:
    - name: human-readable name
-   - path: relative directory path
+   - path: relative directory path(s)
    - description: 1-2 sentence summary of what this module does
    - children: nested modules (same structure)
 

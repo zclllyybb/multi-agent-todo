@@ -358,6 +358,8 @@ async def api_config():
         "coder_model_by_complexity": oc.get("coder_model_by_complexity", {}),
         "coder_model_default": oc.get("coder_model_default", ""),
         "reviewer_models": oc.get("reviewer_models", []),
+        "explorer_model": cfg.get("explore", {}).get("explorer_model", ""),
+        "map_model": cfg.get("explore", {}).get("map_model", ""),
         "max_retries": orch.get("max_retries", 4),
         "publish_remote": cfg.get("publish", {}).get("remote", "origin"),
     }
@@ -483,6 +485,13 @@ async def api_explore_module_detail(module_id: str):
     if not module:
         return JSONResponse({"error": "Module not found"}, status_code=404)
     runs = orchestrator.db.get_explore_runs_for_module(module_id)
+    client = orchestrator.client
+    parsed_runs = []
+    for r in runs:
+        rd = r.to_dict()
+        rd["parsed"] = client.parse_readable_output(r.output)
+        rd.pop("output", None)
+        parsed_runs.append(rd)
     client = orchestrator.client
     parsed_runs = []
     for r in runs:
@@ -1727,6 +1736,21 @@ function toggleRun(header) {
   if (body.classList.contains('open')) body.scrollTop = 0;
 }
 
+function toggleCategoryNote(noteId, trigger) {
+  const el = document.getElementById(noteId);
+  if (!el) return;
+  const expanded = el.dataset.expanded === 'true';
+  if (expanded) {
+    el.innerHTML = el.dataset.preview || '';
+    el.dataset.expanded = 'false';
+    if (trigger) trigger.textContent = 'Show full';
+    return;
+  }
+  el.innerHTML = el.dataset.full || '';
+  el.dataset.expanded = 'true';
+  if (trigger) trigger.textContent = 'Show less';
+}
+
 let _addTaskBaseBranch = '';
 
 async function refreshAddTaskBaseBranch() {
@@ -2090,6 +2114,8 @@ async function saveSysModels() {
     });
     const payload = {
       planner_model: document.getElementById('sys-planner-model').value,
+      explorer_model: document.getElementById('sys-explorer-model').value,
+      map_model: document.getElementById('sys-map-model').value,
       coder_model_default: document.getElementById('sys-coder-default').value,
       coder_model_by_complexity: cmap,
       reviewer_models: reviewerModels,
@@ -2148,6 +2174,14 @@ async function loadSysInfo() {
   html += `<div class="detail-card">
     <h4>Planner Model</h4>
     ${buildModelSelect('sys-planner-model', models, cfg.planner_model)}
+  </div>`;
+  html += `<div class="detail-card">
+    <h4>Explorer Model</h4>
+    ${buildModelSelect('sys-explorer-model', models, cfg.explorer_model)}
+  </div>`;
+  html += `<div class="detail-card">
+    <h4>Map Model</h4>
+    ${buildModelSelect('sys-map-model', models, cfg.map_model)}
   </div>`;
   html += `<div class="detail-card">
     <h4>Default Coder Model</h4>
@@ -2798,18 +2832,19 @@ async function showModuleDetail(moduleId) {
       const note = catNotes[cat] || '';
       const stColor = statusDotColor(st);
       const stBg = st === 'done' ? 'rgba(63,185,80,0.1)' : st === 'in_progress' ? 'rgba(210,153,34,0.1)' : 'transparent';
+      const noteId = `cat-note-${m.id}-${cat}`;
       const notePreview = note.length > 120 ? `${esc(note.slice(0,120))}...` : esc(note);
-      html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg};align-items:flex-start">
+      const expandable = note.length > 120;
+      html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg}">
         <input type="checkbox" class="exp-module-cat-check" data-module-id="${m.id}" value="${cat}" ${st !== 'done' ? 'checked' : ''}>
-        <div style="flex:1;min-width:0">
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:${note ? '6px' : '0'}">
+        <div class="exp-cat-body">
+          <div class="exp-cat-head">
             <span class="exp-cat-label" style="color:${catColor(cat)}">${cat.replace(/_/g,' ')}</span>
             <span class="exp-cat-status" style="color:${stColor}">${st}</span>
           </div>
-          ${note ? (note.length > 120
-            ? `<details><summary style="cursor:pointer;font-size:11px;color:var(--text-dim)">${notePreview}</summary><pre style="margin-top:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:11px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word">${esc(note)}</pre></details>`
-            : `<div style="font-size:11px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word">${esc(note)}</div>`)
-            : `<div style="font-size:11px;color:var(--text-dim)">-</div>`}
+          ${note
+            ? `<div class="exp-cat-note" id="${noteId}" data-full="${esc(note)}" data-preview="${notePreview}" data-expanded="false">${expandable ? notePreview : esc(note)}</div>${expandable ? `<span class="exp-cat-note-toggle" onclick="toggleCategoryNote('${noteId}', this)">Show full</span>` : ''}`
+            : `<div class="exp-cat-note">-</div>`}
         </div>
       </div>`;
     }
@@ -2892,7 +2927,7 @@ async function initExploreMap() {
     await uiAlert('Map initialization is already running.', 'Initialize Explore Map');
     return;
   }
-  if (!await uiConfirm('This will re-scan the repository and replace the current module map. Continue?', 'Initialize Explore Map')) return;
+  if (!await uiConfirm('This will delete all explorer map/modules/runs/queue state and rebuild the map. Existing generated tasks will be kept. Continue?', 'Reinitialize Explore Map')) return;
   try {
     const res = await api('/api/explore/init-map', {method:'POST'});
     if (res && res.accepted === false) {
@@ -2936,6 +2971,8 @@ async function startExploration() {
       await uiAlert('Select at least one category before starting exploration.', 'No Category Selected');
       return;
     }
+    const scopeText = moduleIds.length ? `${moduleIds.length} selected module(s)` : 'all matching modules';
+    if (!await uiConfirm(`Start exploration for ${scopeText} across categories: ${categories.join(', ')}?`, 'Start Exploration')) return;
     const payload = { categories };
     if (moduleIds.length) payload.module_ids = moduleIds;
     if (focusPoint) payload.focus_point = focusPoint;
@@ -2982,6 +3019,7 @@ async function exploreModule(moduleId) {
       await uiAlert('Select at least one category in the module detail first.', 'No Category Selected');
       return;
     }
+    if (!await uiConfirm(`Start exploration for this module across categories: ${categories.join(', ')}?`, 'Start Exploration')) return;
     const payload = {module_ids: [moduleId], categories};
     if (focusPoint) payload.focus_point = focusPoint;
     const res = await api('/api/explore/start', {
