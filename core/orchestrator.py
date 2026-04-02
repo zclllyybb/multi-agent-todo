@@ -2109,7 +2109,6 @@ class Orchestrator:
         reliability_score: float,
         explored_scope: str,
         completion_status: str,
-        completion_reason: str,
         supplemental_note: str,
     ) -> str:
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -2123,17 +2122,7 @@ class Orchestrator:
         if explored_scope:
             parts.append(f"explored: {explored_scope}")
         if completion_status:
-            completion_text = f"completion: {completion_status}"
-            if completion_reason:
-                completion_text += f" ({completion_reason})"
-            parts.append(completion_text)
-        if explored_scope:
-            parts.append(f"explored: {explored_scope}")
-        if completion_status:
-            completion_text = f"completion: {completion_status}"
-            if completion_reason:
-                completion_text += f" ({completion_reason})"
-            parts.append(completion_text)
+            parts.append(f"completion: {completion_status}")
         if summary:
             parts.append(f"summary: {summary}")
         if supplemental_note:
@@ -2610,7 +2599,11 @@ class Orchestrator:
                     if status == ExploreStatus.IN_PROGRESS.value:
                         rejected_in_progress += 1
                         continue
-                    if status != ExploreStatus.TODO.value:
+                    if status not in {
+                        ExploreStatus.TODO.value,
+                        ExploreStatus.DONE.value,
+                        ExploreStatus.STALE.value,
+                    }:
                         skipped_non_todo += 1
                         continue
 
@@ -2770,10 +2763,6 @@ class Orchestrator:
                 "reliability_score": -1.0,
                 "explored_scope": "",
                 "completion_status": "complete",
-                "completion_reason": "",
-                "explored_scope": "",
-                "completion_status": "complete",
-                "completion_reason": "",
                 "supplemental_note": "",
                 "map_review_required": False,
                 "map_review_reason": "",
@@ -2805,7 +2794,6 @@ class Orchestrator:
                 reliability_score=metadata["reliability_score"],
                 explored_scope=metadata["explored_scope"],
                 completion_status=metadata["completion_status"],
-                completion_reason=metadata["completion_reason"],
                 supplemental_note=metadata["supplemental_note"],
                 map_review_required=metadata["map_review_required"],
                 map_review_reason=metadata["map_review_reason"],
@@ -2853,7 +2841,6 @@ class Orchestrator:
                 reliability_score=metadata["reliability_score"],
                 explored_scope=metadata["explored_scope"],
                 completion_status=metadata["completion_status"],
-                completion_reason=metadata["completion_reason"],
                 supplemental_note=metadata["supplemental_note"],
             )
             module.category_notes[category] = self._append_explore_note(

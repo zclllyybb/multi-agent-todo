@@ -110,7 +110,6 @@ class ExplorerAgent(BaseAgent):
             ),
             "explored_scope": str(data.get("explored_scope", "")).strip(),
             "completion_status": completion_status,
-            "completion_reason": str(data.get("completion_reason", "")).strip(),
             "supplemental_note": str(data.get("supplemental_note", "")).strip(),
             "map_review_required": bool(data.get("map_review_required", False)),
             "map_review_reason": str(data.get("map_review_reason", "")).strip(),

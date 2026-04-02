@@ -408,8 +408,7 @@ After finding the issue, you should come up with reasonable improvement methods 
 ## Prior Exploration Context (same module + category)
 {prior_note_text}
 
-Use this context to avoid repeating previous exploration and to produce a
-useful additive supplement.
+Use this context to avoid repeating previous exploration and to produce a useful additive supplement.
 
 ## Instructions
 1. List the files in `{module_path}/` and understand the module structure
@@ -429,14 +428,9 @@ useful additive supplement.
 7. Write `explored_scope`: concise summary of the files/code paths/areas you
    actually explored in this run
 8. Set `completion_status` to:
-   - "complete" if you covered enough of this module for this category that the
-     category can be considered explored for now
-   - "partial" if you only explored part of the module and more exploration is
-     still needed for this category
-   Also write `completion_reason`: one concise sentence explaining that
-   completion judgment
-9. Write `supplemental_note`: concise additive note for future explorers of
-   the same module and category
+   - "complete" if you covered almost all of this module for this category that the category can be considered explored for now
+   - "partial" if you only explored part of the module and more exploration is still needed for this category
+9. Write `supplemental_note`: concise additive note for future explorers of the same module and category. 
 10. If you believe module structure should be changed (split/merge/rename/move
    modules in the architecture map), set:
    - map_review_required: true
@@ -451,7 +445,6 @@ Output ONLY valid JSON (no markdown fences):
   "reliability_score": 8.0,
   "explored_scope": "Specific files, flows, or code paths examined in this run",
   "completion_status": "partial",
-  "completion_reason": "Only the scanner hot path was explored; scheduling and cache paths still need review",
   "supplemental_note": "Short additive note visible to future explorers",
   "map_review_required": false,
   "map_review_reason": "",
@@ -471,7 +464,6 @@ If no issues found:
   "reliability_score": 8.5,
   "explored_scope": "...",
   "completion_status": "complete",
-  "completion_reason": "The key code paths for this category were covered with no material issues found",
   "supplemental_note": "...",
   "map_review_required": false,
   "map_review_reason": "",

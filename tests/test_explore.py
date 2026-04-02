@@ -110,7 +110,6 @@ MOCK_EXPLORE_OUTPUT = json.dumps({
     "summary": "Explored scanner.cpp and found a major performance issue with unnecessary copies.",
     "explored_scope": "scanner.cpp next_batch path and vector growth path",
     "completion_status": "complete",
-    "completion_reason": "The key hot paths in this module for this category were covered.",
     "findings": [
         {
             "severity": "major",
@@ -135,7 +134,6 @@ MOCK_EXPLORE_OUTPUT_EMPTY = json.dumps({
     "summary": "Explored module, no issues found.",
     "explored_scope": "all primary entry points in the module",
     "completion_status": "complete",
-    "completion_reason": "The main category-relevant flows were reviewed.",
     "findings": [],
 })
 
@@ -220,6 +218,107 @@ class TestExploreModels:
         assert r.findings == []
         assert r.summary == ""
         assert r.issue_count == 0
+
+    def test_explore_run_from_dict_ignores_legacy_unknown_fields(self):
+        d = {
+            "id": "r1",
+            "module_id": "m1",
+            "category": "perf",
+            "personality": "p",
+            "model": "m",
+            "prompt": "",
+            "output": "",
+            "completion_reason": "legacy field",
+            "legacy_extra": {"x": 1},
+            "exit_code": 0,
+            "duration_sec": 1.0,
+            "created_at": 1.0,
+        }
+        r = ExploreRun.from_dict(d)
+        assert r.id == "r1"
+        assert r.module_id == "m1"
+        assert r.category == "perf"
+        assert not hasattr(r, "completion_reason")
+
+
+class TestExploreRunLegacyCompatibility:
+    def test_database_loads_legacy_explore_run_with_removed_fields(self, tmp_path):
+        db = Database(str(tmp_path / "legacy.db"))
+        raw = {
+            "id": "legacy-run",
+            "module_id": "mod1",
+            "category": "performance",
+            "personality": "perf_hunter",
+            "model": "test-explorer",
+            "prompt": "explore",
+            "output": "{}",
+            "session_id": "ses-legacy",
+            "summary": "legacy summary",
+            "completion_status": "complete",
+            "completion_reason": "legacy completion reason",
+            "supplemental_note": "legacy note",
+            "exit_code": 0,
+            "duration_sec": 1.0,
+            "created_at": 1.0,
+        }
+        db._conn.execute(
+            "INSERT INTO explore_runs (id, module_id, category, data) VALUES (?, ?, ?, ?)",
+            ("legacy-run", "mod1", "performance", json.dumps(raw)),
+        )
+        db._conn.commit()
+
+        loaded = db.get_explore_run("legacy-run")
+        assert loaded is not None
+        assert loaded.id == "legacy-run"
+        assert loaded.summary == "legacy summary"
+        assert loaded.supplemental_note == "legacy note"
+
+    def test_api_module_detail_handles_legacy_explore_run_payload(self, tmp_path):
+        from web import app as web_app
+
+        config = _make_orchestrator_config(tmp_path)
+        with patch("core.orchestrator.OpenCodeClient"):
+            from core.orchestrator import Orchestrator
+            orch = Orchestrator(config)
+        real_client = OpenCodeClient(timeout=10)
+        orch.client.parse_readable_output = real_client.parse_readable_output
+
+        mod = orch.add_explore_module(name="Exec", path="be/src/exec")
+        legacy = {
+            "id": "legacy-run",
+            "module_id": mod["id"],
+            "category": "performance",
+            "personality": "perf_hunter",
+            "model": "test-explorer",
+            "prompt": "explore",
+            "output": '{"sessionID":"ses-legacy","type":"init"}\n{"type":"step_start"}\n{"type":"text","part":{"text":"Legacy run"}}\n{"type":"step_finish","part":{"reason":"stop"}}\n',
+            "session_id": "ses-legacy",
+            "summary": "legacy summary",
+            "completion_status": "complete",
+            "completion_reason": "legacy completion reason",
+            "supplemental_note": "legacy note",
+            "exit_code": 0,
+            "duration_sec": 1.0,
+            "created_at": 1.0,
+        }
+        orch.db._conn.execute(
+            "INSERT INTO explore_runs (id, module_id, category, data) VALUES (?, ?, ?, ?)",
+            ("legacy-run", mod["id"], "performance", json.dumps(legacy)),
+        )
+        orch.db._conn.commit()
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            result = asyncio.run(web_app.api_explore_module_detail(mod["id"]))
+        finally:
+            web_app.set_orchestrator(original)
+
+        assert result["module"]["id"] == mod["id"]
+        assert len(result["runs"]) == 1
+        assert result["runs"][0]["summary"] == "legacy summary"
+        assert result["runs"][0]["supplemental_note"] == "legacy note"
+        assert result["runs"][0]["parsed"]["session_id"] == "ses-legacy"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -339,7 +438,6 @@ class TestExplorerAgentParsing:
             "reliability_score": 7.2,
             "explored_scope": "scanner lock acquisition and release paths",
             "completion_status": "partial",
-            "completion_reason": "Only scanner.cpp was reviewed; queue handoff paths remain.",
             "supplemental_note": "Lock scope can be narrowed in two call paths.",
             "map_review_required": True,
             "map_review_reason": "scanner module should be split by responsibility",
@@ -352,7 +450,6 @@ class TestExplorerAgentParsing:
         assert meta["reliability_score"] == 7.2
         assert meta["explored_scope"].startswith("scanner lock")
         assert meta["completion_status"] == "partial"
-        assert "queue handoff" in meta["completion_reason"]
         assert meta["supplemental_note"].startswith("Lock scope")
         assert meta["map_review_required"] is True
         assert "split" in meta["map_review_reason"]
@@ -731,7 +828,31 @@ class TestOrchestratorExplore:
         orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
 
         result = orch.start_exploration(module_ids=[mod.id])
-        assert result["started"] == 1  # only concurrency remains TODO
+        assert result["started"] == 2
+        assert result["skipped_non_todo"] == 0
+
+    def test_start_exploration_allows_replaying_done_category(self, orch):
+        self._mark_map_ready(orch)
+        mod_data = orch.add_explore_module(name="A", path="a")
+        mod = orch.db.get_explore_module(mod_data["id"])
+        mod.category_status["performance"] = ExploreStatus.DONE.value
+        mod.category_notes["performance"] = "[2026-01-01] summary: previous pass"
+        orch.db.save_explore_module(mod)
+
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+
+        result = orch.start_exploration(
+            module_ids=[mod.id],
+            categories=["performance"],
+        )
+
+        assert result["started"] == 1
+        assert result["skipped_non_todo"] == 0
+        fresh = orch.db.get_explore_module(mod.id)
+        assert fresh is not None
+        assert fresh.category_status["performance"] == ExploreStatus.IN_PROGRESS.value
+        assert len(submitted) == 1
 
     def test_start_exploration_specific_categories(self, orch):
         self._mark_map_ready(orch)
@@ -1148,7 +1269,6 @@ class TestExplorationFullFlow:
             "reliability_score": 7.0,
             "explored_scope": "scanner allocator-heavy loops",
             "completion_status": "partial",
-            "completion_reason": "cache and merge paths still need review",
             "supplemental_note": "Previous copy issue remains after reset.",
             "map_review_required": False,
             "map_review_reason": "",
@@ -1169,7 +1289,6 @@ class TestExplorationFullFlow:
         assert runs[0].reliability_score == 7.0
         assert runs[0].explored_scope == "scanner allocator-heavy loops"
         assert runs[0].completion_status == "partial"
-        assert "cache and merge paths" in runs[0].completion_reason
         assert runs[0].supplemental_note.startswith("Previous copy issue")
 
         updated = orch.db.get_explore_module(mod_id)
@@ -1179,7 +1298,7 @@ class TestExplorationFullFlow:
         assert "actionability: 8.5/10" in note
         assert "reliability: 7.0/10" in note
         assert "explored: scanner allocator-heavy loops" in note
-        assert "completion: partial (cache and merge paths still need review)" in note
+        assert "completion: partial" in note
         assert "summary: Checked scanner hot paths" in note
 
     def test_run_exploration_map_review_request_triggers_map_init_review(self, orch):
@@ -1224,7 +1343,6 @@ class TestExplorationFullFlow:
             "reliability_score": 7.5,
             "explored_scope": "scanner.cpp next_batch and buffer reuse",
             "completion_status": "partial",
-            "completion_reason": "merge and scheduling paths were not reviewed yet",
             "supplemental_note": "Continue with scheduler interactions next.",
             "map_review_required": False,
             "map_review_reason": "",
@@ -1245,8 +1363,7 @@ class TestExplorationFullFlow:
         assert partial_runs[0].completion_status == "partial"
         assert partial_runs[0].session_id == "ses_partial"
         assert partial_runs[0].explored_scope == "scanner.cpp next_batch and buffer reuse"
-        assert "merge and scheduling paths" in partial_runs[0].completion_reason
-        assert "completion: partial (merge and scheduling paths were not reviewed yet)" in after_partial.category_notes["performance"]
+        assert "completion: partial" in after_partial.category_notes["performance"]
 
         complete_output = json.dumps({
             "summary": "Covered remaining performance-sensitive paths",
@@ -1255,7 +1372,6 @@ class TestExplorationFullFlow:
             "reliability_score": 8.0,
             "explored_scope": "scheduler.cpp dispatch flow and merge path buffering",
             "completion_status": "complete",
-            "completion_reason": "The remaining category-relevant flows are now covered.",
             "supplemental_note": "Module performance coverage is now complete.",
             "map_review_required": False,
             "map_review_reason": "",
@@ -1271,14 +1387,79 @@ class TestExplorationFullFlow:
 
         after_complete = orch.db.get_explore_module(mod_id)
         assert after_complete.category_status["performance"] == ExploreStatus.DONE.value
-        assert "completion: partial (merge and scheduling paths were not reviewed yet)" in after_complete.category_notes["performance"]
-        assert "completion: complete (The remaining category-relevant flows are now covered.)" in after_complete.category_notes["performance"]
+        assert after_complete.category_notes["performance"].count("completion: partial") == 1
+        assert after_complete.category_notes["performance"].count("completion: complete") == 1
 
         all_runs = orch.db.get_explore_runs_for_module(mod_id)
         assert len(all_runs) == 2
         assert all_runs[0].completion_status == "complete"
         assert all_runs[0].session_id == "ses_complete"
         assert all_runs[1].completion_status == "partial"
+
+    def test_run_exploration_done_category_can_be_replayed_and_relogged(self, orch):
+        mod_data = orch.add_explore_module(name="Exec", path="be/src/exec")
+        mod_id = mod_data["id"]
+        orch._explore_map_state["status"] = "done"
+        orch._explore_map_state["finished_at"] = time.time()
+        orch._persist_explore_map_state()
+
+        first_output = json.dumps({
+            "summary": "Covered scanner hot paths",
+            "focus_point": "scanner",
+            "actionability_score": 3.0,
+            "reliability_score": 8.0,
+            "explored_scope": "scanner.cpp hot loop",
+            "completion_status": "complete",
+            "supplemental_note": "Look at merge path only if workload changes.",
+            "map_review_required": False,
+            "map_review_reason": "",
+            "findings": [],
+        })
+        first_run = _mock_agent_run(output=first_output, session_id="ses_done_1")
+        with patch.object(
+            ExplorerAgent,
+            "explore_module",
+            return_value=(first_run, [], "Covered scanner hot paths"),
+        ):
+            orch._run_exploration(mod_id, "performance", "perf_hunter")
+
+        submitted = []
+        orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
+        replay = orch.start_exploration(module_ids=[mod_id], categories=["performance"])
+        assert replay["started"] == 1
+        assert replay["skipped_non_todo"] == 0
+
+        second_output = json.dumps({
+            "summary": "Rechecked merge path with previous notes in context",
+            "focus_point": "merge path",
+            "actionability_score": 5.0,
+            "reliability_score": 8.5,
+            "explored_scope": "merge path buffering",
+            "completion_status": "partial",
+            "supplemental_note": "Previous scanner pass still valid; spill path remains.",
+            "map_review_required": False,
+            "map_review_reason": "",
+            "findings": [],
+        })
+        second_run = _mock_agent_run(output=second_output, session_id="ses_done_2")
+        with patch.object(
+            ExplorerAgent,
+            "explore_module",
+            return_value=(second_run, [], "Rechecked merge path with previous notes in context"),
+        ):
+            orch._run_exploration(mod_id, "performance", "perf_hunter")
+
+        saved = orch.db.get_explore_module(mod_id)
+        assert saved is not None
+        assert saved.category_status["performance"] == ExploreStatus.STALE.value
+        note = saved.category_notes["performance"]
+        assert "summary: Covered scanner hot paths" in note
+        assert "summary: Rechecked merge path with previous notes in context" in note
+        runs = orch.db.get_explore_runs_for_module(mod_id)
+        assert len(runs) == 2
+        assert runs[0].session_id == "ses_done_2"
+        assert runs[0].completion_status == "partial"
+        assert runs[1].session_id == "ses_done_1"
 
 
 class TestExploreModuleDetailApi:
@@ -1315,7 +1496,6 @@ class TestExploreModuleDetailApi:
             reliability_score=8.0,
             explored_scope="scanner.cpp and scheduler.cpp core paths",
             completion_status="partial",
-            completion_reason="merge path remains unexplored",
             supplemental_note="Continue with merge path.",
             findings=[],
             summary="Explored scanner and scheduler",
@@ -1338,7 +1518,6 @@ class TestExploreModuleDetailApi:
         assert returned["session_id"] == "ses_api"
         assert returned["prompt"] == "explore this module carefully"
         assert returned["completion_status"] == "partial"
-        assert returned["completion_reason"] == "merge path remains unexplored"
         assert returned["explored_scope"] == "scanner.cpp and scheduler.cpp core paths"
         assert "output" not in returned
         assert returned["parsed"]["session_id"] == "ses_api"

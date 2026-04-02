@@ -177,7 +177,6 @@ def test_show_module_detail_renders_categories_and_runs_successfully():
                 "reliability_score": 8.0,
                 "explored_scope": "scanner.cpp and scheduler.cpp core paths",
                 "completion_status": "partial",
-                "completion_reason": "merge path remains unexplored",
                 "supplemental_note": "Continue with merge path.",
                 "map_review_required": False,
                 "map_review_reason": "",
@@ -213,7 +212,6 @@ def test_show_module_detail_renders_categories_and_runs_successfully():
                 "reliability_score": 8.5,
                 "explored_scope": "critical lock and queue handoff paths",
                 "completion_status": "complete",
-                "completion_reason": "The main concurrency-sensitive flows are covered.",
                 "supplemental_note": "No material issues found.",
                 "map_review_required": False,
                 "map_review_reason": "",
@@ -259,7 +257,6 @@ assert.match(html, /Categories/);
 assert.match(html, /Exploration Runs \(2\)/);
 assert.match(html, /completion: partial/);
 assert.match(html, /completion: complete/);
-assert.match(html, /merge path remains unexplored/);
 assert.match(html, /Input prompt/);
 assert.match(html, /Session transcript/);
 assert.match(html, /opencode --session ses_partial/);
@@ -687,19 +684,87 @@ assert.deepEqual(body.reviewer_models, ['reviewer-a', 'reviewer-b']);
 def test_toggle_category_note_expands_and_collapses():
     _run_dashboard_js(
         r"""
-document.getElementById('cat-note').dataset.preview = 'preview text';
-document.getElementById('cat-note').dataset.full = 'full text';
-document.getElementById('cat-note').dataset.expanded = 'false';
-document.getElementById('cat-note').innerHTML = 'preview text';
+globalThis.fetch = async () => ({ json: async () => ({
+  module: {
+    id: 'mod1',
+    name: 'Exec',
+    path: 'be/src/exec',
+    description: 'module',
+    category_status: { performance: 'done' },
+    category_notes: { performance: 'preview text full text and more so it expands beyond the preview threshold for testing category note toggling behavior' },
+  },
+  runs: [],
+}) });
+await showModuleDetail('mod1');
+const noteEl = document.getElementById('cat-note-mod1-performance');
+noteEl.dataset.expanded = 'false';
 const trigger = { textContent: 'Show full' };
-toggleCategoryNote('cat-note', trigger);
-assert.equal(document.getElementById('cat-note').innerHTML, 'full text');
-assert.equal(document.getElementById('cat-note').dataset.expanded, 'true');
+toggleCategoryNote('cat-note-mod1-performance', trigger);
+assert.equal(noteEl.dataset.expanded, 'true');
+assert.match(noteEl.innerHTML, /preview text full text and more/);
 assert.equal(trigger.textContent, 'Show less');
-toggleCategoryNote('cat-note', trigger);
-assert.equal(document.getElementById('cat-note').innerHTML, 'preview text');
-assert.equal(document.getElementById('cat-note').dataset.expanded, 'false');
+toggleCategoryNote('cat-note-mod1-performance', trigger);
+assert.equal(noteEl.dataset.expanded, 'false');
 assert.equal(trigger.textContent, 'Show full');
+"""
+    )
+
+
+def test_toggle_category_note_preserves_accumulated_note_after_second_explore():
+    payload = {
+        "module": {
+            "id": "mod1",
+            "name": "Execution Environment and Fragment Management",
+            "path": "be/src/runtime",
+            "description": "module",
+            "category_status": {"performance": "partial"},
+            "category_notes": {
+                "performance": "[2026-04-01 09:19:45] | completion: complete | summary: First explore summary\n\n[2026-04-02 10:11:12] | completion: partial | summary: Second explore summary | note: Continue on spill path"
+            },
+        },
+        "runs": [],
+    }
+    _run_dashboard_js(
+        rf"""
+const payload = {json.dumps(payload)};
+globalThis.fetch = async () => ({{ json: async () => payload }});
+await showModuleDetail('mod1');
+const noteEl = document.getElementById('cat-note-mod1-performance');
+const trigger = {{ textContent: 'Show full' }};
+toggleCategoryNote('cat-note-mod1-performance', trigger);
+assert.equal(noteEl.dataset.expanded, 'true');
+assert.match(noteEl.innerHTML, /First explore summary/);
+assert.match(noteEl.innerHTML, /Second explore summary/);
+assert.match(noteEl.innerHTML, /Continue on spill path/);
+"""
+    )
+
+
+def test_show_module_detail_handles_persisted_note_with_quotes_and_newlines():
+    payload = {
+        "module": {
+            "id": "mod-legacy",
+            "name": "Execution Environment and Fragment Management",
+            "path": "be/src/runtime",
+            "description": "Legacy persisted module note case",
+            "category_status": {"performance": "done"},
+            "category_notes": {
+                "performance": "[2026-04-01 09:19:45] | completion: complete | summary: Explored the control-plane side\nIncludes \"quoted\" detail and <html>-like text"
+            },
+        },
+        "runs": [],
+    }
+    _run_dashboard_js(
+        rf"""
+const payload = {json.dumps(payload)};
+globalThis.fetch = async () => ({{ json: async () => payload }});
+await showModuleDetail('mod-legacy');
+const html = document.getElementById('explore-detail').innerHTML;
+assert.match(html, /Execution Environment and Fragment Management/);
+assert.match(html, /completion: complete/);
+assert.match(html, /Explored the control-plane side/);
+assert.match(html, /quoted/);
+assert.match(html, /Show full/);
 """
     )
 
@@ -724,6 +789,45 @@ globalThis.fetch = async (url, opts) => {
 await initExploreMap();
 await startExploration();
 assert.deepEqual(calls, []);
+"""
+    )
+
+
+def test_start_exploration_confirms_replay_for_done_categories():
+    explore_modules = [
+        {
+            "id": "mod1",
+            "name": "Exec",
+            "path": "be/src/exec",
+            "children": [],
+            "category_status": {"performance": "done", "concurrency": "todo"},
+            "category_notes": {"performance": "prior summary", "concurrency": ""},
+        }
+    ]
+    _run_dashboard_js(
+        rf"""
+const calls = [];
+_exploreModules = {json.dumps(explore_modules)};
+_exploreStatus = {{ map_ready: true, map_init: {{ status: 'done' }} }};
+globalThis.getSelectedExploreModules = () => ['mod1'];
+globalThis.getSelectedExploreCategories = () => ['performance'];
+globalThis.getExploreFocusPoint = () => '';
+document.getElementById('explore-start-btn').innerHTML = 'start';
+globalThis.uiAlert = async () => {{}};
+globalThis.uiConfirm = async (message, title) => {{
+  calls.push({{ message, title }});
+  return false;
+}};
+globalThis.fetch = async () => {{
+  throw new Error('fetch should not run when replay confirmation is rejected');
+}};
+const doneSelections = getDoneExploreSelections(['mod1'], ['performance']);
+assert.equal(doneSelections.length, 1);
+await startExploration();
+assert.equal(calls.length, 1);
+assert.equal(calls[0].title, 'Re-explore Done Categories');
+assert.match(calls[0].message, /already marked done/);
+assert.match(calls[0].message, /Exec: performance/);
 """
     )
 

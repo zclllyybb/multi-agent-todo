@@ -1787,14 +1787,15 @@ function toggleRun(header) {
 function toggleCategoryNote(noteId, trigger) {
   const el = document.getElementById(noteId);
   if (!el) return;
+  const stored = _exploreCategoryNoteStore[noteId] || { preview: '', full: '' };
   const expanded = el.dataset.expanded === 'true';
   if (expanded) {
-    el.innerHTML = el.dataset.preview || '';
+    el.innerHTML = esc(stored.preview || '');
     el.dataset.expanded = 'false';
     if (trigger) trigger.textContent = 'Show full';
     return;
   }
-  el.innerHTML = el.dataset.full || '';
+  el.innerHTML = esc(stored.full || '');
   el.dataset.expanded = 'true';
   if (trigger) trigger.textContent = 'Show less';
 }
@@ -2722,6 +2723,35 @@ function getModuleDetailSelectedCategories(moduleId) {
   ).map(x => x.value);
 }
 
+function getDoneExploreSelections(moduleIds, categories) {
+  const sourceModules = Array.isArray(moduleIds) && moduleIds.length
+    ? (_exploreModules || []).filter(m => moduleIds.includes(m.id))
+    : (_exploreModules || []).filter(m => !(m.children && m.children.length));
+  const out = [];
+  for (const mod of sourceModules) {
+    const catStatus = mod.category_status || {};
+    for (const cat of (categories || [])) {
+      if (catStatus[cat] === 'done') {
+        out.push({ moduleId: mod.id, moduleName: mod.name, category: cat });
+      }
+    }
+  }
+  return out;
+}
+
+async function confirmDoneCategoryReplay(doneSelections) {
+  if (!doneSelections.length) return true;
+  const preview = doneSelections
+    .slice(0, 6)
+    .map(x => `${x.moduleName}: ${x.category.replace(/_/g, ' ')}`)
+    .join('\\n');
+  const more = doneSelections.length > 6 ? `\\n...and ${doneSelections.length - 6} more` : '';
+  return await uiConfirm(
+    `Some selected categories are already marked done. This will start a new exploration run for them and carry forward the prior summary/context.\\n\\n${preview}${more}\\n\\nContinue?`,
+    'Re-explore Done Categories'
+  );
+}
+
 function getExploreFocusPoint() {
   const el = document.getElementById('explore-focus-point');
   return el ? el.value.trim() : '';
@@ -2915,6 +2945,7 @@ async function showModuleDetail(moduleId) {
     // Category grid
     const catStatus = m.category_status || {};
     const catNotes = m.category_notes || {};
+    _exploreCategoryNoteStore = {};
     html += `<div style="margin-bottom:16px"><h4 style="font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Categories</h4>`;
     html += `<div class="exp-detail-cats">`;
     for (const [cat, st] of Object.entries(catStatus)) {
@@ -2922,8 +2953,12 @@ async function showModuleDetail(moduleId) {
       const stColor = statusDotColor(st);
       const stBg = st === 'done' ? 'rgba(63,185,80,0.1)' : st === 'in_progress' ? 'rgba(210,153,34,0.1)' : 'transparent';
       const noteId = `cat-note-${m.id}-${cat}`;
-      const notePreview = note.length > 120 ? `${esc(note.slice(0,120))}...` : esc(note);
+      const notePreviewRaw = note.length > 120 ? `${note.slice(0,120)}...` : note;
       const expandable = note.length > 120;
+      _exploreCategoryNoteStore[noteId] = {
+        preview: notePreviewRaw,
+        full: note,
+      };
       html += `<div class="exp-cat-row" style="border-left:3px solid ${catColor(cat)};background:${stBg}">
         <input type="checkbox" class="exp-module-cat-check" data-module-id="${m.id}" value="${cat}" ${st !== 'done' ? 'checked' : ''}>
         <div class="exp-cat-body">
@@ -2932,7 +2967,7 @@ async function showModuleDetail(moduleId) {
             <span class="exp-cat-status" style="color:${stColor}">${st}</span>
           </div>
           ${note
-            ? `<div class="exp-cat-note" id="${noteId}" data-full="${esc(note)}" data-preview="${notePreview}" data-expanded="false">${expandable ? notePreview : esc(note)}</div>${expandable ? `<span class="exp-cat-note-toggle" onclick="toggleCategoryNote('${noteId}', this)">Show full</span>` : ''}`
+            ? `<div class="exp-cat-note" id="${noteId}" data-expanded="false">${esc(expandable ? notePreviewRaw : note)}</div>${expandable ? `<span class="exp-cat-note-toggle" onclick="toggleCategoryNote('${noteId}', this)">Show full</span>` : ''}`
             : `<div class="exp-cat-note">-</div>`}
         </div>
       </div>`;
@@ -2980,7 +3015,7 @@ async function showModuleDetail(moduleId) {
         if (run.explored_scope) {
           html += `<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">explored: ${esc(run.explored_scope)}</div>`;
         }
-        html += `<div style="font-size:11px;color:${completionColor};margin-bottom:8px">completion: ${esc(run.completion_status || 'complete')}${run.completion_reason ? ` · ${esc(run.completion_reason)}` : ''}</div>`;
+        html += `<div style="font-size:11px;color:${completionColor};margin-bottom:8px">completion: ${esc(run.completion_status || 'complete')}</div>`;
         if (run.supplemental_note) {
           html += `<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">note: ${esc(run.supplemental_note)}</div>`;
         }
@@ -3060,6 +3095,8 @@ async function startExploration() {
       await uiAlert('Select at least one category before starting exploration.', 'No Category Selected');
       return;
     }
+    const doneSelections = getDoneExploreSelections(moduleIds, categories);
+    if (!await confirmDoneCategoryReplay(doneSelections)) return;
     const scopeText = moduleIds.length ? `${moduleIds.length} selected module(s)` : 'all matching modules';
     if (!await uiConfirm(`Start exploration for ${scopeText} across categories: ${categories.join(', ')}?`, 'Start Exploration')) return;
     const payload = { categories };
@@ -3108,6 +3145,8 @@ async function exploreModule(moduleId) {
       await uiAlert('Select at least one category in the module detail first.', 'No Category Selected');
       return;
     }
+    const doneSelections = getDoneExploreSelections([moduleId], categories);
+    if (!await confirmDoneCategoryReplay(doneSelections)) return;
     if (!await uiConfirm(`Start exploration for this module across categories: ${categories.join(', ')}?`, 'Start Exploration')) return;
     const payload = {module_ids: [moduleId], categories};
     if (focusPoint) payload.focus_point = focusPoint;
