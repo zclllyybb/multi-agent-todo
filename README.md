@@ -1,12 +1,13 @@
 # Multi-Agent TODO Resolver
 
-A persistent, daemon-based multi-agent system that leverages [opencode](https://opencode.ai) to **automatically discover, plan, implement, and review code changes** across a codebase. Multiple tasks run in parallel, each in its own `git worktree`, driven by a **Planner → Coder → Reviewer** pipeline with configurable models and retry logic.
+A persistent, daemon-based multi-agent system that leverages [opencode](https://opencode.ai) to **automatically explore, discover, plan, implement, and review code changes** across a codebase. Multiple tasks run in parallel, each in its own `git worktree`, driven by a **Project Explorer** and a **Planner → Coder → Reviewer** pipeline with configurable models and retry logic.
 
 ## Why This Project?
 
 Tools like **Cursor** and **opencode** are powerful single-task coding assistants, but they operate in a single conversation at a time — you drive each interaction manually, and parallelism requires you to manage multiple terminal windows or editor tabs yourself. This project fills a different niche:
 
 - **Batch autonomy** — Submit multiple tasks (or let the system discover them from TODO comments) and walk away. The daemon plans, codes, and reviews them concurrently without human babysitting.
+- **Continuous project exploration** — Set up a free-running Explorer agent that continuously reads your codebase, understands the project structure, and proactively identifies potential refactors, bugs, or missing features.
 - **Built-in quality gate** — Every code change is reviewed by one or more AI reviewers before it's considered done. Failed reviews automatically trigger retries with the reviewer's feedback, creating a self-correcting loop that a single-assistant workflow can't provide.
 - **Persistent state** — Tasks, agent runs, and review history are stored in SQLite. You can stop the daemon, reboot, and resume exactly where you left off. Cursor/opencode sessions are ephemeral.
 - **Repository-scale isolation** — Each task runs in its own git worktree and branch, so parallel tasks never conflict. Publishing is a one-click push.
@@ -15,6 +16,7 @@ In short: Cursor and opencode are excellent *interactive copilots*; this project
 
 ## Key Features
 
+- **Continuous Project Explorer** *(New!)* — A free-running agent loop that continuously explores the codebase to understand the overarching structure and business logic. It autonomously identifies potential architectural improvements, hidden bugs, and missing tests without requiring explicit TODO comments.
 - **Automatic TODO Discovery** — Scans a repository for `TODO`/`FIXME` comments, then uses an AI analyzer to score each by feasibility and difficulty, producing a prioritized backlog.
 - **Plan → Code → Review Loop** — Each task goes through a planner (generates an implementation plan), a coder (writes code in an isolated worktree), and one or more reviewers (approve or request changes). Rejected code re-enters the loop automatically.
 - **Multi-Model, Multi-Reviewer** — Assign different models by task complexity (e.g. Opus for hard tasks, Haiku for simple ones). Multiple reviewer models vote; **all** must approve for a task to pass.
@@ -25,6 +27,16 @@ In short: Cursor and opencode are excellent *interactive copilots*; this project
 - **Resource Lifecycle** — Worktrees and branches are automatically cleaned up when review-only tasks complete, tasks are cancelled, or via a manual "Clean" action.
 
 ## Screenshots
+
+### Project Explorer — Continuous Analysis Loop
+
+The Explorer agent continuously crawls the codebase, mapping out dependencies, identifying technical debt, and proposing new tasks without needing explicit TODO markers.
+
+![Project Map](docs/explore1.png)
+
+![Exploration Results](docs/explore2.png)
+
+These tasks will be automatically prioritized and become tasks ready to be launched.
 
 ### Agent Runs — Code → Review Loop
 
@@ -51,14 +63,14 @@ TODOs are scanned from the repo, then analyzed by an AI model that scores **feas
 │                          Orchestrator                             │
 │                                                                   │
 │  Task Queue (SQLite)  ·  Parallel Dispatch  ·  Retry Logic        │
-│  TODO Scanning        ·  Worktree Lifecycle  ·  Model Config      │
+│  Project Explorer     ·  TODO Scanning       ·  Worktree Lifecycle│
 └──────┬──────────────────────┬──────────────────────┬──────────────┘
        │                      │                      │
        ▼                      ▼                      ▼
 ┌─────────────┐     ┌─────────────┐     ┌──────────────────────┐
-│   Planner   │     │    Coder    │     │  Reviewer(s)         │
-│   Agent     │     │    Agent    │     │  (N models, all must │
-│             │     │  (per-      │     │   approve)           │
+│  Explorer & │     │    Coder    │     │  Reviewer(s)         │
+│  Planner    │     │    Agent    │     │  (N models, all must │
+│  Agents     │     │  (per-      │     │   approve)           │
 │ complexity  │     │  complexity)│     └──────────────────────┘
 │ assessment  │     │             │
 │ + sub-task  │     │ git worktree│
@@ -74,7 +86,7 @@ TODOs are scanned from the repo, then analyzed by an AI model that scores **feas
 ## Task Pipeline
 
 ```
-User submits task / TODO dispatched
+Explorer discovers task / User submits task / TODO dispatched
         │
         ▼
    ┌─────────┐  Assesses complexity, may split into sub-tasks
@@ -160,13 +172,14 @@ python cli.py run-one -t "Title" -d "..."   # Run one task synchronously
 
 ## Web Dashboard
 
-Access at `http://<host>:<port>` (default `http://localhost:8778`). Three main tabs:
+Access at `http://<host>:<port>` (default `http://localhost:8778`). Main tabs include:
 
 | Tab | Features |
 |---|---|
+| **Explorer** | Real-time view of the continuous Explorer loop. See the current area of the codebase being analyzed, recent insights discovered, and automatically proposed tasks. |
 | **Tasks** | Task list with status badges, complexity indicators, sub-task hierarchy. Inline actions: Run, Publish, Cancel, Clean. Click a task for the detail modal with tabs for Overview, Sessions, Agent Runs, Git Status, and Outputs. |
 | **Scanned TODOs** | Browse scanned TODO items. Bulk actions: Scan, Analyze, Send to Planner, Revert, Delete. Each item shows file location, description, feasibility/difficulty scores, and AI analysis notes. |
-| **System Info** | Live view of orchestrator config. Edit planner/coder/reviewer models via dropdowns (populated from `opencode models`). Changes persist to `config.yaml` immediately. |
+| **System Info** | Live view of orchestrator config. Edit planner/coder/reviewer/explorer models via dropdowns (populated from `opencode models`). Changes persist to `config.yaml` immediately. |
 
 ## Configuration
 
