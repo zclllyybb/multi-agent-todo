@@ -501,6 +501,20 @@ class TestCleanVisibilityByActualResources:
         assert ui_task["actual_worktree_exists"] is False
         assert ui_task["clean_available"] is False
 
+    def test_serialize_task_for_ui_includes_comment_metadata(self, tmp_db, make_task):
+        from core.orchestrator import Orchestrator
+
+        task = make_task(comments=[{"id": "c1", "username": "alice", "content": "please verify", "created_at": 1.0}])
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        with patch.object(Orchestrator, "_collect_resource_snapshot", return_value=(set(), {})), \
+             patch("core.orchestrator.os.path.isdir", return_value=False):
+            ui_task = orch.serialize_task_for_ui(task)
+
+        assert ui_task["has_comments"] is True
+        assert ui_task["comment_count"] == 1
+
     def test_clean_visible_when_only_branch_exists(self, tmp_db, make_task):
         from core.orchestrator import Orchestrator
 

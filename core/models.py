@@ -98,6 +98,9 @@ class Task:
     # Session IDs per agent phase: {"planner": "ses_xxx", "coder": ["ses_xxx", ...], "reviewer": ["ses_xxx", ...]}
     session_ids: Dict[str, list] = field(default_factory=dict)
 
+    # User comments: [{"id": ..., "username": ..., "content": ..., "created_at": ...}]
+    comments: List[dict] = field(default_factory=list)
+
     # Files to copy from main workspace into the worktree (relative to repo root)
     copy_files: List[str] = field(default_factory=list)
 
@@ -123,6 +126,7 @@ class Task:
         d["priority"] = TaskPriority(d["priority"])
         d["source"] = TaskSource(d["source"])
         d.setdefault("session_ids", {})
+        d.setdefault("comments", [])
         d.setdefault("complexity", "")
         d.setdefault("reviewer_results", [])
         d.setdefault("published_at", 0.0)

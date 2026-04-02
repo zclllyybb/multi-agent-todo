@@ -69,6 +69,14 @@ class TestTaskCRUD:
         loaded = tmp_db.get_task(t.id)
         assert loaded.depends_on == ["dep1", "dep2"]
 
+    def test_comments_persist(self, tmp_db, make_task):
+        t = make_task(comments=[{"id": "c1", "username": "alice", "content": "looks good", "created_at": 123.0}])
+        tmp_db.save_task(t)
+        loaded = tmp_db.get_task(t.id)
+        assert len(loaded.comments) == 1
+        assert loaded.comments[0]["username"] == "alice"
+        assert loaded.comments[0]["content"] == "looks good"
+
 
 class TestTodoItemCRUD:
 

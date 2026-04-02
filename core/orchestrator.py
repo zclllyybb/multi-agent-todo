@@ -266,6 +266,8 @@ class Orchestrator:
         result = []
         for task in tasks:
             td = task.to_dict()
+            td["comment_count"] = len(task.comments)
+            td["has_comments"] = bool(task.comments)
             td.update(self._task_resource_state(task, local_branches, branch_worktrees))
             result.append(td)
         return result
@@ -273,6 +275,33 @@ class Orchestrator:
     def serialize_task_for_ui(self, task: Task) -> dict:
         """Serialize a single task with runtime resource-state fields for dashboard UI."""
         return self.serialize_tasks_for_ui([task])[0]
+
+    def add_task_comment(self, task_id: str, username: str, content: str) -> dict:
+        task = self.db.get_task(task_id)
+        if not task:
+            return {"error": "Task not found"}
+
+        username = username.strip()
+        content = content.strip()
+        if not username:
+            return {"error": "username required"}
+        if not content:
+            return {"error": "content required"}
+
+        now = time.time()
+        task.comments.append({
+            "id": uuid.uuid4().hex[:12],
+            "username": username,
+            "content": content,
+            "created_at": now,
+        })
+        task.updated_at = now
+        self.db.save_task(task)
+        return {
+            "ok": True,
+            "task": self.serialize_task_for_ui(task),
+            "comments": list(task.comments),
+        }
 
     # ── Branch Name Generation ──────────────────────────────────────
 

@@ -71,6 +71,8 @@ def _task_list_item(task_dict: dict) -> dict:
         "priority",
         "source",
         "session_ids",
+        "comment_count",
+        "has_comments",
         "updated_at",
         "complexity",
         "published_at",
@@ -163,6 +165,22 @@ async def api_task_detail(task_id: str):
         "runs": parsed_runs,
         "git_status": git_status,
     }
+
+
+@app.post("/api/tasks/{task_id}/comments")
+async def api_add_task_comment(task_id: str, request: Request):
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    result = orchestrator.add_task_comment(
+        task_id,
+        body.get("username", ""),
+        body.get("content", ""),
+    )
+    if "error" in result:
+        status = 404 if result["error"] == "Task not found" else 400
+        return JSONResponse(result, status_code=status)
+    return result
 
 
 @app.post("/api/tasks")
@@ -1244,6 +1262,21 @@ function countSessions(sessionIds) {
   return n;
 }
 
+function renderTaskComments(comments) {
+  if (!comments || !comments.length) {
+    return '<span style="color:var(--text-dim)">No comments yet.</span>';
+  }
+  return comments.map(c => `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--bg)">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:6px">
+        <strong style="font-size:12px;color:var(--text)">${esc(c.username || '-')}</strong>
+        <span style="font-size:11px;color:var(--text-dim)">${fmtTime(c.created_at)}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word">${esc(c.content || '')}</div>
+    </div>
+  `).join('');
+}
+
 // Render prompt/input section for a run — default open, same style as output
 function renderPromptSection(prompt, idx) {
   if (!prompt) return '';
@@ -1497,9 +1530,12 @@ async function refresh() {
     const depsBadge = !isBlocked && deps.length > 0
       ? `<span style="font-size:10px;margin-left:5px;color:var(--text-dim);border:1px solid var(--border);padding:1px 5px;border-radius:3px">after ${deps.length}</span>`
       : '';
+    const commentsBadge = t.has_comments
+      ? `<span style="font-size:10px;margin-left:5px;color:var(--purple);border:1px solid var(--purple);padding:1px 5px;border-radius:3px">${t.comment_count || 0} comment${(t.comment_count || 0) === 1 ? '' : 's'}</span>`
+      : '';
     return `<tr style="${depth > 0 ? 'background:rgba(88,166,255,0.02)' : ''}">
       <td><code style="font-size:${depth > 0 ? '10' : '12'}px">${t.id}</code></td>
-      <td style="cursor:pointer;color:var(--accent);${indent}" onclick="showDetail('${t.id}')">${childIcon}${esc(t.title)}${modeBadge}${complexityBadge}${childBadge}${blockedBadge}${depsBadge}</td>
+      <td style="cursor:pointer;color:var(--accent);${indent}" onclick="showDetail('${t.id}')">${childIcon}${esc(t.title)}${modeBadge}${complexityBadge}${childBadge}${blockedBadge}${depsBadge}${commentsBadge}</td>
       <td><span class="badge badge-${t.status}">${t.status}</span></td>
       <td><span class="badge-${t.priority}">${t.priority}</span></td>
       <td>${t.source}</td>
@@ -1587,6 +1623,18 @@ async function showDetail(id) {
   if (t.description) {
     html += `<div class="detail-section"><h3>Description</h3><pre>${esc(t.description)}</pre></div>`;
   }
+  const commentsHeading = t.comment_count
+    ? `Comments <span style="font-size:11px;color:var(--text-dim)">(${t.comment_count})</span>`
+    : 'Comments';
+  html += `<div class="detail-section" style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:12px">
+    <h3 style="margin-top:0">${commentsHeading}</h3>
+    <div style="display:grid;grid-template-columns:minmax(140px,180px) 1fr auto;gap:8px;align-items:start;margin-bottom:12px">
+      <input id="comment-username-${t.id}" type="text" placeholder="Your name" style="padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);margin:0">
+      <textarea id="comment-content-${t.id}" placeholder="Add a comment to this task..." style="height:72px;font-size:13px;margin:0"></textarea>
+      <button class="btn btn-primary" id="comment-btn-${t.id}" onclick="addTaskComment('${t.id}')">Add Comment</button>
+    </div>
+    <div id="task-comments-${t.id}">${renderTaskComments(t.comments || [])}</div>
+  </div>`;
   if (t.review_input) {
     html += `<div class="detail-section"><h3 style="color:var(--purple)">Review Input</h3><pre style="font-size:12px;max-height:300px;overflow:auto">${esc(t.review_input)}</pre></div>`;
   }
@@ -2031,6 +2079,47 @@ async function resumeTask(id) {
     }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Resume Run'; }
+  }
+}
+
+async function addTaskComment(id) {
+  const userEl = document.getElementById(`comment-username-${id}`);
+  const contentEl = document.getElementById(`comment-content-${id}`);
+  const btn = document.getElementById(`comment-btn-${id}`);
+  const username = (userEl && userEl.value || '').trim();
+  const content = (contentEl && contentEl.value || '').trim();
+  if (!username) {
+    await uiAlert('Please enter your name before posting a comment.', 'Comment Required');
+    return;
+  }
+  if (!content) {
+    await uiAlert('Please enter comment content before posting.', 'Comment Required');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Posting...';
+  }
+  try {
+    const res = await api(`/api/tasks/${id}/comments`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username, content }),
+    });
+    if (res.error) {
+      await uiAlert(String(res.error), 'Add Comment');
+      return;
+    }
+    if (contentEl) contentEl.value = '';
+    await showDetail(id);
+    await refresh();
+  } catch (e) {
+    await uiAlert('Failed to add comment: ' + e, 'Add Comment');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Add Comment';
+    }
   }
 }
 

@@ -1438,3 +1438,33 @@ class TestModelConfigUpdates:
             assert after["map_model"] == "map-api"
         finally:
             web_app.set_orchestrator(original)
+
+    def test_add_task_comment_persists_and_updates_task(self, orch):
+        from web import app as web_app
+
+        task = Task(title="Comment me", description="task")
+        orch.db.save_task(task)
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {"username": "alice", "content": "Please check the edge case."}
+
+            request.json = _json
+            with patch.object(orch, "_collect_resource_snapshot", return_value=(set(), {})), \
+                 patch("core.orchestrator.os.path.isdir", return_value=False):
+                response = asyncio.run(web_app.api_add_task_comment(task.id, request))
+            assert response["ok"] is True
+            assert response["task"]["has_comments"] is True
+            assert response["task"]["comment_count"] == 1
+            assert response["comments"][0]["username"] == "alice"
+
+            saved = orch.db.get_task(task.id)
+            assert saved is not None
+            assert len(saved.comments) == 1
+            assert saved.comments[0]["content"] == "Please check the edge case."
+        finally:
+            web_app.set_orchestrator(original)

@@ -392,6 +392,8 @@ def test_refresh_renders_task_list_successfully():
             "actual_branch_exists": True,
             "actual_worktree_exists": True,
             "created_at": 1710000700,
+            "comment_count": 2,
+            "has_comments": True,
         },
     ]
     _run_dashboard_js(
@@ -411,8 +413,9 @@ assert.match(statsHtml, />3</);
     assert.match(rowsHtml, /Implement dashboard metrics/);
     assert.match(rowsHtml, /Refine metrics labels/);
     assert.match(rowsHtml, /Queue follow-up polish/);
-    assert.match(rowsHtml, /Ship initial stats cards/);
-    assert.match(rowsHtml, /blocked/);
+assert.match(rowsHtml, /Ship initial stats cards/);
+assert.match(rowsHtml, /blocked/);
+assert.match(rowsHtml, /2 comments/);
 assert.match(rowsHtml, /2 sessions/);
 assert.match(rowsHtml, /1 session/);
 assert.match(rowsHtml, /complex/);
@@ -465,6 +468,12 @@ def test_show_detail_renders_task_overview_sessions_runs_and_outputs_successfull
                     "model": "reviewer-a",
                     "output": "APPROVE: changes look correct.",
                 }
+            ],
+            "comment_count": 2,
+            "has_comments": True,
+            "comments": [
+                {"id": "c1", "username": "alice", "content": "Please check the retry copy.", "created_at": 1710002100},
+                {"id": "c2", "username": "bob", "content": "Also verify reviewer session links.", "created_at": 1710002200},
             ],
         },
         "runs": [
@@ -550,6 +559,10 @@ assert.match(html, /Agent Runs \(3\)/);
 assert.match(html, /Git Status/);
 assert.match(html, /Outputs/);
 assert.match(html, /Description/);
+assert.match(html, /Comments/);
+assert.match(html, /Please check the retry copy/);
+assert.match(html, /Also verify reviewer session links/);
+assert.match(html, /Add Comment/);
 assert.match(html, /Review Input/);
 assert.match(html, /Depends On/);
 assert.match(html, /dep1/);
@@ -711,5 +724,31 @@ globalThis.fetch = async (url, opts) => {
 await initExploreMap();
 await startExploration();
 assert.deepEqual(calls, []);
+"""
+    )
+
+
+def test_add_task_comment_posts_payload_and_refreshes_views():
+    _run_dashboard_js(
+        r"""
+let captured = null;
+const calls = [];
+globalThis.uiAlert = async () => {};
+globalThis.showDetail = async (id) => { calls.push('detail:' + id); };
+globalThis.refresh = async () => { calls.push('refresh'); };
+document.getElementById('comment-username-task1').value = 'alice';
+document.getElementById('comment-content-task1').value = 'Please verify retry handling';
+document.getElementById('comment-btn-task1').textContent = 'Add Comment';
+globalThis.fetch = async (url, opts) => {
+  captured = { url, opts };
+  return { json: async () => ({ ok: true, task: { id: 'task1', comment_count: 1, has_comments: true }, comments: [{ username: 'alice', content: 'Please verify retry handling' }] }) };
+};
+await addTaskComment('task1');
+assert.equal(captured.url, '/api/tasks/task1/comments');
+const body = JSON.parse(captured.opts.body);
+assert.equal(body.username, 'alice');
+assert.equal(body.content, 'Please verify retry handling');
+assert.deepEqual(calls, ['detail:task1', 'refresh']);
+assert.equal(document.getElementById('comment-content-task1').value, '');
 """
     )
