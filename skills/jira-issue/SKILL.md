@@ -50,6 +50,7 @@ uv run --project . python3 scripts/jira_create_issue.py \
 - `--description-file`：从文件读取描述；传 `-` 时从 stdin 读取
 - `--label`/`--component`/`--assignee`/`--priority`
 - `--affects-version`/`--fix-version`：对应 Affects Version / Fix Version（可重复）
+- `--epic`：Epic issue key，创建成功后会将 issue 挂载到该 epic
 - `--print-payload`/`--dry-run`
 
 输出：`key` 与 `self`（若返回）。
@@ -68,6 +69,19 @@ uv run --project . python3 scripts/jira_create_issue.py \
   --affects-version enter-3.1.4 \
   --fix-version 3.1.4
 ```
+
+挂载到 Epic 的示例：
+```bash
+uv run --project . python3 scripts/jira_create_issue.py \
+  --project-key DORIS \
+  --issue-type Bug \
+  --summary "Planner 优化器在特定场景下产生错误执行计划" \
+  --description-file /path/to/description.md \
+  --label DorisExplorer \
+  --epic DORIS-24979 \
+  --dry-run
+```
+创建成功后会输出 `epic_linked=DORIS-24979` 表示已挂载到 epic。
 
 stdin 示例：
 ```bash

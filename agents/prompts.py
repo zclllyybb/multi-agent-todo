@@ -222,6 +222,7 @@ def coder_assign_jira_issue(
     description: str,
     project_key: str,
     jira_url: str,
+    jira_epic: str,
     available_issue_types: list[str],
     available_priorities: list[str],
     routing_hints: list[dict],
@@ -241,6 +242,7 @@ Source task description:
 Jira target:
 - project_key: {project_key}
 - jira_url: {jira_url}
+- required_epic: {jira_epic}
 - available_issue_types: {available_issue_types}
 - available_priorities: {available_priorities}
 - fixed_label: DorisExplorer
@@ -265,12 +267,14 @@ Your job:
 8. Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`.
 9. If the selected routing hint has labels, pass them with `--label`. If it has no labels, do not add any extra routing labels.
 10. If the selected routing hint has a component, pass it via `--component`. If the hint has no component, omit `--component`.
-11. When invoking the skill, pass credentials explicitly in the command environment, for example by prefixing the command with `JIRA_URL=... JIRA_TOKEN=... JIRA_USER=...`. Do not rely on inherited shell environment being present inside the tool.
-12. If temporary files are created, remove them after Jira is created.
+11. You MUST pass the configured epic with `--epic {jira_epic}` so the new issue is linked to that epic.
+12. When invoking the skill, pass credentials explicitly in the command environment, for example by prefixing the command with `JIRA_URL=... JIRA_TOKEN=... JIRA_USER=...`. Do not rely on inherited shell environment being present inside the tool.
+13. If temporary files are created, remove them after Jira is created.
 
 Rules:
 - Do not invent issue types or priorities outside the provided lists.
 - Do not invent assignees, extra labels, or components outside the routing hints.
+- Do not omit or change the configured epic.
 - Do not ask the user questions.
 - Do not output JSON.
 - Actually create the Jira issue; do not stop at drafting.

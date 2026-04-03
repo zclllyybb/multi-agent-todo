@@ -638,6 +638,7 @@ def _make_orchestrator_config(tmp_path):
                 "  url: https://jira.example",
                 "  token: secret-token",
                 "  project_key: QA",
+                "  epic: QA-100",
                 "  issue_type:",
                 "    - Bug",
                 "    - Task",
@@ -694,6 +695,7 @@ def _make_orchestrator_config(tmp_path):
             "url": "https://jira.example",
             "token": "secret-token",
             "project_key": "QA",
+            "epic": "QA-100",
             "issue_type": ["Bug", "Task", "Improvement"],
             "priority": ["Highest", "High", "Medium"],
             "routing_hints": [
@@ -2035,14 +2037,15 @@ class TestModelConfigUpdates:
         assert kwargs["model"] == "test-coder"
         assert "planner failures and scheduling" in kwargs["message"]
         assert "all unmatched items" in kwargs["message"]
+        assert "required_epic: QA-100" in kwargs["message"]
         assert "Improvement" in kwargs["message"]
-        assert "fixed_label: DorisExplorer" in kwargs["message"]
+        assert "fixed_label: Doris Explorer" in kwargs["message"]
         assert (
             "Choose assignee, extra labels, and optional component strictly from the routing hints."
             in kwargs["message"]
         )
         assert (
-            "Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`."
+            "Every created issue must include the fixed label `Doris Explorer` by passing it explicitly with `--label`."
             in kwargs["message"]
         )
         assert (
@@ -2053,6 +2056,11 @@ class TestModelConfigUpdates:
             "If the selected routing hint has a component, pass it via `--component`. If the hint has no component, omit `--component`."
             in kwargs["message"]
         )
+        assert (
+            "You MUST pass the configured epic with `--epic QA-100`"
+            in kwargs["message"]
+        )
+        assert "Do not omit or change the configured epic." in kwargs["message"]
         assert f"[Doris Agent src-task-777]" in kwargs["message"]
         assert (
             "此jira由赵长乐的agent创建，如有疑问可飞书联系。"
@@ -2167,6 +2175,7 @@ class TestModelConfigUpdates:
         assert saved.task_mode == "jira"
         assert saved.jira_source_task_id == "source-456"
         assert saved.jira_status in ("pending", "assigning", "created", "failed")
+        assert "epic=QA-100" in saved.plan_output
         assert f"issue types=" in saved.plan_output
         assert "routing hints=" in saved.plan_output
 

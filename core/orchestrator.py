@@ -448,6 +448,7 @@ class Orchestrator:
             "token": jira.get("token", ""),
             "user": jira.get("user", ""),
             "project_key": jira.get("project_key", ""),
+            "epic": str(jira.get("epic", "")).strip(),
             "issue_types": (
                 list(jira.get("issue_type", []))
                 if isinstance(jira.get("issue_type", []), list)
@@ -509,11 +510,12 @@ class Orchestrator:
             if str(hint.get("component", "")).strip()
         )
         log.info(
-            "Preparing jira agent run: jira_task=%s source_task=%s model=%s project=%s issue_type_candidates=%s priority_candidates=%s routing_hint_count=%d routing_component_count=%d skill_path=%s",
+            "Preparing jira agent run: jira_task=%s source_task=%s model=%s project=%s epic=%s issue_type_candidates=%s priority_candidates=%s routing_hint_count=%d routing_component_count=%d skill_path=%s",
             task.id,
             source_task_id,
             simple_agent.model,
             jira["project_key"],
+            jira["epic"] or "-",
             jira["issue_types"],
             jira["priorities"],
             len(jira["routing_hints"]),
@@ -526,6 +528,7 @@ class Orchestrator:
             description=task.description,
             project_key=jira["project_key"],
             jira_url=jira["url"],
+            jira_epic=jira["epic"],
             available_issue_types=jira["issue_types"],
             available_priorities=jira["priorities"],
             routing_hints=jira["routing_hints"],
@@ -606,7 +609,7 @@ class Orchestrator:
             max_retries=0,
         )
         task.plan_output = (
-            f"Jira target: {jira['project_key'] or '-'} / issue types={jira['issue_types'] or ['-']} "
+            f"Jira target: {jira['project_key'] or '-'} / epic={jira['epic'] or '-'} / issue types={jira['issue_types'] or ['-']} "
             f"/ priorities={jira['priorities'] or ['-']} / routing hints={len(jira['routing_hints'])}"
         )
         task.jira_status = "pending"

@@ -89,6 +89,7 @@ class TestLoadConfig:
                 {
                     "jira": {
                         "project_key": "QA",
+                        "epic": "QA-100",
                         "routing_hints": [
                             {
                                 "about": "planner issues",
@@ -103,6 +104,7 @@ class TestLoadConfig:
         )
         config = load_config(str(cfg_file))
         assert config["jira"]["project_key"] == "QA"
+        assert config["jira"]["epic"] == "QA-100"
         assert config["jira"]["issue_type"] == []
         assert config["jira"]["priority"] == []
         assert config["jira"]["skill_path"] == "skills/jira-issue"

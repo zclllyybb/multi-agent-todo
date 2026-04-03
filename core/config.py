@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
         "token": "",
         "user": "",
         "project_key": "",
+        "epic": "",
         "issue_type": [],
         "priority": [],
         "routing_hints": [],

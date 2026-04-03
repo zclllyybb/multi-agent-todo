@@ -93,6 +93,7 @@ def build_payload(
 )
 @click.option("--assignee", help="Assignee username (optional)")
 @click.option("--priority", help="Priority name (optional)")
+@click.option("--epic", help="Epic issue key to link this issue to (e.g., DORIS-24979)")
 @click.option("--print-payload", is_flag=True, help="Print request payload")
 @click.option("--dry-run", is_flag=True, help="Only print payload, do not create issue")
 def main(
@@ -110,6 +111,7 @@ def main(
     fix_versions: Iterable[str],
     assignee: Optional[str],
     priority: Optional[str],
+    epic: Optional[str],
     print_payload: bool,
     dry_run: bool,
 ) -> None:
@@ -168,6 +170,27 @@ def main(
         click.echo(f"key={key}")
     if self_url:
         click.echo(f"self={self_url}")
+
+    # Link issue to epic if --epic was provided
+    if key and epic:
+        epic_key = str(epic).strip()
+        epic_url = f"{jira_url}/rest/agile/1.0/epic/{epic_key}/issue"
+        epic_payload = {"issues": [key]}
+        epic_resp = requests.post(
+            epic_url,
+            headers=headers,
+            auth=request_auth,
+            json=epic_payload,
+            timeout=20,
+        )
+        if epic_resp.status_code >= 400:
+            click.echo(
+                f"Warning: Failed to link issue to epic: {epic_resp.status_code}",
+                err=True,
+            )
+            click.echo(epic_resp.text, err=True)
+        else:
+            click.echo(f"epic_linked={epic_key}")
 
 
 if __name__ == "__main__":
