@@ -1374,45 +1374,14 @@ class Orchestrator:
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
-                reviewer_results = []
-                rejection_outputs = []
-                all_passed = True
-                for reviewer in self.reviewers:
-                    review_run, passed, review_text = reviewer.review_changes(
-                        task,
-                        worktree_path,
-                        revision_context=user_feedback,
-                        coder_response=code_text,
-                    )
-                    self.db.save_agent_run(review_run)
-                    reviewer_results.append(
-                        {
-                            "model": reviewer.model,
-                            "passed": passed,
-                            "output": review_text,
-                        }
-                    )
-                    if review_run.session_id:
-                        task.session_ids.setdefault("reviewer", []).append(
-                            review_run.session_id
-                        )
-                    log.info(
-                        "Revise [%s] reviewer(%s) passed=%s",
-                        task.id,
-                        reviewer.model,
-                        passed,
-                    )
-                    if not passed:
-                        all_passed = False
-                        rejection_outputs.append(
-                            f"=== Reviewer: {reviewer.model} | REQUEST_CHANGES ===\n"
-                            + review_text
-                        )
-                        log.info(
-                            "Revise [%s] short-circuiting after first rejection",
-                            task.id,
-                        )
-                        break
+                reviewer_results, all_passed, rejection_outputs = self._execute_reviewers(
+                    task,
+                    worktree_path,
+                    review_method="review_changes",
+                    short_circuit=True,
+                    revision_context=user_feedback,
+                    coder_response=code_text,
+                )
 
                 if all_passed:
                     task.review_output = "\n\n".join(
@@ -1600,8 +1569,11 @@ class Orchestrator:
             # If this is a revise, user_feedback holds the user's manual guidance
             revision_context = task.user_feedback
 
-            # Run all reviewers
+            # Run all reviewers (no short-circuit for review-only tasks)
             reviewer_results = []
+            rejection_outputs = []
+            all_passed = True
+
             for reviewer in self.reviewers:
                 task = self.db.get_task(task_id)
                 if task.status == TaskStatus.CANCELLED:
@@ -1953,6 +1925,61 @@ class Orchestrator:
                 return run.session_id
         return ""
 
+    def _execute_reviewers(
+        self,
+        task: Task,
+        worktree_path: str,
+        review_method: str,
+        short_circuit: bool = True,
+        **review_kwargs,
+    ) -> tuple[list[dict], bool, list[str]]:
+        """
+        Execute all reviewers and return results.
+
+        Args:
+            task: Task being reviewed
+            worktree_path: Path to the worktree
+            review_method: Name of the review method to call ('review_changes' or 'review_patch')
+            short_circuit: If True, stop after first rejection; if False, run all reviewers
+            **review_kwargs: Additional kwargs to pass to the review method
+
+        Returns:
+            Tuple of (reviewer_results, all_passed, rejection_outputs)
+        """
+        reviewer_results = []
+        rejection_outputs = []
+        all_passed = True
+
+        for reviewer in self.reviewers:
+            # Call the appropriate review method
+            review_fn = getattr(reviewer, review_method)
+            review_run, passed, review_text = review_fn(
+                task, worktree_path, **review_kwargs
+            )
+
+            self.db.save_agent_run(review_run)
+            reviewer_results.append({
+                "model": reviewer.model,
+                "passed": passed,
+                "output": review_text,
+            })
+
+            if review_run.session_id:
+                task.session_ids.setdefault("reviewer", []).append(review_run.session_id)
+
+            log.info("Task [%s] reviewer(%s) passed=%s", task.id, reviewer.model, passed)
+
+            if not passed:
+                all_passed = False
+                rejection_outputs.append(
+                    f"=== Reviewer: {reviewer.model} | REQUEST_CHANGES ===\n{review_text}"
+                )
+                if short_circuit:
+                    log.info("Task [%s] short-circuiting after first rejection", task.id)
+                    break
+
+        return reviewer_results, all_passed, rejection_outputs
+
     def _ensure_coder_run_success(self, code_run: AgentRun, attempt: int):
         """Validate coder run result and raise an accurate failure error."""
         if code_run.exit_code == 0:
@@ -2212,45 +2239,14 @@ class Orchestrator:
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
-                reviewer_results = []
-                rejection_outputs = []  # only from reviewers that rejected
-                all_passed = True
-                for reviewer in self.reviewers:
-                    review_run, passed, review_text = reviewer.review_changes(
-                        task,
-                        worktree_path,
-                        prior_rejections="\n\n".join(all_prior_rejections),
-                        coder_response=coder_last_response,
-                    )
-                    self.db.save_agent_run(review_run)
-                    reviewer_results.append(
-                        {
-                            "model": reviewer.model,
-                            "passed": passed,
-                            "output": review_text,
-                        }
-                    )
-                    if review_run.session_id:
-                        task.session_ids.setdefault("reviewer", []).append(
-                            review_run.session_id
-                        )
-                    log.info(
-                        "Task [%s] reviewer(%s) passed=%s",
-                        task.id,
-                        reviewer.model,
-                        passed,
-                    )
-                    if not passed:
-                        all_passed = False
-                        rejection_outputs.append(
-                            f"=== Reviewer: {reviewer.model} | REQUEST_CHANGES ===\n"
-                            + review_text
-                        )
-                        # Short-circuit: don't run remaining reviewers
-                        log.info(
-                            "Task [%s] short-circuiting after first rejection", task.id
-                        )
-                        break
+                reviewer_results, all_passed, rejection_outputs = self._execute_reviewers(
+                    task,
+                    worktree_path,
+                    review_method="review_changes",
+                    short_circuit=True,
+                    prior_rejections="\n\n".join(all_prior_rejections),
+                    coder_response=coder_last_response,
+                )
 
                 # Build review output: rejections only (or single APPROVE line)
                 if all_passed:
