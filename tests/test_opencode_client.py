@@ -1,6 +1,7 @@
 """Tests for core/opencode_client.py: pure parsing methods (no subprocess)."""
 
 import subprocess
+from unittest.mock import patch
 
 import pytest
 
@@ -218,6 +219,42 @@ class TestExtractLastTextBlock:
             (["Final summary here"], [], "stop"),
         )
         assert client.extract_last_text_block(output) == "Final summary here"
+
+
+class TestAgentVariantCli:
+    def test_run_passes_agent_variant_flag(self, client):
+        with patch.object(client, "_exec", return_value=("", 0, 0.1)) as exec_mock:
+            client.run(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent_variant="deep-explorer",
+            )
+
+        cmd = exec_mock.call_args.args[0]
+        assert "--agent" in cmd
+        idx = cmd.index("--agent")
+        assert cmd[idx + 1] == "deep-explorer"
+
+    def test_run_streaming_passes_agent_variant_flag(self, client):
+        with patch.object(
+            client,
+            "_exec_streaming",
+            return_value=("", 0, 0.1, "", False),
+        ) as exec_mock:
+            client.run_streaming(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent_variant="deep-explorer",
+            )
+
+        cmd = exec_mock.call_args.kwargs["cmd"]
+        assert "--agent" in cmd
+        idx = cmd.index("--agent")
+        assert cmd[idx + 1] == "deep-explorer"
 
     def test_multiple_text_segments_in_last_step(self, client):
         output = _build_output(

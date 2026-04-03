@@ -630,6 +630,7 @@ def _make_orchestrator_config(tmp_path):
                 "explore:",
                 "  explorer_model: test-explorer",
                 "  map_model: test-map-model",
+                "  variant: test-variant",
                 "  categories:",
                 "    - performance",
                 "    - concurrency",
@@ -688,6 +689,7 @@ def _make_orchestrator_config(tmp_path):
         "explore": {
             "explorer_model": "test-explorer",
             "map_model": "test-map-model",
+            "variant": "test-variant",
             "categories": ["performance", "concurrency"],
             "auto_task_severity": "major",
         },
@@ -760,6 +762,13 @@ class TestOrchestratorExplore:
     def test_get_explorer_model(self, orch):
         assert orch._get_explorer_model() == "test-explorer"
 
+    def test_get_explore_variant(self, orch):
+        assert orch._get_explore_variant() == "test-variant"
+
+    def test_get_explore_variant_default(self, orch):
+        del orch.config["explore"]["variant"]
+        assert orch._get_explore_variant() == ""
+
     def test_get_explorer_model_fallback(self, orch):
         del orch.config["explore"]
         assert orch._get_explorer_model() == "test-planner"
@@ -780,9 +789,10 @@ class TestOrchestratorExplore:
             ExplorerAgent,
             "init_map",
             return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"]),
-        ):
+        ) as init_map_mock:
             result = orch.init_explore_map()
 
+        assert init_map_mock.call_args.kwargs["agent_variant"] == "test-variant"
         assert "modules_created" in result
         assert result["modules_created"] == 3  # 2 top-level + 1 child
 
@@ -816,6 +826,49 @@ class TestOrchestratorExplore:
             orch.init_explore_map()
         modules = orch.db.get_all_explore_modules()
         assert all(m.id != "old" for m in modules)
+
+    def test_run_exploration_passes_variant_to_explorer(self, orch):
+        mod = ExploreModule(id="m1", name="Exec", path="be/src/exec")
+        orch.db.save_explore_module(mod)
+
+        with patch.object(ExplorerAgent, "explore_module") as explore_mock:
+            explore_mock.return_value = (
+                _mock_agent_run(output=MOCK_EXPLORE_OUTPUT),
+                json.loads(MOCK_EXPLORE_OUTPUT)["findings"],
+                json.loads(MOCK_EXPLORE_OUTPUT)["summary"],
+            )
+            orch._run_exploration(mod.id, "performance", "perf_hunter", job=None)
+
+        assert explore_mock.call_args.kwargs["agent_variant"] == "test-variant"
+
+    def test_run_exploration_streaming_passes_variant_to_explorer(self, orch):
+        mod = ExploreModule(id="m2", name="Exec", path="be/src/exec")
+        orch.db.save_explore_module(mod)
+        orch.client = OpenCodeClient(timeout=10)
+        job = {
+            "job_id": "job1",
+            "queue_id": 1,
+            "module_id": mod.id,
+            "category": "performance",
+            "personality_key": "perf_hunter",
+            "task_id": f"__explore__:{mod.id}:performance",
+            "state": "running",
+            "queued_at": time.time(),
+            "started_at": time.time(),
+            "session_id": "",
+            "focus_point": "",
+            "resume_with_continue": False,
+        }
+
+        with patch.object(ExplorerAgent, "explore_module_streaming") as explore_mock:
+            explore_mock.return_value = (
+                _mock_agent_run(output=MOCK_EXPLORE_OUTPUT),
+                json.loads(MOCK_EXPLORE_OUTPUT)["findings"],
+                json.loads(MOCK_EXPLORE_OUTPUT)["summary"],
+            )
+            orch._run_exploration(mod.id, "performance", "perf_hunter", job=job)
+
+        assert explore_mock.call_args.kwargs["agent_variant"] == "test-variant"
 
     def test_reinitialize_explore_map_resets_explore_metadata_but_keeps_tasks(
         self, orch
@@ -1103,6 +1156,7 @@ class TestOrchestratorExplore:
             message_override=None,
             on_output=None,
             should_cancel=None,
+            agent_variant="",
         ):
             if on_output:
                 on_output('{"sessionID":"ses_init"}\n', "ses_init")

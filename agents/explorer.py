@@ -58,6 +58,7 @@ class ExplorerAgent(BaseAgent):
         repo_path: str,
         focus_point: str = "",
         prior_note: str = "",
+        agent_variant: str = "",
     ) -> Tuple[AgentRun, List[dict], str]:
         """Explore a module for a specific category of issues.
 
@@ -74,7 +75,7 @@ class ExplorerAgent(BaseAgent):
             focus_point=focus_point,
             prior_note=prior_note,
         )
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, agent_variant=agent_variant)
         text = self.get_text(run)
         findings, summary = self._parse_output(text)
         return run, findings, summary
@@ -129,6 +130,7 @@ class ExplorerAgent(BaseAgent):
         message_override: Optional[str] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        agent_variant: str = "",
     ) -> Tuple[AgentRun, List[dict], str]:
         prompt = message_override or self._build_explore_prompt(
             module=module,
@@ -148,6 +150,7 @@ class ExplorerAgent(BaseAgent):
             session_id=session_id,
             on_output=on_output,
             should_cancel=should_cancel,
+            agent_variant=agent_variant,
         )
         if run.exit_code == -2:
             return run, [], ""
@@ -185,7 +188,7 @@ class ExplorerAgent(BaseAgent):
             })
         return findings, summary
 
-    def init_map(self, repo_path: str, max_depth: int = 2) -> Tuple[AgentRun, List[dict]]:
+    def init_map(self, repo_path: str, max_depth: int = 2, agent_variant: str = "") -> Tuple[AgentRun, List[dict]]:
         """Run map initialization agent to discover the project module structure.
 
         Returns ``(agent_run, modules_list)`` where each module dict has keys:
@@ -194,7 +197,7 @@ class ExplorerAgent(BaseAgent):
         from agents.prompts import map_init_prompt
 
         prompt = map_init_prompt(repo_path=repo_path, max_depth=max_depth)
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, agent_variant=agent_variant)
         text = self.get_text(run)
         modules = self._parse_map_output(text)
         return run, modules
@@ -208,6 +211,7 @@ class ExplorerAgent(BaseAgent):
         message_override: Optional[str] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        agent_variant: str = "",
     ) -> Tuple[AgentRun, List[dict]]:
         from agents.prompts import map_init_prompt
 
@@ -221,6 +225,7 @@ class ExplorerAgent(BaseAgent):
             session_id=session_id,
             on_output=on_output,
             should_cancel=should_cancel,
+            agent_variant=agent_variant,
         )
         if run.exit_code == -2:
             raise RuntimeError("map init cancelled")

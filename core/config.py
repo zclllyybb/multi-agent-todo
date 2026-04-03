@@ -38,6 +38,9 @@ DEFAULT_CONFIG = {
     "database": {
         "path": "/mnt/disk3/zhaochangle/multi-agent-todo/data/tasks.db",
     },
+    "explore": {
+        "variant": "",
+    },
     "jira": {
         "url": "",
         "token": "",

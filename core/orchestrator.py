@@ -2443,6 +2443,9 @@ class Orchestrator:
             self.config["opencode"].get("planner_model", ""),
         )
 
+    def _get_explore_variant(self) -> str:
+        return str(self.config.get("explore", {}).get("variant", "")).strip()
+
     def _get_explore_parallel_limit(self) -> int:
         raw = self.config.get("explore", {}).get(
             "max_parallel_runs",
@@ -3026,10 +3029,12 @@ class Orchestrator:
         model = self.config.get("explore", {}).get(
             "map_model", self._get_explorer_model()
         )
+        variant = self._get_explore_variant()
         explorer = ExplorerAgent(model=model, client=self.client)
+        log.info("Starting explore map init: model=%s variant=%s", model, variant or "-")
 
         try:
-            run, modules_data = explorer.init_map(repo_path)
+            run, modules_data = explorer.init_map(repo_path, agent_variant=variant)
             modules_created = self._apply_explore_map(run, modules_data, model)
             with self._lock:
                 self._explore_map_state.update(
@@ -3080,6 +3085,7 @@ class Orchestrator:
             model = self.config.get("explore", {}).get(
                 "map_model", self._get_explorer_model()
             )
+            variant = self._get_explore_variant()
             now = time.time()
             review_reason = review_reason.strip()
             review_message = (
@@ -3099,6 +3105,7 @@ class Orchestrator:
                     "updated_at": now,
                     "session_id": "",
                     "model": model,
+                    "variant": variant,
                     "output": "",
                     "error": "",
                     "cancel_requested": False,
@@ -3112,6 +3119,7 @@ class Orchestrator:
             self._explore_map_future = self._pool.submit(
                 self._run_init_explore_map_job,
                 model,
+                variant,
                 review_message,
                 review_session_id,
             )
@@ -3147,6 +3155,7 @@ class Orchestrator:
     def _run_init_explore_map_job(
         self,
         model: str,
+        variant: str = "",
         review_message: str = "",
         review_session_id: str = "",
     ):
@@ -3175,6 +3184,7 @@ class Orchestrator:
                 message_override=review_message or None,
                 on_output=_on_output,
                 should_cancel=lambda: self._explore_map_cancel_requested,
+                agent_variant=variant,
             )
             modules_created = self._apply_explore_map(run, modules_data, model)
             now = time.time()
@@ -3369,6 +3379,7 @@ class Orchestrator:
             personality = EXPLORER_PERSONALITIES[personality_key]
             repo_path = self.config["repo"]["path"]
             model = self._get_explorer_model()
+            variant = self._get_explore_variant()
             task_id = f"__explore__:{module_id}:{category}"
             session_id = ""
             focus_point = ""
@@ -3381,6 +3392,14 @@ class Orchestrator:
                 resume_with_continue = bool(job.get("resume_with_continue", False))
 
             explorer = ExplorerAgent(model=model, client=self.client)
+            log.info(
+                "Starting exploration run: module=%s category=%s model=%s variant=%s personality=%s",
+                module.path,
+                category,
+                model,
+                variant or "-",
+                personality_key,
+            )
             stream_mode = job is not None and isinstance(self.client, OpenCodeClient)
             if not stream_mode:
                 run, findings, summary = explorer.explore_module(
@@ -3391,6 +3410,7 @@ class Orchestrator:
                     repo_path=repo_path,
                     focus_point=focus_point,
                     prior_note=prior_note,
+                    agent_variant=variant,
                 )
             else:
                 persist_box = {"last": 0.0}
@@ -3417,6 +3437,7 @@ class Orchestrator:
                     if (resume_with_continue and session_id)
                     else None,
                     on_output=_on_output,
+                    agent_variant=variant,
                     should_cancel=lambda: self._is_explore_cancel_requested(key),
                 )
 

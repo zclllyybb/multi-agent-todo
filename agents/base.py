@@ -20,6 +20,7 @@ class BaseAgent:
         work_dir: str,
         task_id: str = "",
         session_id: str = "",
+        agent_variant: str = "",
     ) -> AgentRun:
         return self.client.run(
             message=prompt,
@@ -28,6 +29,7 @@ class BaseAgent:
             agent_type=self.agent_type,
             task_id=task_id,
             session_id=session_id,
+            agent_variant=agent_variant,
         )
 
     def get_text(self, run: AgentRun) -> str:
