@@ -8,7 +8,6 @@ from core.config import _deep_merge, load_config
 
 
 class TestDeepMerge:
-
     def test_flat_override(self):
         base = {"a": 1, "b": 2}
         override = {"b": 99, "c": 3}
@@ -51,13 +50,16 @@ class TestDeepMerge:
 
 
 class TestLoadConfig:
-
     def test_loads_yaml_file(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(yaml.dump({
-            "web": {"port": 9999},
-            "orchestrator": {"max_parallel_tasks": 10},
-        }))
+        cfg_file.write_text(
+            yaml.dump(
+                {
+                    "web": {"port": 9999},
+                    "orchestrator": {"max_parallel_tasks": 10},
+                }
+            )
+        )
         config = load_config(str(cfg_file))
         assert config["web"]["port"] == 9999
         assert config["orchestrator"]["max_parallel_tasks"] == 10
@@ -79,3 +81,30 @@ class TestLoadConfig:
         config = load_config(str(cfg_file))
         assert config["web"]["port"] == 1234
         assert config["web"]["host"] == "0.0.0.0"  # default preserved
+
+    def test_jira_defaults_and_partial_override(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            yaml.dump(
+                {
+                    "jira": {
+                        "project_key": "QA",
+                        "routing_hints": [
+                            {
+                                "about": "planner issues",
+                                "assignee": "alice",
+                                "component": "query execution",
+                                "labels": ["planner"],
+                            }
+                        ],
+                    }
+                }
+            )
+        )
+        config = load_config(str(cfg_file))
+        assert config["jira"]["project_key"] == "QA"
+        assert config["jira"]["issue_type"] == []
+        assert config["jira"]["priority"] == []
+        assert config["jira"]["skill_path"] == "skills/jira-issue"
+        assert config["jira"]["routing_hints"][0]["assignee"] == "alice"
+        assert config["jira"]["routing_hints"][0]["component"] == "query execution"

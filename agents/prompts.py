@@ -8,8 +8,10 @@ Edit this file to tune agent behavior without touching agent logic.
 # ANALYZER AGENT  (scores scanned TODO items before user review)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def analyzer_todo(file_path: str, line_number: int, raw_text: str,
-                  description: str, repo_path: str) -> str:
+
+def analyzer_todo(
+    file_path: str, line_number: int, raw_text: str, description: str, repo_path: str
+) -> str:
     """Prompt asking the model to evaluate a TODO on feasibility and implementation difficulty.
 
     Output must be a single JSON object with exactly these keys:
@@ -57,8 +59,10 @@ Example:
 # PLANNER AGENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-def planner_plan_task(title: str, description: str, file_path: str,
-                      line_number: int, repo_path: str) -> str:
+
+def planner_plan_task(
+    title: str, description: str, file_path: str, line_number: int, repo_path: str
+) -> str:
     """Prompt for analyzing a single task and producing an implementation plan."""
     return f"""You are a planning agent. Analyze the following task and create a \
 concise implementation plan. Output ONLY the plan as a numbered list of steps.
@@ -149,9 +153,15 @@ Output ONLY valid JSON, no other text. Example:
 # CODER AGENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-def coder_implement(title: str, description: str, file_path: str,
-                    line_number: int, plan_output: str,
-                    dep_context: str = "") -> str:
+
+def coder_implement(
+    title: str,
+    description: str,
+    file_path: str,
+    line_number: int,
+    plan_output: str,
+    dep_context: str = "",
+) -> str:
     """Prompt for implementing a task in the worktree."""
     parts = [
         "You are a coding agent. Implement the following task completely. You must first read the AGENTS.md within the project to understand the relevant specifications and strictly enforce them.",
@@ -206,10 +216,71 @@ def coder_retry_feedback(review_feedback: str, attempt: int) -> str:
     )
 
 
+def coder_assign_jira_issue(
+    source_task_id: str,
+    title: str,
+    description: str,
+    project_key: str,
+    jira_url: str,
+    available_issue_types: list[str],
+    available_priorities: list[str],
+    routing_hints: list[dict],
+) -> str:
+    """Prompt the simple coder model to directly create a Jira issue via the local skill."""
+    footer = (
+        "此jira由赵长乐的agent创建，如有疑问可飞书联系。"
+        "如果确认jira问题不存在/无需处理，或者处理完成，请在http://10.26.20.3:8778评论对应task。"
+    )
+    return f"""You are preparing and creating a Jira issue using the vendored local Jira skill in this repository.
+
+Source task id: {source_task_id}
+Source task title: {title}
+Source task description:
+{description}
+
+Jira target:
+- project_key: {project_key}
+- jira_url: {jira_url}
+- available_issue_types: {available_issue_types}
+- available_priorities: {available_priorities}
+- fixed_label: DorisExplorer
+
+Routing hints:
+{routing_hints}
+
+Required summary prefix:
+[Doris Agent {source_task_id}]
+
+Required description footer (must appear at the end, verbatim):
+{footer}
+
+Your job:
+1. Read the vendored skill instructions in `skills/jira-issue/SKILL.md`.
+2. Choose the most appropriate issue type and priority from the allowed candidate lists.
+3. Choose assignee, extra labels, and optional component strictly from the routing hints. If no specific hint matches, use the catch-all unmatched hint if present.
+4. Write a concise but specific Jira summary. It MUST begin with `[Doris Agent {source_task_id}]`.
+5. Write a complete Jira description suitable for direct filing. It MUST end with the required footer verbatim.
+6. Use the local skill under `skills/jira-issue/` to create the issue directly. Do not use any external skill path.
+7. Return ONLY a short plain-text result containing `key=<ISSUE_KEY>` and `self=<ISSUE_URL>` on separate lines after successful creation.
+8. Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`.
+9. If the selected routing hint has labels, pass them with `--label`. If it has no labels, do not add any extra routing labels.
+10. If the selected routing hint has a component, pass it via `--component`. If the hint has no component, omit `--component`.
+11. When invoking the skill, pass credentials explicitly in the command environment, for example by prefixing the command with `JIRA_URL=... JIRA_TOKEN=... JIRA_USER=...`. Do not rely on inherited shell environment being present inside the tool.
+12. If temporary files are created, remove them after Jira is created.
+
+Rules:
+- Do not invent issue types or priorities outside the provided lists.
+- Do not invent assignees, extra labels, or components outside the routing hints.
+- Do not ask the user questions.
+- Do not output JSON.
+- Actually create the Jira issue; do not stop at drafting.
+"""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REVIEWER AGENT
 # ─────────────────────────────────────────────────────────────────────────────
-REVIEW_REQUIREMENTS="""
+REVIEW_REQUIREMENTS = """
 ## Instructions
 The coding agent has already committed its changes to this repository's git history. You should only focus on the content of the commits; the content in the working area that has not been committed is NOT part of the submission and does not require review.
 Use the available tools to inspect the work:
@@ -290,8 +361,9 @@ Description: {description}
 """
 
 
-def reviewer_review_patch(title: str, review_input: str,
-                          revision_context: str = "") -> str:
+def reviewer_review_patch(
+    title: str, review_input: str, revision_context: str = ""
+) -> str:
     """Prompt for reviewing a user-supplied patch, PR link, or code snippet.
 
     Unlike reviewer_review(), this is used for review-only tasks where no
@@ -338,41 +410,45 @@ EXPLORER_PERSONALITIES = {
         "name": "Performance Hunter",
         "category": "performance",
         "focus": "performance bottlenecks, unnecessary copies, O(n²) algorithms, "
-                 "hot path inefficiencies, missing caching opportunities",
+        "hot path inefficiencies, missing caching opportunities",
         "model_preference": "very_complex",
     },
     "concurrency_auditor": {
         "name": "Concurrency Auditor",
         "category": "concurrency",
         "focus": "race conditions, deadlocks, missing locks, unsafe shared state, "
-                 "lock ordering violations, atomic operation misuse",
+        "lock ordering violations, atomic operation misuse",
         "model_preference": "very_complex",
     },
     "maintainability_critic": {
         "name": "Maintainability Critic",
         "category": "maintainability",
         "focus": "code smells, overly complex functions (>50 lines), god classes, "
-                 "poor naming, missing abstractions, copy-paste duplication",
+        "poor naming, missing abstractions, copy-paste duplication",
         "model_preference": "very_complex",
     },
     "error_handling_inspector": {
         "name": "Error Handling Inspector",
         "category": "error_handling",
         "focus": "unchecked return values, swallowed exceptions, missing error paths, "
-                 "resource leaks on error, inconsistent error reporting",
+        "resource leaks on error, inconsistent error reporting",
         "model_preference": "very_complex",
     },
     "security_scout": {
         "name": "Security Scout",
         "category": "security",
         "focus": "injection vulnerabilities, unsafe deserialization, hardcoded secrets, "
-                 "path traversal, buffer overflows, privilege escalation",
+        "path traversal, buffer overflows, privilege escalation",
         "model_preference": "very_complex",
     },
 }
 
 DEFAULT_EXPLORE_CATEGORIES = [
-    "performance", "concurrency", "error_handling", "maintainability", "security",
+    "performance",
+    "concurrency",
+    "error_handling",
+    "maintainability",
+    "security",
 ]
 
 

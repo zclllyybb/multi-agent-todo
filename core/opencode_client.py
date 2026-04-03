@@ -35,15 +35,20 @@ class OpenCodeClient:
         cmd: list,
         work_dir: str,
         task_id: str = "",
+        env: Optional[dict[str, str]] = None,
     ) -> Tuple[str, int, float]:
         """Execute an opencode command and return (stdout, exit_code, duration)."""
         start = time.time()
+        proc_env = os.environ.copy()
+        if env:
+            proc_env.update(env)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             cwd=work_dir,
+            env=proc_env,
             start_new_session=False,
         )
         with self._proc_lock:
@@ -57,8 +62,9 @@ class OpenCodeClient:
 
             if stderr:
                 if exit_code != 0:
-                    log.warning("opencode stderr (exit=%d): %s",
-                                exit_code, stderr.strip()[:500])
+                    log.warning(
+                        "opencode stderr (exit=%d): %s", exit_code, stderr.strip()[:500]
+                    )
                 else:
                     log.debug("opencode stderr: %s", stderr[:500])
 
@@ -113,6 +119,7 @@ class OpenCodeClient:
         cmd: list,
         work_dir: str,
         task_id: str = "",
+        env: Optional[dict[str, str]] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[str, int, float, str, bool]:
@@ -121,12 +128,16 @@ class OpenCodeClient:
         Returns (output, exit_code, duration, session_id, was_cancelled).
         """
         start = time.time()
+        proc_env = os.environ.copy()
+        if env:
+            proc_env.update(env)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             cwd=work_dir,
+            env=proc_env,
             start_new_session=False,
             bufsize=1,
         )
@@ -206,6 +217,8 @@ class OpenCodeClient:
         task_id: str = "",
         session_id: str = "",
         max_continues: int = 1,
+        env: Optional[dict[str, str]] = None,
+        require_stop: bool = False,
     ) -> AgentRun:
         """Run opencode with a message in a specific directory.
 
@@ -219,10 +232,14 @@ class OpenCodeClient:
         Returns an AgentRun record.
         """
         cmd = [
-            "opencode", "run",
-            "--model", model,
-            "--dir", work_dir,
-            "--format", "json",
+            "opencode",
+            "run",
+            "--model",
+            model,
+            "--dir",
+            work_dir,
+            "--format",
+            "json",
         ]
         if session_id:
             cmd.extend(["--session", session_id])
@@ -230,11 +247,13 @@ class OpenCodeClient:
 
         log.info(
             "Running opencode [%s] model=%s dir=%s",
-            agent_type, model, work_dir,
+            agent_type,
+            model,
+            work_dir,
         )
         log.debug("Prompt: %s", message)
 
-        output, exit_code, duration = self._exec(cmd, work_dir, task_id)
+        output, exit_code, duration = self._exec(cmd, work_dir, task_id, env=env)
 
         # Extract session ID from output
         sid = self.extract_session_id(output) or session_id
@@ -242,11 +261,21 @@ class OpenCodeClient:
         # Auto-continue: if the session failed and we have a session ID,
         # send "Continue" to resume the session.
         continue_count = 0
-        while exit_code != 0 and sid and continue_count < max_continues:
+        while sid and continue_count < max_continues:
+            needs_continue = exit_code != 0 or (
+                require_stop and not self.is_output_complete(output)
+            )
+            if not needs_continue:
+                break
             continue_count += 1
             log.warning(
-                "opencode [%s] failed (exit=%d), auto-continuing session %s (%d/%d)",
-                agent_type, exit_code, sid, continue_count, max_continues,
+                "opencode [%s] needs continue (exit=%d require_stop=%s), session %s (%d/%d)",
+                agent_type,
+                exit_code,
+                require_stop,
+                sid,
+                continue_count,
+                max_continues,
             )
             cont_cmd = [
                 "opencode", "run",
@@ -257,7 +286,7 @@ class OpenCodeClient:
                 "Continue",
             ]
             cont_output, exit_code, cont_duration = self._exec(
-                cont_cmd, work_dir, task_id
+                cont_cmd, work_dir, task_id, env=env
             )
             output += cont_output
             duration += cont_duration
@@ -275,7 +304,12 @@ class OpenCodeClient:
         )
         log.info(
             "opencode [%s] finished: exit=%d duration=%.1fs session=%s output_len=%d continues=%d",
-            agent_type, exit_code, duration, sid, len(output), continue_count,
+            agent_type,
+            exit_code,
+            duration,
+            sid,
+            len(output),
+            continue_count,
         )
         return run
 
@@ -288,6 +322,7 @@ class OpenCodeClient:
         task_id: str = "",
         session_id: str = "",
         max_continues: int = 1,
+        env: Optional[dict[str, str]] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> AgentRun:
@@ -300,10 +335,14 @@ class OpenCodeClient:
 
         while True:
             cmd = [
-                "opencode", "run",
-                "--model", model,
-                "--dir", work_dir,
-                "--format", "json",
+                "opencode",
+                "run",
+                "--model",
+                model,
+                "--dir",
+                work_dir,
+                "--format",
+                "json",
             ]
             if sid:
                 cmd.extend(["--session", sid])
@@ -311,14 +350,20 @@ class OpenCodeClient:
 
             log.info(
                 "Running opencode(stream) [%s] model=%s dir=%s session=%s",
-                agent_type, model, work_dir, sid,
+                agent_type,
+                model,
+                work_dir,
+                sid,
             )
-            chunk_out, exit_code, duration, observed_sid, cancelled = self._exec_streaming(
-                cmd=cmd,
-                work_dir=work_dir,
-                task_id=task_id,
-                on_output=on_output,
-                should_cancel=should_cancel,
+            chunk_out, exit_code, duration, observed_sid, cancelled = (
+                self._exec_streaming(
+                    cmd=cmd,
+                    work_dir=work_dir,
+                    task_id=task_id,
+                    env=env,
+                    on_output=on_output,
+                    should_cancel=should_cancel,
+                )
             )
             total_duration += duration
             output += chunk_out
@@ -337,7 +382,11 @@ class OpenCodeClient:
             continue_count += 1
             log.warning(
                 "opencode(stream) [%s] failed (exit=%d), auto-continuing session %s (%d/%d)",
-                agent_type, exit_code, sid, continue_count, max_continues,
+                agent_type,
+                exit_code,
+                sid,
+                continue_count,
+                max_continues,
             )
             current_message = "Continue"
 
@@ -353,7 +402,12 @@ class OpenCodeClient:
         )
         log.info(
             "opencode(stream) [%s] finished: exit=%d duration=%.1fs session=%s output_len=%d continues=%d",
-            agent_type, exit_code, total_duration, sid, len(output), continue_count,
+            agent_type,
+            exit_code,
+            total_duration,
+            sid,
+            len(output),
+            continue_count,
         )
         return run
 
@@ -456,7 +510,12 @@ class OpenCodeClient:
         """
         events = self.parse_json_output(output)
         if not events:
-            return {"session_id": "", "steps": [], "summary": {}, "raw_fallback": output[:2000]}
+            return {
+                "session_id": "",
+                "steps": [],
+                "summary": {},
+                "raw_fallback": output[:2000],
+            }
 
         session_id = ""
         steps = []
@@ -484,9 +543,13 @@ class OpenCodeClient:
             elif ev_type == "text":
                 text = part.get("text", "")
                 if text and current_step is not None:
-                    current_step["events"].append({
-                        "type": "text", "time": ts, "content": text,
-                    })
+                    current_step["events"].append(
+                        {
+                            "type": "text",
+                            "time": ts,
+                            "content": text,
+                        }
+                    )
 
             elif ev_type == "tool_use":
                 tool_name = part.get("tool", "") or part.get("name", "")
@@ -498,8 +561,16 @@ class OpenCodeClient:
                 inp_summary = ""
                 if isinstance(inp, dict):
                     # Show first few meaningful keys
-                    for k in ("pattern", "path", "filePath", "file_path",
-                              "command", "query", "content", "regex"):
+                    for k in (
+                        "pattern",
+                        "path",
+                        "filePath",
+                        "file_path",
+                        "command",
+                        "query",
+                        "content",
+                        "regex",
+                    ):
                         if k in inp:
                             v = str(inp[k])
                             inp_summary = f"{k}={v[:120]}"
@@ -517,14 +588,16 @@ class OpenCodeClient:
                         out_summary += f"... ({len(out)} chars)"
 
                 if current_step is not None:
-                    current_step["events"].append({
-                        "type": "tool",
-                        "time": ts,
-                        "tool": tool_name,
-                        "status": status,
-                        "input": inp_summary,
-                        "output": out_summary,
-                    })
+                    current_step["events"].append(
+                        {
+                            "type": "tool",
+                            "time": ts,
+                            "tool": tool_name,
+                            "status": status,
+                            "input": inp_summary,
+                            "output": out_summary,
+                        }
+                    )
 
             elif ev_type == "step_finish":
                 reason = part.get("reason", "")
@@ -585,6 +658,18 @@ class OpenCodeClient:
                 return "".join(texts)
         return ""
 
+    def extract_last_text_block_or_raw(self, output: str) -> str:
+        """Return the final stop-step text, or the raw output when unavailable.
+
+        This is useful for single-agent workflows where the model may either
+        emit plain text or structured NDJSON text events. It avoids forcing the
+        caller to separately handle both forms.
+        """
+        text = self.extract_last_text_block(output)
+        if text:
+            return text
+        return self.extract_text_response(output)
+
     def format_readable_text(self, output: str) -> str:
         """Convert opencode JSON output into a plain-text readable log."""
         parsed = self.parse_readable_output(output)
@@ -600,7 +685,9 @@ class OpenCodeClient:
                 if ev["type"] == "text":
                     lines.append(f"  [{ev['time']}] {ev['content']}")
                 elif ev["type"] == "tool":
-                    lines.append(f"  [{ev['time']}] TOOL {ev['tool']} ({ev.get('status','')})")
+                    lines.append(
+                        f"  [{ev['time']}] TOOL {ev['tool']} ({ev.get('status', '')})"
+                    )
                     if ev.get("input"):
                         lines.append(f"    input: {ev['input']}")
                     if ev.get("output"):
@@ -612,9 +699,11 @@ class OpenCodeClient:
 
         s = parsed.get("summary", {})
         if s:
-            lines.append(f"Summary: {s.get('total_steps',0)} steps, "
-                         f"{s.get('text_segments',0)} text segments, "
-                         f"{s.get('tool_calls',0)} tool calls")
+            lines.append(
+                f"Summary: {s.get('total_steps', 0)} steps, "
+                f"{s.get('text_segments', 0)} text segments, "
+                f"{s.get('tool_calls', 0)} tool calls"
+            )
 
         if parsed.get("raw_fallback"):
             lines.append(parsed["raw_fallback"])

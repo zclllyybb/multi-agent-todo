@@ -2,6 +2,7 @@
 
 import copy
 import os
+from typing import Optional
 import yaml
 
 
@@ -37,10 +38,21 @@ DEFAULT_CONFIG = {
     "database": {
         "path": "/mnt/disk3/zhaochangle/multi-agent-todo/data/tasks.db",
     },
+    "jira": {
+        "url": "",
+        "token": "",
+        "user": "",
+        "project_key": "",
+        "issue_type": [],
+        "priority": [],
+        "routing_hints": [],
+        "timeout": 120,
+        "skill_path": "skills/jira-issue",
+    },
 }
 
 
-def load_config(config_path: str = None) -> dict:
+def load_config(config_path: Optional[str] = None) -> dict:
     """Load configuration from YAML file, falling back to defaults."""
     config = copy.deepcopy(DEFAULT_CONFIG)
     if config_path is None:

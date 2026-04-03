@@ -104,7 +104,10 @@ class Database:
 
     def get_active_tasks(self) -> List[Task]:
         active_statuses = {
-            TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.REVIEWING
+            TaskStatus.PLANNING,
+            TaskStatus.CODING,
+            TaskStatus.JIRA_ASSIGNING,
+            TaskStatus.REVIEWING,
         }
         tasks = self.get_all_tasks()
         return [t for t in tasks if t.status in active_statuses]

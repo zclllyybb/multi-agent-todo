@@ -193,7 +193,11 @@ def test_show_module_detail_renders_categories_and_runs_successfully():
                         {
                             "step_num": 1,
                             "events": [
-                                {"type": "text", "time": "12:00:00", "content": "Exploring scanner and scheduler"}
+                                {
+                                    "type": "text",
+                                    "time": "12:00:00",
+                                    "content": "Exploring scanner and scheduler",
+                                }
                             ],
                             "finish_reason": "stop",
                         }
@@ -237,7 +241,11 @@ def test_show_module_detail_renders_categories_and_runs_successfully():
                         {
                             "step_num": 1,
                             "events": [
-                                {"type": "text", "time": "12:00:02", "content": "Checked queue state transitions"}
+                                {
+                                    "type": "text",
+                                    "time": "12:00:02",
+                                    "content": "Checked queue state transitions",
+                                }
                             ],
                             "finish_reason": "stop",
                         }
@@ -305,7 +313,8 @@ def test_refresh_renders_task_list_successfully():
         "status_counts": {
             "pending": 1,
             "planning": 0,
-            "coding": 1,
+            "coding": 0,
+            "jira_assigning": 1,
             "reviewing": 0,
             "completed": 1,
             "needs_arbitration": 0,
@@ -336,7 +345,7 @@ def test_refresh_renders_task_list_successfully():
         {
             "id": "task_child",
             "title": "Refine metrics labels",
-            "status": "coding",
+            "status": "jira_assigning",
             "priority": "medium",
             "source": "manual",
             "session_ids": {"coder": ["ses_code", "ses_code_2"]},
@@ -469,8 +478,18 @@ def test_show_detail_renders_task_overview_sessions_runs_and_outputs_successfull
             "comment_count": 2,
             "has_comments": True,
             "comments": [
-                {"id": "c1", "username": "alice", "content": "Please check the retry copy.", "created_at": 1710002100},
-                {"id": "c2", "username": "bob", "content": "Also verify reviewer session links.", "created_at": 1710002200},
+                {
+                    "id": "c1",
+                    "username": "alice",
+                    "content": "Please check the retry copy.",
+                    "created_at": 1710002100,
+                },
+                {
+                    "id": "c2",
+                    "username": "bob",
+                    "content": "Also verify reviewer session links.",
+                    "created_at": 1710002200,
+                },
             ],
         },
         "runs": [
@@ -485,7 +504,11 @@ def test_show_detail_renders_task_overview_sessions_runs_and_outputs_successfull
                         {
                             "step_num": 1,
                             "events": [
-                                {"type": "text", "time": "12:00:00", "content": "Plan task scope"}
+                                {
+                                    "type": "text",
+                                    "time": "12:00:00",
+                                    "content": "Plan task scope",
+                                }
                             ],
                             "finish_reason": "stop",
                         }
@@ -506,7 +529,11 @@ def test_show_detail_renders_task_overview_sessions_runs_and_outputs_successfull
                         {
                             "step_num": 1,
                             "events": [
-                                {"type": "text", "time": "12:01:00", "content": "Looks good overall"}
+                                {
+                                    "type": "text",
+                                    "time": "12:01:00",
+                                    "content": "Looks good overall",
+                                }
                             ],
                             "finish_reason": "stop",
                         }
@@ -582,6 +609,117 @@ assert.match(html, /Plan Output/);
 assert.match(html, /Code Output/);
 assert.match(html, /Review Results \(1 reviewer\)/);
 assert.match(html, /changes look correct/);
+"""
+    )
+
+
+def test_refresh_renders_jira_mode_badge_successfully():
+    status_payload = {"total_tasks": 1, "status_counts": {"completed": 1}}
+    tasks_payload = [
+        {
+            "id": "jira1",
+            "title": "Create Jira for flaky test",
+            "status": "completed",
+            "priority": "medium",
+            "source": "manual",
+            "session_ids": {"coder": ["ses_jira"]},
+            "updated_at": 1710001300,
+            "complexity": "",
+            "published_at": 0,
+            "branch_name": "",
+            "task_mode": "jira",
+            "parent_id": "",
+            "depends_on": [],
+            "clean_available": False,
+            "actual_branch_exists": False,
+            "actual_worktree_exists": False,
+            "created_at": 1710001200,
+            "jira_issue_key": "QA-123",
+            "jira_issue_url": "https://jira.example/browse/QA-123",
+        }
+    ]
+    _run_dashboard_js(
+        rf"""
+const statusPayload = {json.dumps(status_payload)};
+const tasksPayload = {json.dumps(tasks_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/status') return {{ json: async () => statusPayload }};
+  if (url === '/api/tasks') return {{ json: async () => tasksPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+        await refresh();
+        const rowsHtml = document.getElementById('task-list').innerHTML;
+        assert.match(rowsHtml, /Create Jira for flaky test/);
+        assert.match(rowsHtml, /QA-123/);
+        assert.match(rowsHtml, /href="https:\/\/jira\.example\/browse\/QA-123"/);
+        assert.match(rowsHtml, /target="_blank"/);
+        assert.match(rowsHtml, /event\.stopPropagation\(\)/);
+        assert.doesNotMatch(rowsHtml, />jira</);
+        assert.doesNotMatch(rowsHtml, /Publish/);
+        """
+    )
+
+
+def test_show_detail_renders_jira_result_successfully():
+    detail_payload = {
+        "task": {
+            "id": "jira123",
+            "title": "File Jira issue",
+            "status": "completed",
+            "task_mode": "jira",
+            "complexity": "",
+            "priority": "medium",
+            "source": "manual",
+            "parent_id": "",
+            "retry_count": 0,
+            "max_retries": 0,
+            "depends_on": [],
+            "branch_name": "",
+            "worktree_path": "",
+            "file_path": "",
+            "line_number": 0,
+            "created_at": 1710002000,
+            "started_at": 1710002010,
+            "completed_at": 1710002600,
+            "published_at": 0,
+            "clean_available": False,
+            "description": "Draft a Jira issue for the flaky test.",
+            "review_input": "",
+            "error": "",
+            "session_ids": {"coder": ["ses_jira"]},
+            "plan_output": "Jira target: QA / Bug",
+            "code_output": "",
+            "review_output": "",
+            "reviewer_results": [],
+            "comment_count": 0,
+            "has_comments": False,
+            "comments": [],
+            "jira_issue_key": "QA-123",
+            "jira_issue_url": "https://jira.example/browse/QA-123",
+            "jira_status": "created",
+            "jira_payload_preview": "",
+            "jira_agent_output": "key=QA-123\nself=https://jira.example/rest/api/2/issue/123",
+        },
+        "runs": [],
+        "git_status": {},
+    }
+    _run_dashboard_js(
+        rf"""
+const detailPayload = {json.dumps(detail_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/tasks/jira123') return {{ json: async () => detailPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await showDetail('jira123');
+const detailTitle = document.getElementById('detail-title').textContent;
+const html = document.getElementById('detail-content').innerHTML;
+assert.equal(detailTitle, 'File Jira issue (QA-123)');
+assert.match(html, /Jira Result/);
+assert.match(html, /QA-123/);
+assert.match(html, /Jira status: <code>created<\/code>/);
+assert.match(html, /Jira Agent Output/);
+assert.match(html, /self=https:\/\/jira\.example\/rest\/api\/2\/issue\/123/);
+assert.match(html, /ses_jira/);
 """
     )
 
@@ -681,6 +819,139 @@ assert.deepEqual(body.reviewer_models, ['reviewer-a', 'reviewer-b']);
     )
 
 
+def test_add_jira_task_posts_expected_payload():
+    _run_dashboard_js(
+        r"""
+let captured = null;
+globalThis.refresh = () => {};
+document.getElementById('jira-task-title').value = 'Open Jira for test failure';
+document.getElementById('jira-task-desc').value = 'Include stack trace and owner hints';
+document.getElementById('jira-task-priority').value = 'high';
+globalThis.fetch = async (url, opts) => {
+  captured = { url, opts };
+  return { json: async () => ({ ok: true }) };
+};
+await addJiraTask();
+assert.equal(captured.url, '/api/tasks/jira');
+const body = JSON.parse(captured.opts.body);
+assert.equal(body.title, 'Open Jira for test failure');
+assert.equal(body.description, 'Include stack trace and owner hints');
+assert.equal(body.priority, 'high');
+"""
+    )
+
+
+def test_refresh_renders_assign_jira_button_for_existing_task():
+    _run_dashboard_js(
+        r"""
+globalThis.fetch = async () => ({ json: async () => ([{
+  id: 'task123',
+  title: 'Existing task',
+  jira_issue_key: '',
+  status: 'completed',
+  priority: 'medium',
+  source: 'manual',
+  session_ids: {},
+  comment_count: 0,
+  has_comments: false,
+  updated_at: 1710000000,
+  complexity: '',
+  published_at: 0,
+  branch_name: '',
+  task_mode: 'develop',
+  parent_id: '',
+  depends_on: [],
+  clean_available: false,
+  actual_branch_exists: false,
+  actual_worktree_exists: false,
+}]) });
+await refresh();
+const rowsHtml = document.getElementById('task-list').innerHTML;
+assert.match(rowsHtml, /Assign Jira/);
+assert.match(rowsHtml, /\/api\/tasks\/task123\/jira|assignJiraForTask\('task123'\)/);
+"""
+    )
+
+
+def test_show_detail_renders_assign_jira_button_for_existing_task():
+    detail_payload = {
+        "task": {
+            "id": "task123",
+            "title": "Existing task",
+            "status": "completed",
+            "task_mode": "develop",
+            "complexity": "",
+            "priority": "medium",
+            "source": "manual",
+            "parent_id": "",
+            "retry_count": 0,
+            "max_retries": 4,
+            "depends_on": [],
+            "branch_name": "",
+            "worktree_path": "",
+            "file_path": "",
+            "line_number": 0,
+            "created_at": 1710002000,
+            "started_at": 1710002010,
+            "completed_at": 1710002600,
+            "published_at": 0,
+            "clean_available": False,
+            "description": "Task description.",
+            "review_input": "",
+            "error": "",
+            "session_ids": {},
+            "plan_output": "plan",
+            "code_output": "code",
+            "review_output": "review",
+            "reviewer_results": [],
+            "comment_count": 0,
+            "has_comments": False,
+            "comments": [],
+            "jira_issue_key": "",
+            "jira_issue_url": "",
+            "jira_status": "",
+            "jira_error": "",
+            "jira_payload_preview": "",
+            "jira_agent_output": "",
+        },
+        "runs": [],
+        "git_status": {},
+    }
+    _run_dashboard_js(
+        rf"""
+const detailPayload = {json.dumps(detail_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/tasks/task123') return {{ json: async () => detailPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await showDetail('task123');
+const html = document.getElementById('detail-content').innerHTML;
+assert.match(html, /Assign Jira for This Task/);
+assert.match(html, /assignJiraForTask\('task123'\)/);
+"""
+    )
+
+
+def test_assign_jira_for_task_posts_expected_endpoint():
+    _run_dashboard_js(
+        r"""
+let captured = null;
+globalThis.refresh = async () => {};
+globalThis.showDetail = async () => {};
+globalThis.uiAlert = async () => {};
+document.getElementById('detail-modal').classList.contains = () => false;
+globalThis.fetch = async (url, opts) => {
+  captured = { url, opts };
+  return { json: async () => ({ ok: true, task: { id: 'task123' } }) };
+};
+globalThis.event = { target: { disabled: false, textContent: 'Assign Jira' } };
+await assignJiraForTask('task123');
+assert.equal(captured.url, '/api/tasks/task123/jira');
+assert.equal(captured.opts.method, 'POST');
+"""
+    )
+
+
 def test_toggle_category_note_expands_and_collapses():
     _run_dashboard_js(
         r"""
@@ -749,7 +1020,7 @@ def test_show_module_detail_handles_persisted_note_with_quotes_and_newlines():
             "description": "Legacy persisted module note case",
             "category_status": {"performance": "done"},
             "category_notes": {
-                "performance": "[2026-04-01 09:19:45] | completion: complete | summary: Explored the control-plane side\nIncludes \"quoted\" detail and <html>-like text"
+                "performance": '[2026-04-01 09:19:45] | completion: complete | summary: Explored the control-plane side\nIncludes "quoted" detail and <html>-like text'
             },
         },
         "runs": [],

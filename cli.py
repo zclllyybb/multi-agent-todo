@@ -50,7 +50,9 @@ def cmd_add(args):
         priority=args.priority,
     )
     print(f"Submitted task: [{task.id}] {task.title}")
-    print("(The planner will decide whether to split this into sub-tasks during execution.)")
+    print(
+        "(The planner will decide whether to split this into sub-tasks during execution.)"
+    )
 
 
 def cmd_scan(args):
@@ -58,7 +60,9 @@ def cmd_scan(args):
     config = load_config(args.config)
     orch = Orchestrator(config)
     new_items = orch.scan_todos_raw(limit=args.limit)
-    print(f"Found {len(new_items)} new TODO items (use 'todos' command or web UI to review them)")
+    print(
+        f"Found {len(new_items)} new TODO items (use 'todos' command or web UI to review them)"
+    )
 
 
 def cmd_todos(args):
@@ -74,13 +78,17 @@ def cmd_todos(args):
         if not items:
             print("No TODO items found. Run 'scan' first.")
             return
-        print(f"{'ID':<14} {'Status':<20} {'Rel':>5} {'Feas':>5}  {'File:Line':<40} {'Description'}")
+        print(
+            f"{'ID':<14} {'Status':<20} {'Rel':>5} {'Feas':>5}  {'File:Line':<40} {'Description'}"
+        )
         print("-" * 120)
         for i in items:
             rel = f"{i.relevance_score:.1f}" if i.relevance_score >= 0 else "-"
             feas = f"{i.feasibility_score:.1f}" if i.feasibility_score >= 0 else "-"
             loc = f"{i.file_path.split('/')[-1]}:{i.line_number}"
-            print(f"{i.id:<14} {i.status.value:<20} {rel:>5} {feas:>5}  {loc:<40} {i.description[:60]}")
+            print(
+                f"{i.id:<14} {i.status.value:<20} {rel:>5} {feas:>5}  {loc:<40} {i.description[:60]}"
+            )
 
     elif args.action == "analyze":
         ids = args.ids
@@ -94,14 +102,18 @@ def cmd_todos(args):
             if "error" in result:
                 print(f"  ERROR: {result['error']}")
             else:
-                print(f"  relevance={result['relevance_score']:.1f} "
-                      f"feasibility={result['feasibility_score']:.1f}  "
-                      f"note: {result['analysis_note']}")
+                print(
+                    f"  relevance={result['relevance_score']:.1f} "
+                    f"feasibility={result['feasibility_score']:.1f}  "
+                    f"note: {result['analysis_note']}"
+                )
 
     elif args.action == "dispatch":
         ids = args.ids
         if not ids:
-            print("Specify TODO IDs to dispatch, or use the web UI for batch selection.")
+            print(
+                "Specify TODO IDs to dispatch, or use the web UI for batch selection."
+            )
             return
         tasks = orch.dispatch_todos_to_planner(ids)
         print(f"Dispatched {len(tasks)} task(s):")
@@ -149,7 +161,11 @@ def cmd_show(args):
         return
     runs = db.get_runs_for_task(args.task_id)
     if args.json:
-        print(json.dumps({"task": task.to_dict(), "runs": [r.to_dict() for r in runs]}, indent=2))
+        print(
+            json.dumps(
+                {"task": task.to_dict(), "runs": [r.to_dict() for r in runs]}, indent=2
+            )
+        )
         return
     print(f"ID:          {task.id}")
     print(f"Title:       {task.title}")
@@ -161,17 +177,25 @@ def cmd_show(args):
     print(f"Worktree:    {task.worktree_path}")
     print(f"Retries:     {task.retry_count}/{task.max_retries}")
     print(f"Error:       {task.error or '-'}")
+    if task.task_mode == "jira":
+        print(f"Jira Status: {task.jira_status or '-'}")
+        print(f"Jira Key:    {task.jira_issue_key or '-'}")
+        print(f"Jira URL:    {task.jira_issue_url or '-'}")
     if task.plan_output:
         print(f"\n--- Plan ---\n{task.plan_output[:500]}")
-    if task.code_output:
+    if task.task_mode == "jira" and task.jira_agent_output:
+        print(f"\n--- Jira Agent Output ---\n{task.jira_agent_output[:500]}")
+    if task.task_mode != "jira" and task.code_output:
         print(f"\n--- Code Output ---\n{task.code_output[:500]}")
-    if task.review_output:
+    if task.task_mode != "jira" and task.review_output:
         print(f"\n--- Review ---\n{task.review_output[:500]}")
     if runs:
         print(f"\n--- Agent Runs ({len(runs)}) ---")
         for r in runs:
-            print(f"  [{r.agent_type}] model={r.model} exit={r.exit_code} "
-                  f"duration={r.duration_sec:.1f}s")
+            print(
+                f"  [{r.agent_type}] model={r.model} exit={r.exit_code} "
+                f"duration={r.duration_sec:.1f}s"
+            )
 
 
 def cmd_dispatch(args):
@@ -194,6 +218,7 @@ def cmd_run_one(args):
     """Run a single task synchronously (for testing)."""
     config = load_config(args.config)
     import logging
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -255,8 +280,7 @@ Examples:
 
     # start
     p = sub.add_parser("start", help="Start the daemon")
-    p.add_argument("--foreground", "-f", action="store_true",
-                   help="Run in foreground")
+    p.add_argument("--foreground", "-f", action="store_true", help="Run in foreground")
     p.set_defaults(func=cmd_start)
 
     # stop
@@ -271,13 +295,18 @@ Examples:
     p = sub.add_parser("add", help="Add a task")
     p.add_argument("-t", "--title", required=True)
     p.add_argument("-d", "--description", default="")
-    p.add_argument("-p", "--priority", default="medium",
-                   choices=["high", "medium", "low"])
+    p.add_argument(
+        "-p", "--priority", default="medium", choices=["high", "medium", "low"]
+    )
     p.set_defaults(func=cmd_add)
 
     # scan
-    p = sub.add_parser("scan", help="Scan for TODOs (stores them for review, does not create tasks)")
-    p.add_argument("--limit", type=int, default=50, help="Max new items to store per scan")
+    p = sub.add_parser(
+        "scan", help="Scan for TODOs (stores them for review, does not create tasks)"
+    )
+    p.add_argument(
+        "--limit", type=int, default=50, help="Max new items to store per scan"
+    )
     p.set_defaults(func=cmd_scan)
 
     # todos

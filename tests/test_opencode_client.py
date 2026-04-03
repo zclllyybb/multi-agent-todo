@@ -13,7 +13,6 @@ def client():
 
 
 class TestParseJsonOutput:
-
     def test_valid_ndjson(self, client):
         output = '{"type":"text","part":{"text":"hello"}}\n{"type":"step_start"}\n'
         events = client.parse_json_output(output)
@@ -37,7 +36,6 @@ class TestParseJsonOutput:
 
 
 class TestExtractSessionId:
-
     def test_finds_session_id(self, client):
         output = '{"sessionID":"ses_xyz","type":"start"}\n{"type":"text","part":{"text":"hi"}}\n'
         assert client.extract_session_id(output) == "ses_xyz"
@@ -50,15 +48,11 @@ class TestExtractSessionId:
         assert client.extract_session_id("") == ""
 
     def test_first_event_with_session(self, client):
-        output = (
-            '{"type":"other"}\n'
-            '{"sessionID":"ses_second","type":"start"}\n'
-        )
+        output = '{"type":"other"}\n{"sessionID":"ses_second","type":"start"}\n'
         assert client.extract_session_id(output) == "ses_second"
 
 
 class TestExtractTextResponse:
-
     def test_extracts_text_parts(self, client):
         output = (
             '{"type":"step_start"}\n'
@@ -81,7 +75,6 @@ class TestExtractTextResponse:
 
 
 class TestFormatReadableText:
-
     def test_formats_multi_step(self, client):
         output = (
             '{"sessionID":"ses_1","type":"init"}\n'
@@ -113,7 +106,6 @@ class TestFormatReadableText:
 
 
 class TestParseReadableOutput:
-
     def test_multi_step_structure(self, client):
         output = (
             '{"sessionID":"ses_1","type":"init"}\n'
@@ -152,19 +144,30 @@ class TestParseReadableOutput:
 
 # ── Helper to build NDJSON events quickly ──────────────────────────────
 
+
 def _step(texts=(), tools=(), finish_reason=None):
     """Return a list of NDJSON lines representing one step."""
     import json
+
     lines = ['{"type":"step_start"}']
     for t in texts:
         lines.append(json.dumps({"type": "text", "part": {"text": t}}))
     for t in tools:
-        lines.append(json.dumps({
-            "type": "tool_use",
-            "part": {"tool": t, "state": {"input": {}, "output": "", "status": "completed"}},
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "tool": t,
+                        "state": {"input": {}, "output": "", "status": "completed"},
+                    },
+                }
+            )
+        )
     if finish_reason:
-        lines.append(json.dumps({"type": "step_finish", "part": {"reason": finish_reason}}))
+        lines.append(
+            json.dumps({"type": "step_finish", "part": {"reason": finish_reason}})
+        )
     return lines
 
 
@@ -177,7 +180,6 @@ def _build_output(*step_specs):
 
 
 class TestIsOutputComplete:
-
     def test_proper_stop(self, client):
         output = _build_output(
             (["hello"], ["read_file"], "tool-calls"),
@@ -209,7 +211,6 @@ class TestIsOutputComplete:
 
 
 class TestExtractLastTextBlock:
-
     def test_returns_last_stop_step_text(self, client):
         output = _build_output(
             (["Starting analysis..."], ["read_file"], "tool-calls"),
@@ -252,9 +253,20 @@ class TestExtractLastTextBlock:
         assert client.extract_last_text_block(output) == "final answer"
 
 
-class TestExecTimeout:
+class TestExtractLastTextBlockOrRaw:
+    def test_returns_last_stop_text_when_available(self, client):
+        output = _build_output((["final answer"], [], "stop"))
+        assert client.extract_last_text_block_or_raw(output) == "final answer"
 
-    def test_exec_timeout_keeps_partial_output_for_session_id(self, client, tmp_path, monkeypatch):
+    def test_falls_back_to_raw_text_response(self, client):
+        output = '{"type":"text","part":{"text":"plain text"}}\n'
+        assert client.extract_last_text_block_or_raw(output) == "plain text"
+
+
+class TestExecTimeout:
+    def test_exec_timeout_keeps_partial_output_for_session_id(
+        self, client, tmp_path, monkeypatch
+    ):
         class _Tail:
             def __init__(self, text):
                 self._text = text

@@ -76,6 +76,42 @@ explore:
   # Auto-create tasks for findings at or above this severity (critical/major/minor/info)
   auto_task_severity: major
 
+# Jira issue creation mode
+jira:
+  # Jira base URL and token are exported to the vendored skill as JIRA_URL/JIRA_TOKEN
+  url: https://your-jira.example.com
+  token: your-jira-token
+  # Optional for basic auth flows used by the skill
+  user: ""
+  project_key: YOURPROJECT
+  # Candidate values passed to the drafting model; it must choose from these.
+  issue_type:
+    - Bug
+    - Task
+    - Improvement
+  priority:
+    - Highest
+    - High
+    - Medium
+    - Low
+  # Relative path inside this repo to the vendored jira-issue skill
+  skill_path: skills/jira-issue
+  timeout: 120
+  # Routing hints passed directly to the simple coder model.
+  # Include a catch-all unmatched item if you want fallback assignee/component behavior.
+  # labels and component are both optional on each hint.
+  # Every created issue will always include the fixed label: DorisExplorer.
+  routing_hints:
+    - about: query execution issues in be/src/exec and be/src/pipeline
+      assignee: your-jira-username
+      component: query execution
+      labels:
+        - query-execution
+    - about: all unmatched items
+      assignee: your-default-jira-username
+      # component is optional
+      # labels are optional
+
 # Logging
 logging:
   level: INFO

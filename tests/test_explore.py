@@ -14,19 +14,27 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from core.models import (
-    ExploreModule, ExploreRun, ExploreStatus, Task, TaskSource, TaskStatus,
+    ExploreModule,
+    ExploreRun,
+    ExploreStatus,
+    Task,
+    TaskSource,
+    TaskStatus,
     ModelOutputError,
 )
 from core.database import Database
 from core.opencode_client import OpenCodeClient
 from agents.explorer import ExplorerAgent
 from agents.prompts import (
-    EXPLORER_PERSONALITIES, DEFAULT_EXPLORE_CATEGORIES,
-    explorer_prompt, map_init_prompt,
+    EXPLORER_PERSONALITIES,
+    DEFAULT_EXPLORE_CATEGORIES,
+    explorer_prompt,
+    map_init_prompt,
 )
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def tmp_db(tmp_path):
@@ -82,65 +90,72 @@ def sample_run():
     )
 
 
-MOCK_MAP_OUTPUT = json.dumps({
-    "modules": [
-        {
-            "name": "Backend Engine",
-            "path": "be/src",
-            "description": "C++ backend execution engine",
-            "children": [
-                {
-                    "name": "Exec Module",
-                    "path": "be/src/exec",
-                    "description": "Query execution operators",
-                    "children": [],
-                }
-            ],
-        },
-        {
-            "name": "Frontend",
-            "path": "fe/src",
-            "description": "Java frontend query planner",
-            "children": [],
-        },
-    ]
-})
+MOCK_MAP_OUTPUT = json.dumps(
+    {
+        "modules": [
+            {
+                "name": "Backend Engine",
+                "path": "be/src",
+                "description": "C++ backend execution engine",
+                "children": [
+                    {
+                        "name": "Exec Module",
+                        "path": "be/src/exec",
+                        "description": "Query execution operators",
+                        "children": [],
+                    }
+                ],
+            },
+            {
+                "name": "Frontend",
+                "path": "fe/src",
+                "description": "Java frontend query planner",
+                "children": [],
+            },
+        ]
+    }
+)
 
-MOCK_EXPLORE_OUTPUT = json.dumps({
-    "summary": "Explored scanner.cpp and found a major performance issue with unnecessary copies.",
-    "explored_scope": "scanner.cpp next_batch path and vector growth path",
-    "completion_status": "complete",
-    "findings": [
-        {
-            "severity": "major",
-            "title": "Unnecessary vector copy in Scanner::next_batch()",
-            "description": "The method copies a 1MB vector on every call instead of moving it.",
-            "file_path": "be/src/exec/scanner.cpp",
-            "line_number": 142,
-            "suggested_fix": "Use std::move() to transfer ownership",
-        },
-        {
-            "severity": "minor",
-            "title": "Missing reserve() before push_back loop",
-            "description": "A vector grows incrementally in a loop without pre-allocation.",
-            "file_path": "be/src/exec/scanner.cpp",
-            "line_number": 200,
-            "suggested_fix": "Add results.reserve(expected_size) before the loop",
-        },
-    ],
-})
+MOCK_EXPLORE_OUTPUT = json.dumps(
+    {
+        "summary": "Explored scanner.cpp and found a major performance issue with unnecessary copies.",
+        "explored_scope": "scanner.cpp next_batch path and vector growth path",
+        "completion_status": "complete",
+        "findings": [
+            {
+                "severity": "major",
+                "title": "Unnecessary vector copy in Scanner::next_batch()",
+                "description": "The method copies a 1MB vector on every call instead of moving it.",
+                "file_path": "be/src/exec/scanner.cpp",
+                "line_number": 142,
+                "suggested_fix": "Use std::move() to transfer ownership",
+            },
+            {
+                "severity": "minor",
+                "title": "Missing reserve() before push_back loop",
+                "description": "A vector grows incrementally in a loop without pre-allocation.",
+                "file_path": "be/src/exec/scanner.cpp",
+                "line_number": 200,
+                "suggested_fix": "Add results.reserve(expected_size) before the loop",
+            },
+        ],
+    }
+)
 
-MOCK_EXPLORE_OUTPUT_EMPTY = json.dumps({
-    "summary": "Explored module, no issues found.",
-    "explored_scope": "all primary entry points in the module",
-    "completion_status": "complete",
-    "findings": [],
-})
+MOCK_EXPLORE_OUTPUT_EMPTY = json.dumps(
+    {
+        "summary": "Explored module, no issues found.",
+        "explored_scope": "all primary entry points in the module",
+        "completion_status": "complete",
+        "findings": [],
+    }
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. MODEL TESTS
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExploreModels:
     def test_explore_status_values(self):
@@ -178,8 +193,16 @@ class TestExploreModels:
         assert restored.category_status == sample_module.category_status
 
     def test_explore_module_from_dict_defaults(self):
-        d = {"id": "x", "name": "foo", "path": "bar", "parent_id": "",
-             "depth": 0, "description": "", "created_at": 1.0, "updated_at": 1.0}
+        d = {
+            "id": "x",
+            "name": "foo",
+            "path": "bar",
+            "parent_id": "",
+            "depth": 0,
+            "description": "",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        }
         m = ExploreModule.from_dict(d)
         assert m.category_status == {}
         assert m.category_notes == {}
@@ -210,9 +233,18 @@ class TestExploreModels:
         assert restored.summary == sample_run.summary
 
     def test_explore_run_from_dict_defaults(self):
-        d = {"id": "r1", "module_id": "m1", "category": "perf",
-             "personality": "p", "model": "m", "prompt": "", "output": "",
-             "exit_code": 0, "duration_sec": 1.0, "created_at": 1.0}
+        d = {
+            "id": "r1",
+            "module_id": "m1",
+            "category": "perf",
+            "personality": "p",
+            "model": "m",
+            "prompt": "",
+            "output": "",
+            "exit_code": 0,
+            "duration_sec": 1.0,
+            "created_at": 1.0,
+        }
         r = ExploreRun.from_dict(d)
         assert r.session_id == ""
         assert r.findings == []
@@ -279,6 +311,7 @@ class TestExploreRunLegacyCompatibility:
         config = _make_orchestrator_config(tmp_path)
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             orch = Orchestrator(config)
         real_client = OpenCodeClient(timeout=10)
         orch.client.parse_readable_output = real_client.parse_readable_output
@@ -325,6 +358,7 @@ class TestExploreRunLegacyCompatibility:
 # 2. DATABASE TESTS
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExploreDatabase:
     def test_save_and_get_module(self, tmp_db, sample_module):
         tmp_db.save_explore_module(sample_module)
@@ -363,7 +397,9 @@ class TestExploreDatabase:
 
     def test_delete_all_modules(self, tmp_db):
         for i in range(5):
-            tmp_db.save_explore_module(ExploreModule(id=f"m{i}", name=f"M{i}", path=f"p{i}"))
+            tmp_db.save_explore_module(
+                ExploreModule(id=f"m{i}", name=f"M{i}", path=f"p{i}")
+            )
         assert len(tmp_db.get_all_explore_modules()) == 5
         tmp_db.delete_all_explore_modules()
         assert len(tmp_db.get_all_explore_modules()) == 0
@@ -390,7 +426,9 @@ class TestExploreDatabase:
 
     def test_get_all_runs(self, tmp_db):
         for i in range(3):
-            tmp_db.save_explore_run(ExploreRun(id=f"r{i}", module_id="m1", category="c"))
+            tmp_db.save_explore_run(
+                ExploreRun(id=f"r{i}", module_id="m1", category="c")
+            )
         assert len(tmp_db.get_all_explore_runs()) == 3
 
     def test_module_update_persists(self, tmp_db, sample_module):
@@ -407,13 +445,19 @@ class TestExploreDatabase:
 # 3. EXPLORER AGENT PARSING TESTS
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExplorerAgentParsing:
     def test_parse_output_valid(self):
         findings, summary = ExplorerAgent._parse_output(MOCK_EXPLORE_OUTPUT)
         assert len(findings) == 2
-        assert summary == "Explored scanner.cpp and found a major performance issue with unnecessary copies."
+        assert (
+            summary
+            == "Explored scanner.cpp and found a major performance issue with unnecessary copies."
+        )
         assert findings[0]["severity"] == "major"
-        assert findings[0]["title"] == "Unnecessary vector copy in Scanner::next_batch()"
+        assert (
+            findings[0]["title"] == "Unnecessary vector copy in Scanner::next_batch()"
+        )
         assert findings[0]["line_number"] == 142
         assert findings[1]["severity"] == "minor"
 
@@ -431,18 +475,20 @@ class TestExplorerAgentParsing:
             ExplorerAgent._parse_output("{broken json here")
 
     def test_parse_output_metadata_with_scores_and_review_flags(self):
-        text = json.dumps({
-            "summary": "checked lock paths",
-            "focus_point": "lock contention in scanner",
-            "actionability_score": 8.4,
-            "reliability_score": 7.2,
-            "explored_scope": "scanner lock acquisition and release paths",
-            "completion_status": "partial",
-            "supplemental_note": "Lock scope can be narrowed in two call paths.",
-            "map_review_required": True,
-            "map_review_reason": "scanner module should be split by responsibility",
-            "findings": [],
-        })
+        text = json.dumps(
+            {
+                "summary": "checked lock paths",
+                "focus_point": "lock contention in scanner",
+                "actionability_score": 8.4,
+                "reliability_score": 7.2,
+                "explored_scope": "scanner lock acquisition and release paths",
+                "completion_status": "partial",
+                "supplemental_note": "Lock scope can be narrowed in two call paths.",
+                "map_review_required": True,
+                "map_review_reason": "scanner module should be split by responsibility",
+                "findings": [],
+            }
+        )
         meta = ExplorerAgent.parse_output_metadata(text)
         assert meta["summary"] == "checked lock paths"
         assert meta["focus_point"] == "lock contention in scanner"
@@ -455,12 +501,14 @@ class TestExplorerAgentParsing:
         assert "split" in meta["map_review_reason"]
 
     def test_parse_output_metadata_clamps_scores(self):
-        text = json.dumps({
-            "summary": "x",
-            "actionability_score": 13,
-            "reliability_score": -5,
-            "findings": [],
-        })
+        text = json.dumps(
+            {
+                "summary": "x",
+                "actionability_score": 13,
+                "reliability_score": -5,
+                "findings": [],
+            }
+        )
         meta = ExplorerAgent.parse_output_metadata(text)
         assert meta["actionability_score"] == 10.0
         assert meta["reliability_score"] == 0.0
@@ -471,10 +519,12 @@ class TestExplorerAgentParsing:
         assert len(findings) == 2
 
     def test_parse_output_partial_finding_fields(self):
-        text = json.dumps({
-            "summary": "test",
-            "findings": [{"title": "A bug", "severity": "critical"}],
-        })
+        text = json.dumps(
+            {
+                "summary": "test",
+                "findings": [{"title": "A bug", "severity": "critical"}],
+            }
+        )
         findings, summary = ExplorerAgent._parse_output(text)
         assert len(findings) == 1
         assert findings[0]["title"] == "A bug"
@@ -504,6 +554,7 @@ class TestExplorerAgentParsing:
 # ═══════════════════════════════════════════════════════════════════════
 # 4. PROMPT GENERATION TESTS
 # ═══════════════════════════════════════════════════════════════════════
+
 
 class TestExplorePrompts:
     def test_personalities_structure(self):
@@ -552,45 +603,75 @@ class TestExplorePrompts:
 # 5. ORCHESTRATOR EXPLORATION TESTS
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def _make_orchestrator_config(tmp_path):
     """Build a minimal config dict for Orchestrator instantiation."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "\n".join([
-            "repo:",
-            "  path: /fake/repo",
-            "  base_branch: master",
-            f"  worktree_dir: {tmp_path}",
-            "  worktree_hooks: []",
-            "opencode:",
-            "  planner_model: test-planner",
-            "  coder_model_by_complexity:",
-            "    simple: test-coder",
-            "  coder_model_default: test-coder",
-            "  reviewer_models:",
-            "    - test-reviewer",
-            "  timeout: 60",
-            "orchestrator:",
-            "  max_parallel_tasks: 2",
-            "  max_retries: 1",
-            "  poll_interval: 999",
-            "explore:",
-            "  explorer_model: test-explorer",
-            "  map_model: test-map-model",
-            "  categories:",
-            "    - performance",
-            "    - concurrency",
-            "  auto_task_severity: major",
-            "database:",
-            f"  path: {tmp_path / 'test.db'}",
-            "hook_env: {}",
-            "",
-        ]),
+        "\n".join(
+            [
+                "repo:",
+                "  path: /fake/repo",
+                "  base_branch: master",
+                f"  worktree_dir: {tmp_path}",
+                "  worktree_hooks: []",
+                "opencode:",
+                "  planner_model: test-planner",
+                "  coder_model_by_complexity:",
+                "    simple: test-coder",
+                "  coder_model_default: test-coder",
+                "  reviewer_models:",
+                "    - test-reviewer",
+                "  timeout: 60",
+                "orchestrator:",
+                "  max_parallel_tasks: 2",
+                "  max_retries: 1",
+                "  poll_interval: 999",
+                "explore:",
+                "  explorer_model: test-explorer",
+                "  map_model: test-map-model",
+                "  categories:",
+                "    - performance",
+                "    - concurrency",
+                "  auto_task_severity: major",
+                "jira:",
+                "  url: https://jira.example",
+                "  token: secret-token",
+                "  project_key: QA",
+                "  issue_type:",
+                "    - Bug",
+                "    - Task",
+                "    - Improvement",
+                "  priority:",
+                "    - Highest",
+                "    - High",
+                "    - Medium",
+                "  routing_hints:",
+                "    - about: planner failures and scheduling",
+                "      assignee: planner-owner",
+                "      component: query execution",
+                "      labels:",
+                "        - planner",
+                "        - scheduler",
+                "    - about: all unmatched items",
+                "      assignee: fallback-user",
+                "  timeout: 30",
+                "  skill_path: skills/jira-issue",
+                "database:",
+                f"  path: {tmp_path / 'test.db'}",
+                "hook_env: {}",
+                "",
+            ]
+        ),
         encoding="utf-8",
     )
     return {
-        "repo": {"path": "/fake/repo", "base_branch": "master",
-                  "worktree_dir": str(tmp_path), "worktree_hooks": []},
+        "repo": {
+            "path": "/fake/repo",
+            "base_branch": "master",
+            "worktree_dir": str(tmp_path),
+            "worktree_hooks": [],
+        },
         "opencode": {
             "planner_model": "test-planner",
             "coder_model_by_complexity": {"simple": "test-coder"},
@@ -598,13 +679,37 @@ def _make_orchestrator_config(tmp_path):
             "reviewer_models": ["test-reviewer"],
             "timeout": 60,
         },
-        "orchestrator": {"max_parallel_tasks": 2, "max_retries": 1,
-                         "poll_interval": 999},
+        "orchestrator": {
+            "max_parallel_tasks": 2,
+            "max_retries": 1,
+            "poll_interval": 999,
+        },
         "explore": {
             "explorer_model": "test-explorer",
             "map_model": "test-map-model",
             "categories": ["performance", "concurrency"],
             "auto_task_severity": "major",
+        },
+        "jira": {
+            "url": "https://jira.example",
+            "token": "secret-token",
+            "project_key": "QA",
+            "issue_type": ["Bug", "Task", "Improvement"],
+            "priority": ["Highest", "High", "Medium"],
+            "routing_hints": [
+                {
+                    "about": "planner failures and scheduling",
+                    "assignee": "planner-owner",
+                    "component": "query execution",
+                    "labels": ["planner", "scheduler"],
+                },
+                {
+                    "about": "all unmatched items",
+                    "assignee": "fallback-user",
+                },
+            ],
+            "timeout": 30,
+            "skill_path": "skills/jira-issue",
         },
         "database": {"path": str(tmp_path / "test.db")},
         "hook_env": {},
@@ -615,9 +720,13 @@ def _make_orchestrator_config(tmp_path):
 def _mock_agent_run(prompt="", output="", exit_code=0, session_id="ses_test"):
     """Create a mock AgentRun-like object."""
     from core.models import AgentRun
+
     return AgentRun(
-        prompt=prompt, output=output, exit_code=exit_code,
-        session_id=session_id, duration_sec=1.0,
+        prompt=prompt,
+        output=output,
+        exit_code=exit_code,
+        session_id=session_id,
+        duration_sec=1.0,
     )
 
 
@@ -627,6 +736,7 @@ class TestOrchestratorExplore:
         config = _make_orchestrator_config(tmp_path)
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             o = Orchestrator(config)
         return o
 
@@ -664,7 +774,11 @@ class TestOrchestratorExplore:
 
     def test_init_explore_map(self, orch):
         mock_run = _mock_agent_run(output=MOCK_MAP_OUTPUT)
-        with patch.object(ExplorerAgent, "init_map", return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"])):
+        with patch.object(
+            ExplorerAgent,
+            "init_map",
+            return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"]),
+        ):
             result = orch.init_explore_map()
 
         assert "modules_created" in result
@@ -692,21 +806,44 @@ class TestOrchestratorExplore:
     def test_init_explore_map_clears_old(self, orch):
         orch.db.save_explore_module(ExploreModule(id="old", name="Old", path="old"))
         mock_run = _mock_agent_run(output=MOCK_MAP_OUTPUT)
-        with patch.object(ExplorerAgent, "init_map", return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"])):
+        with patch.object(
+            ExplorerAgent,
+            "init_map",
+            return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"]),
+        ):
             orch.init_explore_map()
         modules = orch.db.get_all_explore_modules()
         assert all(m.id != "old" for m in modules)
 
-    def test_reinitialize_explore_map_resets_explore_metadata_but_keeps_tasks(self, orch):
+    def test_reinitialize_explore_map_resets_explore_metadata_but_keeps_tasks(
+        self, orch
+    ):
         task = Task(title="Keep me", description="persist")
         orch.db.save_task(task)
         orch.db.save_explore_module(ExploreModule(id="old", name="Old", path="old"))
-        orch.db.save_explore_run(ExploreRun(module_id="old", category="performance", personality="perf", model="m"))
-        orch.db.save_explore_queue_job({"job_id": "job-old", "module_id": "old", "category": "performance", "state": "queued"})
-        orch.db.save_state(orch._explore_map_state_key, {"status": "done", "session_id": "ses_old"})
+        orch.db.save_explore_run(
+            ExploreRun(
+                module_id="old", category="performance", personality="perf", model="m"
+            )
+        )
+        orch.db.save_explore_queue_job(
+            {
+                "job_id": "job-old",
+                "module_id": "old",
+                "category": "performance",
+                "state": "queued",
+            }
+        )
+        orch.db.save_state(
+            orch._explore_map_state_key, {"status": "done", "session_id": "ses_old"}
+        )
 
         mock_run = _mock_agent_run(output=MOCK_MAP_OUTPUT, session_id="ses_new")
-        with patch.object(ExplorerAgent, "init_map_streaming", return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"])):
+        with patch.object(
+            ExplorerAgent,
+            "init_map_streaming",
+            return_value=(mock_run, json.loads(MOCK_MAP_OUTPUT)["modules"]),
+        ):
             result = orch.reinitialize_explore_map()
 
         assert result["accepted"] is True
@@ -725,14 +862,18 @@ class TestOrchestratorExplore:
         assert "error" in result
 
     def test_add_explore_module(self, orch):
-        result = orch.add_explore_module(name="Test", path="test/path", description="A test")
+        result = orch.add_explore_module(
+            name="Test", path="test/path", description="A test"
+        )
         assert "id" in result
         assert result["name"] == "Test"
         assert set(result["category_status"].keys()) == {"performance", "concurrency"}
 
     def test_add_explore_module_with_parent(self, orch):
         parent = orch.add_explore_module(name="Parent", path="p")
-        child = orch.add_explore_module(name="Child", path="p/c", parent_id=parent["id"])
+        child = orch.add_explore_module(
+            name="Child", path="p/c", parent_id=parent["id"]
+        )
         assert child["depth"] == 1
         assert child["parent_id"] == parent["id"]
 
@@ -742,7 +883,9 @@ class TestOrchestratorExplore:
 
     def test_update_explore_module(self, orch):
         mod = orch.add_explore_module(name="A", path="a")
-        result = orch.update_explore_module(mod["id"], {"name": "B", "description": "Updated"})
+        result = orch.update_explore_module(
+            mod["id"], {"name": "B", "description": "Updated"}
+        )
         assert result["name"] == "B"
         assert result["description"] == "Updated"
 
@@ -923,6 +1066,7 @@ class TestOrchestratorExplore:
         config = _make_orchestrator_config(tmp_path)
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             orch = Orchestrator(config)
 
         mod_data = orch.add_explore_module(name="A", path="a")
@@ -932,6 +1076,7 @@ class TestOrchestratorExplore:
 
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             restarted = Orchestrator(config)
 
         recovered = restarted.db.get_explore_module(mod_data["id"])
@@ -939,14 +1084,24 @@ class TestOrchestratorExplore:
 
     def test_start_exploration_rejected_before_map_ready(self, orch):
         mod = orch.add_explore_module(name="A", path="a")
-        result = orch.start_exploration(module_ids=[mod["id"]], categories=["performance"])
+        result = orch.start_exploration(
+            module_ids=[mod["id"]], categories=["performance"]
+        )
         assert result["started"] == 0
         assert result["map_ready"] is False
         assert "error" in result
 
     def test_init_map_non_reentrant_and_cancellable(self, orch):
-        def _fake_init_map_streaming(self, repo_path, max_depth=2, task_id="", session_id="",
-                                     message_override=None, on_output=None, should_cancel=None):
+        def _fake_init_map_streaming(
+            self,
+            repo_path,
+            max_depth=2,
+            task_id="",
+            session_id="",
+            message_override=None,
+            on_output=None,
+            should_cancel=None,
+        ):
             if on_output:
                 on_output('{"sessionID":"ses_init"}\n', "ses_init")
             for _ in range(30):
@@ -956,7 +1111,9 @@ class TestOrchestratorExplore:
             run = _mock_agent_run(output=MOCK_MAP_OUTPUT, session_id="ses_init")
             return run, json.loads(MOCK_MAP_OUTPUT)["modules"]
 
-        with patch.object(ExplorerAgent, "init_map_streaming", new=_fake_init_map_streaming):
+        with patch.object(
+            ExplorerAgent, "init_map_streaming", new=_fake_init_map_streaming
+        ):
             first = orch.start_init_explore_map()
             assert first["accepted"] is True
 
@@ -990,29 +1147,41 @@ class TestOrchestratorExplore:
                 return None
 
         config = _make_orchestrator_config(tmp_path)
-        with patch("core.orchestrator.OpenCodeClient"), \
-             patch("core.orchestrator.ThreadPoolExecutor", side_effect=lambda max_workers: _DummyPool()):
+        with (
+            patch("core.orchestrator.OpenCodeClient"),
+            patch(
+                "core.orchestrator.ThreadPoolExecutor",
+                side_effect=lambda max_workers: _DummyPool(),
+            ),
+        ):
             orch = Orchestrator(config)
 
         mod_data = orch.add_explore_module(name="A", path="a")
         mod = orch.db.get_explore_module(mod_data["id"])
         mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
         orch.db.save_explore_module(mod)
-        orch.db.save_explore_queue_job({
-            "job_id": "job_resume_1",
-            "queue_id": 1,
-            "module_id": mod_data["id"],
-            "category": "performance",
-            "personality_key": "perf_hunter",
-            "task_id": f"__explore__:{mod_data['id']}:performance",
-            "state": "running",
-            "queued_at": time.time() - 10,
-            "started_at": time.time() - 9,
-            "session_id": "ses_resume",
-        })
+        orch.db.save_explore_queue_job(
+            {
+                "job_id": "job_resume_1",
+                "queue_id": 1,
+                "module_id": mod_data["id"],
+                "category": "performance",
+                "personality_key": "perf_hunter",
+                "task_id": f"__explore__:{mod_data['id']}:performance",
+                "state": "running",
+                "queued_at": time.time() - 10,
+                "started_at": time.time() - 9,
+                "session_id": "ses_resume",
+            }
+        )
 
-        with patch("core.orchestrator.OpenCodeClient"), \
-             patch("core.orchestrator.ThreadPoolExecutor", side_effect=lambda max_workers: _DummyPool()):
+        with (
+            patch("core.orchestrator.OpenCodeClient"),
+            patch(
+                "core.orchestrator.ThreadPoolExecutor",
+                side_effect=lambda max_workers: _DummyPool(),
+            ),
+        ):
             restarted = Orchestrator(config)
 
         queue_state = restarted.get_exploration_queue_state()
@@ -1026,6 +1195,7 @@ class TestOrchestratorExplore:
 # 6. FULL END-TO-END EXPLORATION FLOW (mocked model output)
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class TestExplorationFullFlow:
     """Tests the complete exploration pipeline with mocked model I/O."""
 
@@ -1034,13 +1204,15 @@ class TestExplorationFullFlow:
         config = _make_orchestrator_config(tmp_path)
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             o = Orchestrator(config)
         return o
 
     def test_run_exploration_success_with_findings(self, orch):
         """Full _run_exploration: module → agent → parse → save run → update module → create task."""
-        mod_data = orch.add_explore_module(name="Exec", path="be/src/exec",
-                                           description="Execution engine")
+        mod_data = orch.add_explore_module(
+            name="Exec", path="be/src/exec", description="Execution engine"
+        )
         mod_id = mod_data["id"]
         mod = orch.db.get_explore_module(mod_id)
         mod.category_status["performance"] = ExploreStatus.IN_PROGRESS.value
@@ -1053,7 +1225,8 @@ class TestExplorationFullFlow:
         summary = json.loads(MOCK_EXPLORE_OUTPUT)["summary"]
 
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             return_value=(mock_run, findings, summary),
         ):
             orch._run_exploration(mod_id, "performance", "perf_hunter")
@@ -1085,7 +1258,8 @@ class TestExplorationFullFlow:
 
         mock_run = _mock_agent_run(output=MOCK_EXPLORE_OUTPUT_EMPTY)
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             return_value=(mock_run, [], "Explored module, no issues found."),
         ):
             orch._run_exploration(mod_id, "performance", "perf_hunter")
@@ -1101,7 +1275,8 @@ class TestExplorationFullFlow:
         mod_id = mod_data["id"]
 
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             side_effect=RuntimeError("model timeout"),
         ):
             orch._run_exploration(mod_id, "performance", "perf_hunter")
@@ -1114,17 +1289,20 @@ class TestExplorationFullFlow:
         mod_data = orch.add_explore_module(name="Sec", path="sec")
         mod_id = mod_data["id"]
 
-        critical_findings = [{
-            "severity": "critical",
-            "title": "SQL injection",
-            "description": "User input directly interpolated into query",
-            "file_path": "sec/query.py",
-            "line_number": 10,
-            "suggested_fix": "Use parameterized queries",
-        }]
+        critical_findings = [
+            {
+                "severity": "critical",
+                "title": "SQL injection",
+                "description": "User input directly interpolated into query",
+                "file_path": "sec/query.py",
+                "line_number": 10,
+                "suggested_fix": "Use parameterized queries",
+            }
+        ]
         mock_run = _mock_agent_run()
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             return_value=(mock_run, critical_findings, "Found critical issue"),
         ):
             orch._run_exploration(mod_id, "security", "security_scout")
@@ -1141,12 +1319,22 @@ class TestExplorationFullFlow:
             category="concurrency",
             personality="concurrency_auditor",
             findings=[
-                {"severity": "major", "title": "Race condition",
-                 "description": "Unsafe read", "file_path": "m/foo.cpp",
-                 "line_number": 50, "suggested_fix": "Add lock"},
-                {"severity": "minor", "title": "Lock granularity",
-                 "description": "Too coarse", "file_path": "m/bar.cpp",
-                 "line_number": 100, "suggested_fix": "Split lock"},
+                {
+                    "severity": "major",
+                    "title": "Race condition",
+                    "description": "Unsafe read",
+                    "file_path": "m/foo.cpp",
+                    "line_number": 50,
+                    "suggested_fix": "Add lock",
+                },
+                {
+                    "severity": "minor",
+                    "title": "Lock granularity",
+                    "description": "Too coarse",
+                    "file_path": "m/bar.cpp",
+                    "line_number": 100,
+                    "suggested_fix": "Split lock",
+                },
             ],
         )
         orch.db.save_explore_run(run)
@@ -1174,7 +1362,9 @@ class TestExplorationFullFlow:
         # 1. Init map
         map_modules = json.loads(MOCK_MAP_OUTPUT)["modules"]
         mock_map_run = _mock_agent_run(output=MOCK_MAP_OUTPUT)
-        with patch.object(ExplorerAgent, "init_map", return_value=(mock_map_run, map_modules)):
+        with patch.object(
+            ExplorerAgent, "init_map", return_value=(mock_map_run, map_modules)
+        ):
             init_result = orch.init_explore_map()
         assert init_result["modules_created"] == 3
 
@@ -1186,10 +1376,12 @@ class TestExplorationFullFlow:
         # Replace pool.submit with direct execution
         def sync_submit(fn, *args):
             fn(*args)
+
         orch._pool.submit = sync_submit
 
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             return_value=(mock_explore_run, explore_findings, explore_summary),
         ):
             start_result = orch.start_exploration()
@@ -1199,8 +1391,11 @@ class TestExplorationFullFlow:
 
         # Verify all leaf modules are DONE for both categories
         modules = orch.db.get_all_explore_modules()
-        leaves = [m for m in modules if m.depth > 0 or
-                  not any(c.parent_id == m.id for c in modules)]
+        leaves = [
+            m
+            for m in modules
+            if m.depth > 0 or not any(c.parent_id == m.id for c in modules)
+        ]
         for leaf in leaves:
             for cat in ["performance", "concurrency"]:
                 assert leaf.category_status[cat] == ExploreStatus.DONE.value
@@ -1219,16 +1414,27 @@ class TestExplorationFullFlow:
         mod_data = orch.add_explore_module(name="X", path="x")
 
         findings = [
-            {"severity": "major", "title": "Major issue",
-             "description": "d", "file_path": "f", "line_number": 1,
-             "suggested_fix": "s"},
-            {"severity": "critical", "title": "Critical issue",
-             "description": "d", "file_path": "f", "line_number": 2,
-             "suggested_fix": "s"},
+            {
+                "severity": "major",
+                "title": "Major issue",
+                "description": "d",
+                "file_path": "f",
+                "line_number": 1,
+                "suggested_fix": "s",
+            },
+            {
+                "severity": "critical",
+                "title": "Critical issue",
+                "description": "d",
+                "file_path": "f",
+                "line_number": 2,
+                "suggested_fix": "s",
+            },
         ]
         mock_run = _mock_agent_run()
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             return_value=(mock_run, findings, "summary"),
         ):
             orch._run_exploration(mod_data["id"], "performance", "perf_hunter")
@@ -1243,14 +1449,27 @@ class TestExplorationFullFlow:
         mod_data = orch.add_explore_module(name="X", path="x")
 
         findings = [
-            {"severity": "info", "title": "Info", "description": "d",
-             "file_path": "f", "line_number": 1, "suggested_fix": "s"},
-            {"severity": "minor", "title": "Minor", "description": "d",
-             "file_path": "f", "line_number": 2, "suggested_fix": "s"},
+            {
+                "severity": "info",
+                "title": "Info",
+                "description": "d",
+                "file_path": "f",
+                "line_number": 1,
+                "suggested_fix": "s",
+            },
+            {
+                "severity": "minor",
+                "title": "Minor",
+                "description": "d",
+                "file_path": "f",
+                "line_number": 2,
+                "suggested_fix": "s",
+            },
         ]
         mock_run = _mock_agent_run()
         with patch.object(
-            ExplorerAgent, "explore_module",
+            ExplorerAgent,
+            "explore_module",
             return_value=(mock_run, findings, "summary"),
         ):
             orch._run_exploration(mod_data["id"], "performance", "perf_hunter")
@@ -1262,18 +1481,20 @@ class TestExplorationFullFlow:
         mod_data = orch.add_explore_module(name="Exec", path="be/src/exec")
         mod_id = mod_data["id"]
 
-        output = json.dumps({
-            "summary": "Checked scanner hot paths",
-            "focus_point": "allocator pressure",
-            "actionability_score": 8.5,
-            "reliability_score": 7.0,
-            "explored_scope": "scanner allocator-heavy loops",
-            "completion_status": "partial",
-            "supplemental_note": "Previous copy issue remains after reset.",
-            "map_review_required": False,
-            "map_review_reason": "",
-            "findings": [],
-        })
+        output = json.dumps(
+            {
+                "summary": "Checked scanner hot paths",
+                "focus_point": "allocator pressure",
+                "actionability_score": 8.5,
+                "reliability_score": 7.0,
+                "explored_scope": "scanner allocator-heavy loops",
+                "completion_status": "partial",
+                "supplemental_note": "Previous copy issue remains after reset.",
+                "map_review_required": False,
+                "map_review_reason": "",
+                "findings": [],
+            }
+        )
         mock_run = _mock_agent_run(output=output)
         with patch.object(
             ExplorerAgent,
@@ -1305,24 +1526,30 @@ class TestExplorationFullFlow:
         mod_data = orch.add_explore_module(name="Exec", path="be/src/exec")
         mod_id = mod_data["id"]
 
-        output = json.dumps({
-            "summary": "layout mismatch found",
-            "focus_point": "module boundary",
-            "actionability_score": 6.0,
-            "reliability_score": 6.5,
-            "supplemental_note": "Consider splitting planner and executor.",
-            "map_review_required": True,
-            "map_review_reason": "split exec module into planner/executor",
-            "findings": [],
-        })
+        output = json.dumps(
+            {
+                "summary": "layout mismatch found",
+                "focus_point": "module boundary",
+                "actionability_score": 6.0,
+                "reliability_score": 6.5,
+                "supplemental_note": "Consider splitting planner and executor.",
+                "map_review_required": True,
+                "map_review_reason": "split exec module into planner/executor",
+                "findings": [],
+            }
+        )
         mock_run = _mock_agent_run(output=output)
         with patch.object(
             ExplorerAgent,
             "explore_module",
             return_value=(mock_run, [], "layout mismatch found"),
         ):
-            with patch.object(orch, "start_init_explore_map", return_value={"accepted": True}) as mock_review:
-                orch._run_exploration(mod_id, "maintainability", "maintainability_critic")
+            with patch.object(
+                orch, "start_init_explore_map", return_value={"accepted": True}
+            ) as mock_review:
+                orch._run_exploration(
+                    mod_id, "maintainability", "maintainability_critic"
+                )
 
         mock_review.assert_called_once()
         kwargs = mock_review.call_args.kwargs
@@ -1336,18 +1563,20 @@ class TestExplorationFullFlow:
         mod_data = orch.add_explore_module(name="Exec", path="be/src/exec")
         mod_id = mod_data["id"]
 
-        partial_output = json.dumps({
-            "summary": "Checked scanner hot path only",
-            "focus_point": "scanner loop",
-            "actionability_score": 7.0,
-            "reliability_score": 7.5,
-            "explored_scope": "scanner.cpp next_batch and buffer reuse",
-            "completion_status": "partial",
-            "supplemental_note": "Continue with scheduler interactions next.",
-            "map_review_required": False,
-            "map_review_reason": "",
-            "findings": [],
-        })
+        partial_output = json.dumps(
+            {
+                "summary": "Checked scanner hot path only",
+                "focus_point": "scanner loop",
+                "actionability_score": 7.0,
+                "reliability_score": 7.5,
+                "explored_scope": "scanner.cpp next_batch and buffer reuse",
+                "completion_status": "partial",
+                "supplemental_note": "Continue with scheduler interactions next.",
+                "map_review_required": False,
+                "map_review_reason": "",
+                "findings": [],
+            }
+        )
         partial_run = _mock_agent_run(output=partial_output, session_id="ses_partial")
         with patch.object(
             ExplorerAgent,
@@ -1362,33 +1591,49 @@ class TestExplorationFullFlow:
         assert len(partial_runs) == 1
         assert partial_runs[0].completion_status == "partial"
         assert partial_runs[0].session_id == "ses_partial"
-        assert partial_runs[0].explored_scope == "scanner.cpp next_batch and buffer reuse"
+        assert (
+            partial_runs[0].explored_scope == "scanner.cpp next_batch and buffer reuse"
+        )
         assert "completion: partial" in after_partial.category_notes["performance"]
 
-        complete_output = json.dumps({
-            "summary": "Covered remaining performance-sensitive paths",
-            "focus_point": "scheduler and merge paths",
-            "actionability_score": 4.5,
-            "reliability_score": 8.0,
-            "explored_scope": "scheduler.cpp dispatch flow and merge path buffering",
-            "completion_status": "complete",
-            "supplemental_note": "Module performance coverage is now complete.",
-            "map_review_required": False,
-            "map_review_reason": "",
-            "findings": [],
-        })
-        complete_run = _mock_agent_run(output=complete_output, session_id="ses_complete")
+        complete_output = json.dumps(
+            {
+                "summary": "Covered remaining performance-sensitive paths",
+                "focus_point": "scheduler and merge paths",
+                "actionability_score": 4.5,
+                "reliability_score": 8.0,
+                "explored_scope": "scheduler.cpp dispatch flow and merge path buffering",
+                "completion_status": "complete",
+                "supplemental_note": "Module performance coverage is now complete.",
+                "map_review_required": False,
+                "map_review_reason": "",
+                "findings": [],
+            }
+        )
+        complete_run = _mock_agent_run(
+            output=complete_output, session_id="ses_complete"
+        )
         with patch.object(
             ExplorerAgent,
             "explore_module",
-            return_value=(complete_run, [], "Covered remaining performance-sensitive paths"),
+            return_value=(
+                complete_run,
+                [],
+                "Covered remaining performance-sensitive paths",
+            ),
         ):
             orch._run_exploration(mod_id, "performance", "perf_hunter")
 
         after_complete = orch.db.get_explore_module(mod_id)
         assert after_complete.category_status["performance"] == ExploreStatus.DONE.value
-        assert after_complete.category_notes["performance"].count("completion: partial") == 1
-        assert after_complete.category_notes["performance"].count("completion: complete") == 1
+        assert (
+            after_complete.category_notes["performance"].count("completion: partial")
+            == 1
+        )
+        assert (
+            after_complete.category_notes["performance"].count("completion: complete")
+            == 1
+        )
 
         all_runs = orch.db.get_explore_runs_for_module(mod_id)
         assert len(all_runs) == 2
@@ -1403,18 +1648,20 @@ class TestExplorationFullFlow:
         orch._explore_map_state["finished_at"] = time.time()
         orch._persist_explore_map_state()
 
-        first_output = json.dumps({
-            "summary": "Covered scanner hot paths",
-            "focus_point": "scanner",
-            "actionability_score": 3.0,
-            "reliability_score": 8.0,
-            "explored_scope": "scanner.cpp hot loop",
-            "completion_status": "complete",
-            "supplemental_note": "Look at merge path only if workload changes.",
-            "map_review_required": False,
-            "map_review_reason": "",
-            "findings": [],
-        })
+        first_output = json.dumps(
+            {
+                "summary": "Covered scanner hot paths",
+                "focus_point": "scanner",
+                "actionability_score": 3.0,
+                "reliability_score": 8.0,
+                "explored_scope": "scanner.cpp hot loop",
+                "completion_status": "complete",
+                "supplemental_note": "Look at merge path only if workload changes.",
+                "map_review_required": False,
+                "map_review_reason": "",
+                "findings": [],
+            }
+        )
         first_run = _mock_agent_run(output=first_output, session_id="ses_done_1")
         with patch.object(
             ExplorerAgent,
@@ -1429,23 +1676,29 @@ class TestExplorationFullFlow:
         assert replay["started"] == 1
         assert replay["skipped_non_todo"] == 0
 
-        second_output = json.dumps({
-            "summary": "Rechecked merge path with previous notes in context",
-            "focus_point": "merge path",
-            "actionability_score": 5.0,
-            "reliability_score": 8.5,
-            "explored_scope": "merge path buffering",
-            "completion_status": "partial",
-            "supplemental_note": "Previous scanner pass still valid; spill path remains.",
-            "map_review_required": False,
-            "map_review_reason": "",
-            "findings": [],
-        })
+        second_output = json.dumps(
+            {
+                "summary": "Rechecked merge path with previous notes in context",
+                "focus_point": "merge path",
+                "actionability_score": 5.0,
+                "reliability_score": 8.5,
+                "explored_scope": "merge path buffering",
+                "completion_status": "partial",
+                "supplemental_note": "Previous scanner pass still valid; spill path remains.",
+                "map_review_required": False,
+                "map_review_reason": "",
+                "findings": [],
+            }
+        )
         second_run = _mock_agent_run(output=second_output, session_id="ses_done_2")
         with patch.object(
             ExplorerAgent,
             "explore_module",
-            return_value=(second_run, [], "Rechecked merge path with previous notes in context"),
+            return_value=(
+                second_run,
+                [],
+                "Rechecked merge path with previous notes in context",
+            ),
         ):
             orch._run_exploration(mod_id, "performance", "perf_hunter")
 
@@ -1468,6 +1721,7 @@ class TestExploreModuleDetailApi:
         config = _make_orchestrator_config(tmp_path)
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             o = Orchestrator(config)
         return o
 
@@ -1522,7 +1776,10 @@ class TestExploreModuleDetailApi:
         assert "output" not in returned
         assert returned["parsed"]["session_id"] == "ses_api"
         assert returned["parsed"]["summary"]["total_steps"] == 1
-        assert returned["parsed"]["steps"][0]["events"][0]["content"] == "Exploring scanner and scheduler"
+        assert (
+            returned["parsed"]["steps"][0]["events"][0]["content"]
+            == "Exploring scanner and scheduler"
+        )
 
 
 class TestModelConfigUpdates:
@@ -1531,16 +1788,19 @@ class TestModelConfigUpdates:
         config = _make_orchestrator_config(tmp_path)
         with patch("core.orchestrator.OpenCodeClient"):
             from core.orchestrator import Orchestrator
+
             o = Orchestrator(config)
         return o
 
     def test_update_models_updates_and_persists_explore_models(self, orch):
         with patch.object(orch, "_save_model_config") as save_mock:
-            orch.update_models({
-                "planner_model": "planner-new",
-                "explorer_model": "explorer-new",
-                "map_model": "map-new",
-            })
+            orch.update_models(
+                {
+                    "planner_model": "planner-new",
+                    "explorer_model": "explorer-new",
+                    "map_model": "map-new",
+                }
+            )
 
         assert orch.config["opencode"]["planner_model"] == "planner-new"
         assert orch.config["explore"]["explorer_model"] == "explorer-new"
@@ -1618,6 +1878,298 @@ class TestModelConfigUpdates:
         finally:
             web_app.set_orchestrator(original)
 
+    def test_api_submit_jira_task_validates_and_dispatches(self, orch):
+        from web import app as web_app
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {
+                    "title": "Create issue for planner bug",
+                    "description": "Planner crashes on malformed task graphs.",
+                    "priority": "high",
+                    "source_task_id": "task_src_123",
+                }
+
+            request.json = _json
+            with patch.object(
+                orch, "_dispatch_jira_task", return_value=True
+            ) as dispatch_mock:
+                response = asyncio.run(web_app.api_add_jira_task(request))
+
+            assert response["task_mode"] == "jira"
+            saved = orch.db.get_task(response["id"])
+            assert saved is not None
+            assert saved.task_mode == "jira"
+            assert saved.jira_source_task_id == "task_src_123"
+            dispatch_mock.assert_called_once_with(saved.id)
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_submit_jira_task_requires_description(self, orch):
+        from web import app as web_app
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {"title": "Create issue", "description": "   "}
+
+            request.json = _json
+            response = asyncio.run(web_app.api_add_jira_task(request))
+            assert response.status_code == 400
+            assert b"description required" in response.body
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_assign_jira_for_task_dispatches_in_place_without_creating_new_task(
+        self, orch
+    ):
+        source_task = Task(
+            title="Resolve planner bug",
+            description="Planner crashes on malformed task graphs.",
+        )
+        orch.db.save_task(source_task)
+
+        before_ids = {t.id for t in orch.db.get_all_tasks()}
+        with patch.object(
+            orch, "_dispatch_jira_task", return_value=True
+        ) as dispatch_mock:
+            result = orch.assign_jira_for_task(source_task.id)
+
+        assert result["ok"] is True
+        assert result["task"]["id"] == source_task.id
+        after_ids = {t.id for t in orch.db.get_all_tasks()}
+        assert after_ids == before_ids
+        dispatch_mock.assert_called_once_with(source_task.id)
+        saved = orch.db.get_task(source_task.id)
+        assert saved is not None
+        assert saved.task_mode == "develop"
+        assert saved.jira_status == "pending"
+
+    def test_api_assign_jira_for_existing_task_dispatches_in_place(self, orch):
+        from web import app as web_app
+
+        source_task = Task(
+            title="Resolve planner bug",
+            description="Planner crashes on malformed task graphs.",
+        )
+        orch.db.save_task(source_task)
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            with patch.object(orch, "_dispatch_jira_task", return_value=True):
+                response = asyncio.run(web_app.api_assign_jira_for_task(source_task.id))
+
+            assert response["ok"] is True
+            assert response["task"]["id"] == source_task.id
+            assert len(orch.db.get_all_tasks()) == 1
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_assign_jira_for_task_rejects_when_already_assigning(self, orch):
+        source_task = Task(
+            title="Resolve planner bug",
+            description="Planner crashes on malformed task graphs.",
+            status=TaskStatus.JIRA_ASSIGNING,
+        )
+        orch.db.save_task(source_task)
+
+        result = orch.assign_jira_for_task(source_task.id)
+
+        assert result == {"error": "Jira assignment already in progress for this task"}
+
+    def test_jira_task_pipeline_syncs_result_back_to_source_task(self, orch):
+        source_task = Task(title="Planner issue", description="Planner stalls")
+        orch.db.save_task(source_task)
+        jira_task = Task(
+            title="Planner issue",
+            description="Planner stalls",
+            task_mode="jira",
+            jira_source_task_id=source_task.id,
+        )
+        orch.db.save_task(jira_task)
+
+        run = _mock_agent_run(
+            prompt="jira prompt",
+            output="key=QA-321\nself=https://jira.example/rest/api/2/issue/321\ncreated body",
+            session_id="ses_jira",
+        )
+        with patch.object(orch, "_run_jira_agent", return_value=(run, run.output)):
+            orch._jira_task_pipeline(jira_task.id)
+
+        saved_source = orch.db.get_task(source_task.id)
+        assert saved_source is not None
+        assert saved_source.jira_issue_key == "QA-321"
+        assert saved_source.jira_issue_url == "https://jira.example/browse/QA-321"
+        assert saved_source.jira_status == "created"
+
+    def test_run_jira_agent_uses_simple_coder_model_and_prompt_rules(self, orch):
+        task = Task(
+            title="Planner issue",
+            description="Planner stalls during dispatch.",
+            task_mode="jira",
+            jira_source_task_id="src-task-777",
+        )
+        orch.db.save_task(task)
+
+        run = _mock_agent_run(
+            prompt="jira prompt",
+            output="key=QA-123\nself=https://jira.example/rest/api/2/issue/123",
+            session_id="ses_jira",
+        )
+        orch.client.run.return_value = run
+        orch.client.extract_last_text_block_or_raw.return_value = run.output
+
+        agent_run, text = orch._run_jira_agent(task)
+
+        assert agent_run is run
+        assert text.startswith("key=QA-123")
+        kwargs = orch.client.run.call_args.kwargs
+        assert kwargs["model"] == "test-coder"
+        assert "planner failures and scheduling" in kwargs["message"]
+        assert "all unmatched items" in kwargs["message"]
+        assert "Improvement" in kwargs["message"]
+        assert "fixed_label: DorisExplorer" in kwargs["message"]
+        assert (
+            "Choose assignee, extra labels, and optional component strictly from the routing hints."
+            in kwargs["message"]
+        )
+        assert (
+            "Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`."
+            in kwargs["message"]
+        )
+        assert (
+            "If the selected routing hint has labels, pass them with `--label`. If it has no labels, do not add any extra routing labels."
+            in kwargs["message"]
+        )
+        assert (
+            "If the selected routing hint has a component, pass it via `--component`. If the hint has no component, omit `--component`."
+            in kwargs["message"]
+        )
+        assert f"[Doris Agent src-task-777]" in kwargs["message"]
+        assert (
+            "此jira由赵长乐的agent创建，如有疑问可飞书联系。"
+            "如果确认jira问题不存在/无需处理，或者处理完成，请在http://10.26.20.3:8778评论对应task。"
+            in kwargs["message"]
+        )
+        assert "skills/jira-issue/SKILL.md" in kwargs["message"]
+
+    def test_parse_jira_agent_result_extracts_issue_key_and_url(self, orch):
+        task = Task(title="Planner issue", description="desc", task_mode="jira")
+        result = orch._parse_jira_agent_result(
+            task,
+            "key=QA-123\nself=https://jira.example/rest/api/2/issue/123",
+        )
+        assert result["key"] == "QA-123"
+        assert result["self"].endswith("/123")
+
+    def test_build_jira_browse_url_uses_base_url_and_issue_key(self, orch):
+        assert (
+            orch._build_jira_browse_url("https://jira.example/", "QA-123")
+            == "https://jira.example/browse/QA-123"
+        )
+
+    def test_parse_jira_agent_result_rejects_missing_issue_key(self, orch):
+        task = Task(title="Planner issue", description="desc", task_mode="jira")
+        with pytest.raises(RuntimeError, match="did not return issue key"):
+            orch._parse_jira_agent_result(
+                task, "self=https://jira.example/rest/api/2/issue/123"
+            )
+
+    def test_jira_task_pipeline_completes_and_records_issue(self, orch):
+        task = Task(
+            title="Planner issue", description="Planner stalls", task_mode="jira"
+        )
+        orch.db.save_task(task)
+
+        run = _mock_agent_run(
+            prompt="jira prompt",
+            output="key=QA-321\nself=https://jira.example/rest/api/2/issue/321\ncreated body",
+            session_id="ses_jira",
+        )
+        with patch.object(orch, "_run_jira_agent", return_value=(run, run.output)):
+            orch._jira_task_pipeline(task.id)
+
+        saved = orch.db.get_task(task.id)
+        assert saved.status == TaskStatus.COMPLETED
+        assert saved.jira_issue_key == "QA-321"
+        assert saved.jira_issue_url == "https://jira.example/browse/QA-321"
+        assert saved.jira_status == "created"
+        assert saved.jira_agent_output.startswith("key=QA-321")
+        assert saved.jira_payload_preview == ""
+        assert saved.code_output == ""
+        assert saved.review_output == ""
+
+    def test_jira_task_pipeline_marks_running_with_jira_assigning_status(self, orch):
+        task = Task(
+            title="Planner issue", description="Planner stalls", task_mode="jira"
+        )
+        orch.db.save_task(task)
+
+        def _run_agent(_task):
+            current = orch.db.get_task(task.id)
+            assert current is not None
+            assert current.status == TaskStatus.JIRA_ASSIGNING
+            assert current.jira_status == "assigning"
+            return (
+                _mock_agent_run(
+                    prompt="jira prompt",
+                    output="key=QA-111\nself=https://jira.example/rest/api/2/issue/111",
+                    session_id="ses_jira",
+                ),
+                "key=QA-111\nself=https://jira.example/rest/api/2/issue/111",
+            )
+
+        with patch.object(orch, "_run_jira_agent", side_effect=_run_agent):
+            orch._jira_task_pipeline(task.id)
+
+        saved = orch.db.get_task(task.id)
+        assert saved is not None
+        assert saved.status == TaskStatus.COMPLETED
+        assert saved.jira_status == "created"
+
+    def test_jira_task_pipeline_failure_marks_task_failed(self, orch):
+        task = Task(
+            title="Planner issue", description="Planner stalls", task_mode="jira"
+        )
+        orch.db.save_task(task)
+
+        run = _mock_agent_run(
+            prompt="jira prompt",
+            output="unexpected output without issue key",
+            session_id="ses_jira",
+        )
+        with patch.object(orch, "_run_jira_agent", return_value=(run, run.output)):
+            orch._jira_task_pipeline(task.id)
+
+        saved = orch.db.get_task(task.id)
+        assert saved.status == TaskStatus.FAILED
+        assert saved.jira_status == "failed"
+        assert "did not return issue key" in saved.error
+        assert saved.jira_agent_output == "unexpected output without issue key"
+
+    def test_submit_jira_task_initializes_prefix_related_state(self, orch):
+        task = orch.submit_jira_task(
+            title="Planner issue",
+            description="Planner stalls",
+            priority="medium",
+            source_task_id="source-456",
+        )
+        saved = orch.db.get_task(task.id)
+        assert saved is not None
+        assert saved.task_mode == "jira"
+        assert saved.jira_source_task_id == "source-456"
+        assert saved.jira_status in ("pending", "assigning", "created", "failed")
+        assert f"issue types=" in saved.plan_output
+        assert "routing hints=" in saved.plan_output
+
     def test_add_task_comment_persists_and_updates_task(self, orch):
         from web import app as web_app
 
@@ -1633,8 +2185,12 @@ class TestModelConfigUpdates:
                 return {"username": "alice", "content": "Please check the edge case."}
 
             request.json = _json
-            with patch.object(orch, "_collect_resource_snapshot", return_value=(set(), {})), \
-                 patch("core.orchestrator.os.path.isdir", return_value=False):
+            with (
+                patch.object(
+                    orch, "_collect_resource_snapshot", return_value=(set(), {})
+                ),
+                patch("core.orchestrator.os.path.isdir", return_value=False),
+            ):
                 response = asyncio.run(web_app.api_add_task_comment(task.id, request))
             assert response["ok"] is True
             assert response["task"]["has_comments"] is True

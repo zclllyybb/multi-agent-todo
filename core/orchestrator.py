@@ -1,6 +1,5 @@
 """Orchestrator: dispatches tasks to agents, manages lifecycle and parallelism."""
 
-import json
 import logging
 import os
 import random
@@ -15,12 +14,22 @@ from typing import Dict, List, Optional, Set
 from agents.coder import CoderAgent
 from agents.explorer import ExplorerAgent
 from agents.planner import PlannerAgent
+from agents.prompts import coder_assign_jira_issue
 from agents.reviewer import ReviewerAgent
 from core.database import Database
 from core.dep_tracker import DependencyTracker
 from core.models import (
-    AgentRun, ExploreModule, ExploreRun, ExploreStatus, ModelOutputError,
-    Task, TaskPriority, TaskSource, TaskStatus, TodoItem, TodoItemStatus,
+    AgentRun,
+    ExploreModule,
+    ExploreRun,
+    ExploreStatus,
+    ModelOutputError,
+    Task,
+    TaskPriority,
+    TaskSource,
+    TaskStatus,
+    TodoItem,
+    TodoItemStatus,
 )
 from core.opencode_client import OpenCodeClient
 from core.worktree import WorktreeManager
@@ -55,7 +64,9 @@ class Orchestrator:
         complexity_map: dict = oc.get("coder_model_by_complexity", {})
         self._coder_by_complexity: Dict[str, CoderAgent] = {}
         for level, model in complexity_map.items():
-            self._coder_by_complexity[level] = CoderAgent(model=model, client=self.client)
+            self._coder_by_complexity[level] = CoderAgent(
+                model=model, client=self.client
+            )
         self._default_coder = CoderAgent(model=default_coder_model, client=self.client)
 
         # Reviewers: one agent per configured model; all must approve
@@ -72,7 +83,8 @@ class Orchestrator:
         self._pool = ThreadPoolExecutor(max_workers=max_parallel)
         log.info(
             "Orchestrator initialized: max_parallel=%d, repo=%s",
-            max_parallel, config["repo"]["path"],
+            max_parallel,
+            config["repo"]["path"],
         )
 
         # Dependency tracking between sub-tasks (pure in-memory, rebuilt on split)
@@ -187,7 +199,9 @@ class Orchestrator:
             log.info(
                 "Rebuilt dep_tracker from DB: %d child task(s) across %d parent(s), "
                 "%d task(s) ready to dispatch",
-                registered, len(parent_children), len(self._pending_dispatch),
+                registered,
+                len(parent_children),
+                len(self._pending_dispatch),
             )
 
     def _collect_resource_snapshot(self) -> tuple[set[str], dict[str, list[str]]]:
@@ -209,16 +223,20 @@ class Orchestrator:
         )
         if branch_result.returncode == 0:
             local_branches = {
-                line.strip() for line in branch_result.stdout.splitlines() if line.strip()
+                line.strip()
+                for line in branch_result.stdout.splitlines()
+                if line.strip()
             }
 
         for wt in self.worktree_mgr.list_worktrees():
             raw_branch = wt.get("branch", "")
             if raw_branch.startswith("refs/heads/"):
-                raw_branch = raw_branch[len("refs/heads/"):]
+                raw_branch = raw_branch[len("refs/heads/") :]
             raw_path = wt.get("path", "")
             if raw_branch and raw_path:
-                branch_worktrees.setdefault(raw_branch, []).append(os.path.abspath(raw_path))
+                branch_worktrees.setdefault(raw_branch, []).append(
+                    os.path.abspath(raw_path)
+                )
 
         self._resource_snapshot_cache = (local_branches, branch_worktrees)
         self._resource_snapshot_cached_at = now
@@ -239,8 +257,12 @@ class Orchestrator:
             TaskStatus.NEEDS_ARBITRATION,
         }
 
-        actual_branch_exists = bool(task.branch_name and task.branch_name in local_branches)
-        recorded_worktree_exists = bool(task.worktree_path and os.path.isdir(task.worktree_path))
+        actual_branch_exists = bool(
+            task.branch_name and task.branch_name in local_branches
+        )
+        recorded_worktree_exists = bool(
+            task.worktree_path and os.path.isdir(task.worktree_path)
+        )
         branch_worktree_exists = False
         if task.branch_name:
             for path in branch_worktrees.get(task.branch_name, []):
@@ -249,9 +271,8 @@ class Orchestrator:
                     break
 
         actual_worktree_exists = recorded_worktree_exists or branch_worktree_exists
-        clean_available = (
-            task.status in cleanable_statuses
-            and (actual_branch_exists or actual_worktree_exists)
+        clean_available = task.status in cleanable_statuses and (
+            actual_branch_exists or actual_worktree_exists
         )
 
         return {
@@ -289,12 +310,14 @@ class Orchestrator:
             return {"error": "content required"}
 
         now = time.time()
-        task.comments.append({
-            "id": uuid.uuid4().hex[:12],
-            "username": username,
-            "content": content,
-            "created_at": now,
-        })
+        task.comments.append(
+            {
+                "id": uuid.uuid4().hex[:12],
+                "username": username,
+                "content": content,
+                "created_at": now,
+            }
+        )
         task.updated_at = now
         self.db.save_task(task)
         return {
@@ -314,8 +337,7 @@ class Orchestrator:
         try:
             # Use the 'simple' coder model (cheapest configured) or the default
             simple_agent = (
-                self._coder_by_complexity.get("simple")
-                or self._default_coder
+                self._coder_by_complexity.get("simple") or self._default_coder
             )
             prompt = (
                 f"Convert the following task title into a concise git branch name slug "
@@ -386,7 +408,9 @@ class Orchestrator:
         if "reviewer_models" in updates:
             models = updates["reviewer_models"]
             if isinstance(models, list):
-                cleaned = [m.strip() for m in models if isinstance(m, str) and m.strip()]
+                cleaned = [
+                    m.strip() for m in models if isinstance(m, str) and m.strip()
+                ]
                 self.reviewers = [
                     ReviewerAgent(model=m, client=self.client) for m in cleaned
                 ]
@@ -405,6 +429,392 @@ class Orchestrator:
 
         # Persist model config changes so they survive restarts.
         self._save_model_config()
+
+    def _get_jira_config(self) -> dict:
+        jira = self.config.setdefault("jira", {})
+        default_skill = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "skills",
+            "jira-issue",
+        )
+        skill_path = jira.get("skill_path") or default_skill
+        if not os.path.isabs(skill_path):
+            skill_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                skill_path,
+            )
+        merged = {
+            "url": jira.get("url", ""),
+            "token": jira.get("token", ""),
+            "user": jira.get("user", ""),
+            "project_key": jira.get("project_key", ""),
+            "issue_types": (
+                list(jira.get("issue_type", []))
+                if isinstance(jira.get("issue_type", []), list)
+                else [str(jira.get("issue_type", "")).strip()]
+            ),
+            "priorities": (
+                list(jira.get("priority", []))
+                if isinstance(jira.get("priority", []), list)
+                else [str(jira.get("priority", "")).strip()]
+            ),
+            "routing_hints": [],
+            "timeout": int(jira.get("timeout", 120) or 120),
+            "skill_path": skill_path,
+        }
+        merged["issue_types"] = [v for v in merged["issue_types"] if str(v).strip()]
+        merged["priorities"] = [v for v in merged["priorities"] if str(v).strip()]
+        for raw_hint in jira.get("routing_hints", []):
+            if not isinstance(raw_hint, dict):
+                continue
+            hint = dict(raw_hint)
+            labels = hint.get("labels")
+            if labels is None:
+                hint.pop("labels", None)
+            elif isinstance(labels, list):
+                cleaned_labels = [str(v).strip() for v in labels if str(v).strip()]
+                if cleaned_labels:
+                    hint["labels"] = cleaned_labels
+                else:
+                    hint.pop("labels", None)
+            else:
+                single = str(labels).strip()
+                if single:
+                    hint["labels"] = [single]
+                else:
+                    hint.pop("labels", None)
+            component = str(hint.get("component", "")).strip()
+            if component:
+                hint["component"] = component
+            else:
+                hint.pop("component", None)
+            assignee = str(hint.get("assignee", "")).strip()
+            if assignee:
+                hint["assignee"] = assignee
+            else:
+                hint.pop("assignee", None)
+            about = str(hint.get("about", "")).strip()
+            if about:
+                hint["about"] = about
+            merged["routing_hints"].append(hint)
+        return merged
+
+    def _run_jira_agent(self, task: Task) -> tuple[AgentRun, str]:
+        jira = self._get_jira_config()
+        simple_agent = self._coder_by_complexity.get("simple") or self._default_coder
+        source_task_id = (task.jira_source_task_id or task.id).strip()
+        component_hint_count = sum(
+            1
+            for hint in jira["routing_hints"]
+            if str(hint.get("component", "")).strip()
+        )
+        log.info(
+            "Preparing jira agent run: jira_task=%s source_task=%s model=%s project=%s issue_type_candidates=%s priority_candidates=%s routing_hint_count=%d routing_component_count=%d skill_path=%s",
+            task.id,
+            source_task_id,
+            simple_agent.model,
+            jira["project_key"],
+            jira["issue_types"],
+            jira["priorities"],
+            len(jira["routing_hints"]),
+            component_hint_count,
+            jira["skill_path"],
+        )
+        prompt = coder_assign_jira_issue(
+            source_task_id=source_task_id,
+            title=task.title,
+            description=task.description,
+            project_key=jira["project_key"],
+            jira_url=jira["url"],
+            available_issue_types=jira["issue_types"],
+            available_priorities=jira["priorities"],
+            routing_hints=jira["routing_hints"],
+        )
+        repo_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {
+            "JIRA_URL": jira["url"],
+            "JIRA_TOKEN": jira["token"],
+            "JIRA_PROJECT": jira["project_key"],
+        }
+        if jira.get("user"):
+            env["JIRA_USER"] = jira["user"]
+        run = self.client.run(
+            message=prompt,
+            work_dir=repo_path,
+            model=simple_agent.model,
+            agent_type="jira_assign",
+            task_id=task.id,
+            max_continues=8,
+            env=env,
+            require_stop=True,
+        )
+        text = self.client.extract_last_text_block_or_raw(run.output).strip()
+        log.info(
+            "Jira agent run completed: jira_task=%s source_task=%s session=%s exit=%s extracted_text_len=%d",
+            task.id,
+            source_task_id,
+            run.session_id or "-",
+            run.exit_code,
+            len(text),
+        )
+        return run, text
+
+    def _parse_jira_agent_result(self, task: Task, text: str) -> dict:
+        key = ""
+        issue_url = ""
+        for line in (text or "").splitlines():
+            if line.startswith("key="):
+                key = line.split("=", 1)[1].strip()
+            elif line.startswith("self="):
+                issue_url = line.split("=", 1)[1].strip()
+        if not key:
+            raise RuntimeError(
+                f"Jira agent [{task.id}] did not return issue key. Output: {text[:500]}"
+            )
+        log.info(
+            "Parsed jira agent result: jira_task=%s source_task=%s key=%s self=%s",
+            task.id,
+            task.jira_source_task_id or task.id,
+            key,
+            issue_url,
+        )
+        return {"key": key, "self": issue_url}
+
+    @staticmethod
+    def _build_jira_browse_url(jira_base_url: str, issue_key: str) -> str:
+        base = str(jira_base_url or "").strip().rstrip("/")
+        key = str(issue_key or "").strip()
+        if not base or not key:
+            return ""
+        return f"{base}/browse/{key}"
+
+    def submit_jira_task(
+        self,
+        title: str,
+        description: str,
+        priority: str = "medium",
+        source_task_id: str = "",
+    ) -> Task:
+        jira = self._get_jira_config()
+        task = Task(
+            title=title,
+            description=description,
+            priority=TaskPriority(priority),
+            source=TaskSource.MANUAL,
+            task_mode="jira",
+            jira_source_task_id=source_task_id.strip(),
+            max_retries=0,
+        )
+        task.plan_output = (
+            f"Jira target: {jira['project_key'] or '-'} / issue types={jira['issue_types'] or ['-']} "
+            f"/ priorities={jira['priorities'] or ['-']} / routing hints={len(jira['routing_hints'])}"
+        )
+        task.jira_status = "pending"
+        self.db.save_task(task)
+        log.info(
+            "Submitted jira task: jira_task=%s source_task=%s priority=%s title=%s",
+            task.id,
+            task.jira_source_task_id or "-",
+            task.priority.value,
+            task.title,
+        )
+        dispatched = self._dispatch_jira_task(task.id)
+        log.info(
+            "Jira task dispatch result: jira_task=%s dispatched=%s",
+            task.id,
+            dispatched,
+        )
+        return task
+
+    def assign_jira_for_task(self, source_task_id: str) -> dict:
+        source_task = self.db.get_task(source_task_id)
+        if not source_task:
+            log.warning(
+                "Assign jira requested for missing source task: %s", source_task_id
+            )
+            return {"error": "Task not found"}
+        if source_task.task_mode == "jira":
+            log.warning(
+                "Assign jira rejected for jira-mode task: source_task=%s",
+                source_task_id,
+            )
+            return {"error": "Cannot assign Jira from a jira-mode task"}
+
+        log.info(
+            "Assign jira requested: source_task=%s status=%s priority=%s title=%s existing_key=%s",
+            source_task.id,
+            source_task.status.value,
+            source_task.priority.value,
+            source_task.title,
+            source_task.jira_issue_key or "-",
+        )
+
+        if source_task.status == TaskStatus.JIRA_ASSIGNING:
+            log.warning(
+                "Assign jira rejected for already-running task: source_task=%s",
+                source_task.id,
+            )
+            return {"error": "Jira assignment already in progress for this task"}
+
+        source_task.jira_status = "pending"
+        source_task.jira_error = ""
+        source_task.updated_at = time.time()
+        self.db.save_task(source_task)
+        dispatched = self._dispatch_jira_task(source_task.id)
+        log.info(
+            "Assign jira dispatched in-place: source_task=%s dispatched=%s",
+            source_task.id,
+            dispatched,
+        )
+        if not dispatched:
+            return {"error": "Failed to dispatch Jira assignment"}
+        return {"ok": True, "task": source_task.to_dict()}
+
+    def _dispatch_jira_task(self, task_id: str) -> bool:
+        with self._lock:
+            if task_id in self._futures:
+                log.warning("Jira task already running: %s", task_id)
+                return False
+            max_p = self.config["orchestrator"]["max_parallel_tasks"]
+            if len(self._futures) >= max_p:
+                log.warning("Max parallel tasks reached for jira dispatch (%d)", max_p)
+                return False
+            future = self._pool.submit(self._jira_task_pipeline, task_id)
+            self._futures[task_id] = future
+            log.info("Dispatched jira task: jira_task=%s", task_id)
+            return True
+
+    def _jira_task_pipeline(self, task_id: str):
+        task = self.db.get_task(task_id)
+        if not task:
+            log.error("Jira task not found: %s", task_id)
+            return
+
+        try:
+            jira = self._get_jira_config()
+            if not jira["url"]:
+                raise RuntimeError("Jira config missing url")
+            if not jira["token"]:
+                raise RuntimeError("Jira config missing token")
+            if not jira["project_key"]:
+                raise RuntimeError("Jira config missing project_key")
+
+            log.info(
+                "Starting jira task pipeline: jira_task=%s source_task=%s current_status=%s project=%s",
+                task.id,
+                task.jira_source_task_id or "-",
+                task.status.value,
+                jira["project_key"],
+            )
+
+            task.status = TaskStatus.JIRA_ASSIGNING
+            task.started_at = task.started_at or time.time()
+            task.updated_at = time.time()
+            task.jira_status = "assigning"
+            task.jira_error = ""
+            task.code_output = ""
+            task.review_output = ""
+            task.jira_agent_output = ""
+            task.jira_payload_preview = ""
+            self.db.save_task(task)
+
+            agent_run, agent_text = self._run_jira_agent(task)
+            self.db.save_agent_run(agent_run)
+            task.jira_agent_output = agent_text
+            if agent_run.session_id:
+                task.session_ids.setdefault("coder", []).append(agent_run.session_id)
+            task.updated_at = time.time()
+            self.db.save_task(task)
+            log.info(
+                "Stored jira agent output: jira_task=%s session=%s output_len=%d",
+                task.id,
+                agent_run.session_id or "-",
+                len(agent_text),
+            )
+
+            result = self._parse_jira_agent_result(task, agent_text)
+            key = str(result.get("key", "")).strip()
+            issue_url = self._build_jira_browse_url(jira["url"], key)
+
+            task.jira_issue_key = key
+            task.jira_issue_url = issue_url
+            task.jira_status = "created"
+            task.review_pass = True
+            task.reviewer_results = []
+            task.status = TaskStatus.COMPLETED
+            task.completed_at = time.time()
+            task.updated_at = time.time()
+            self.db.save_task(task)
+
+            if task.task_mode == "jira" and task.jira_source_task_id:
+                source_task = self.db.get_task(task.jira_source_task_id)
+                if source_task:
+                    source_task.jira_issue_key = key
+                    source_task.jira_issue_url = issue_url
+                    source_task.jira_status = "created"
+                    source_task.jira_error = ""
+                    source_task.updated_at = time.time()
+                    self.db.save_task(source_task)
+                    log.info(
+                        "Synced jira result back to source task: source_task=%s jira_task=%s key=%s",
+                        source_task.id,
+                        task.id,
+                        key,
+                    )
+                else:
+                    log.warning(
+                        "Source task missing during jira success sync: source_task=%s jira_task=%s key=%s",
+                        task.jira_source_task_id,
+                        task.id,
+                        key,
+                    )
+
+            self._update_parent_status(task.id)
+            log.info(
+                "Jira task completed: jira_task=%s source_task=%s key=%s url=%s",
+                task.id,
+                task.jira_source_task_id or "-",
+                key or "-",
+                issue_url or "-",
+            )
+        except Exception as e:
+            log.error(
+                "Jira task failed [%s]: %s\n%s", task_id, e, traceback.format_exc()
+            )
+            task = self.db.get_task(task_id)
+            if task:
+                task.status = TaskStatus.FAILED
+                task.error = str(e)
+                task.jira_status = "failed"
+                task.jira_error = str(e)
+                task.updated_at = time.time()
+                self.db.save_task(task)
+
+                if task.task_mode == "jira" and task.jira_source_task_id:
+                    source_task = self.db.get_task(task.jira_source_task_id)
+                    if source_task:
+                        source_task.jira_status = "failed"
+                        source_task.jira_error = str(e)
+                        source_task.updated_at = time.time()
+                        self.db.save_task(source_task)
+                        log.info(
+                            "Synced jira failure back to source task: source_task=%s jira_task=%s error=%s",
+                            source_task.id,
+                            task.id,
+                            str(e),
+                        )
+                    else:
+                        log.warning(
+                            "Source task missing during jira failure sync: source_task=%s jira_task=%s error=%s",
+                            task.jira_source_task_id,
+                            task.id,
+                            str(e),
+                        )
+
+                self._update_parent_status(task_id)
+        finally:
+            with self._lock:
+                self._futures.pop(task_id, None)
 
     def _save_model_config(self):
         """Write model config changes back to config.yaml preserving all comments/formatting.
@@ -436,7 +846,9 @@ class Orchestrator:
             log.warning("Could not persist model config to %s: %s", config_path, e)
 
     @staticmethod
-    def _patch_yaml_lines(lines: list, oc: dict, explore: Optional[dict] = None) -> list:
+    def _patch_yaml_lines(
+        lines: list, oc: dict, explore: Optional[dict] = None
+    ) -> list:
         """Return a copy of lines with opencode model values patched in-place."""
         import re as _re
 
@@ -448,21 +860,21 @@ class Orchestrator:
             stripped = line.rstrip()
 
             # ── planner_model ──────────────────────────────────────────
-            m = _re.match(r'^(\s*planner_model\s*:\s*)(.*)$', stripped)
+            m = _re.match(r"^(\s*planner_model\s*:\s*)(.*)$", stripped)
             if m and "planner_model" in oc:
                 result[i] = m.group(1) + oc["planner_model"] + "\n"
                 i += 1
                 continue
 
             # ── coder_model_default ────────────────────────────────────
-            m = _re.match(r'^(\s*coder_model_default\s*:\s*)(.*)$', stripped)
+            m = _re.match(r"^(\s*coder_model_default\s*:\s*)(.*)$", stripped)
             if m and "coder_model_default" in oc:
                 result[i] = m.group(1) + oc["coder_model_default"] + "\n"
                 i += 1
                 continue
 
             # ── coder_model_by_complexity (block) ──────────────────────
-            m = _re.match(r'^(\s*coder_model_by_complexity\s*:)', stripped)
+            m = _re.match(r"^(\s*coder_model_by_complexity\s*:)", stripped)
             if m and "coder_model_by_complexity" in oc:
                 indent = len(line) - len(line.lstrip())
                 # collect block: next lines with greater indentation
@@ -483,17 +895,21 @@ class Orchestrator:
                 # update existing level lines, keep comments/blanks
                 for j in range(i + 1, block_end):
                     orig = result[j]
-                    cm = _re.match(r'^(\s*)([a-zA-Z_]+)(\s*:\s*)(.*)$', orig.rstrip())
+                    cm = _re.match(r"^(\s*)([a-zA-Z_]+)(\s*:\s*)(.*)$", orig.rstrip())
                     if cm and cm.group(2) in cmap:
                         new_block.append(
-                            cm.group(1) + cm.group(2) + cm.group(3) + cmap[cm.group(2)] + "\n"
+                            cm.group(1)
+                            + cm.group(2)
+                            + cm.group(3)
+                            + cmap[cm.group(2)]
+                            + "\n"
                         )
                     else:
                         new_block.append(orig)
                 # add any new levels not present in original file
                 existing_levels = set()
                 for j in range(i + 1, block_end):
-                    cm = _re.match(r'^\s*([a-zA-Z_]+)\s*:', result[j].rstrip())
+                    cm = _re.match(r"^\s*([a-zA-Z_]+)\s*:", result[j].rstrip())
                     if cm:
                         existing_levels.add(cm.group(1))
                 for level, model in cmap.items():
@@ -504,7 +920,7 @@ class Orchestrator:
                 continue
 
             # ── reviewer_models (list block) ───────────────────────────
-            m = _re.match(r'^(\s*reviewer_models\s*:)', stripped)
+            m = _re.match(r"^(\s*reviewer_models\s*:)", stripped)
             if m and "reviewer_models" in oc:
                 indent = len(line) - len(line.lstrip())
                 block_end = i + 1
@@ -526,14 +942,14 @@ class Orchestrator:
                 continue
 
             # ── explorer_model ─────────────────────────────────────────
-            m = _re.match(r'^(\s*explorer_model\s*:\s*)(.*)$', stripped)
+            m = _re.match(r"^(\s*explorer_model\s*:\s*)(.*)$", stripped)
             if m and "explorer_model" in explore:
                 result[i] = m.group(1) + explore["explorer_model"] + "\n"
                 i += 1
                 continue
 
             # ── map_model ──────────────────────────────────────────────
-            m = _re.match(r'^(\s*map_model\s*:\s*)(.*)$', stripped)
+            m = _re.match(r"^(\s*map_model\s*:\s*)(.*)$", stripped)
             if m and "map_model" in explore:
                 result[i] = m.group(1) + explore["map_model"] + "\n"
                 i += 1
@@ -559,20 +975,34 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED,
-                                TaskStatus.REVIEW_FAILED, TaskStatus.CANCELLED,
-                                TaskStatus.NEEDS_ARBITRATION):
-            return {"error": f"Cannot clean task in '{task.status.value}' state — it may still be running"}
+        if task.status not in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.REVIEW_FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.NEEDS_ARBITRATION,
+        ):
+            return {
+                "error": f"Cannot clean task in '{task.status.value}' state — it may still be running"
+            }
         if not task.branch_name and not task.worktree_path:
             return {"error": "Task has no branch/worktree to clean"}
         removed_branch = task.branch_name
         try:
             if task.branch_name:
-                self.worktree_mgr.remove_worktree(task.branch_name, worktree_path=task.worktree_path)
-                log.info("Cleaned worktree for task [%s]: %s", task_id, task.branch_name)
+                self.worktree_mgr.remove_worktree(
+                    task.branch_name, worktree_path=task.worktree_path
+                )
+                log.info(
+                    "Cleaned worktree for task [%s]: %s", task_id, task.branch_name
+                )
             else:
                 self.worktree_mgr.remove_worktree_path_only(task.worktree_path)
-                log.info("Cleaned worktree(path-only) for task [%s]: %s", task_id, task.worktree_path)
+                log.info(
+                    "Cleaned worktree(path-only) for task [%s]: %s",
+                    task_id,
+                    task.worktree_path,
+                )
         except Exception as e:
             log.error("clean_task: remove_worktree failed for [%s]: %s", task_id, e)
             return {"error": f"Failed to remove worktree: {e}"}
@@ -588,8 +1018,11 @@ class Orchestrator:
                 if "error" in child_result:
                     child_errors.append(f"[{child.id[:8]}]: {child_result['error']}")
         if child_errors:
-            return {"cleaned": True, "branch": removed_branch,
-                    "warnings": f"Parent cleaned but some children failed: {'; '.join(child_errors)}"}
+            return {
+                "cleaned": True,
+                "branch": removed_branch,
+                "warnings": f"Parent cleaned but some children failed: {'; '.join(child_errors)}",
+            }
         return {"cleaned": True, "branch": removed_branch}
 
     def cancel_task(self, task_id: str) -> dict:
@@ -606,14 +1039,24 @@ class Orchestrator:
             # Clean up worktree if exists
             if task.branch_name:
                 try:
-                    self.worktree_mgr.remove_worktree(task.branch_name, worktree_path=task.worktree_path)
-                    log.info("Removed worktree for cancelled task [%s]: %s", task_id, task.branch_name)
+                    self.worktree_mgr.remove_worktree(
+                        task.branch_name, worktree_path=task.worktree_path
+                    )
+                    log.info(
+                        "Removed worktree for cancelled task [%s]: %s",
+                        task_id,
+                        task.branch_name,
+                    )
                     task.worktree_path = ""
                     task.branch_name = ""
                     task.updated_at = time.time()
                     self.db.save_task(task)
                 except Exception as e:
-                    log.warning("Failed to remove worktree for %s: %s — user can clean manually", task_id, e)
+                    log.warning(
+                        "Failed to remove worktree for %s: %s — user can clean manually",
+                        task_id,
+                        e,
+                    )
             # Clean dependency tracking maps
             self.dep_tracker.cleanup(task_id)
             # Revert any TODO item linked to this task back to analyzed
@@ -624,7 +1067,11 @@ class Orchestrator:
                     item.task_id = ""
                     item.updated_at = time.time()
                     self.db.save_todo_item(item)
-                    log.info("Auto-reverted todo [%s] after cancelling task [%s]", item.id, task_id)
+                    log.info(
+                        "Auto-reverted todo [%s] after cancelling task [%s]",
+                        item.id,
+                        task_id,
+                    )
             log.info("Cancelled task: [%s]", task_id)
             self._update_parent_status(task_id)
         # Always cascade cancel to non-terminal child tasks (even if this
@@ -633,8 +1080,11 @@ class Orchestrator:
             if child.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
                 child_result = self.cancel_task(child.id)
                 if "error" in child_result:
-                    log.warning("Failed to cascade cancel to child [%s]: %s",
-                                child.id, child_result["error"])
+                    log.warning(
+                        "Failed to cascade cancel to child [%s]: %s",
+                        child.id,
+                        child_result["error"],
+                    )
         return {"cancelled": True}
 
     def revise_task(self, task_id: str, feedback: str) -> dict:
@@ -647,9 +1097,15 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED,
-                                TaskStatus.REVIEW_FAILED, TaskStatus.NEEDS_ARBITRATION):
+        if task.status not in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.REVIEW_FAILED,
+            TaskStatus.NEEDS_ARBITRATION,
+        ):
             return {"error": f"Cannot revise task in {task.status.value} state"}
+        if task.task_mode == "jira":
+            return {"error": "Revise is not supported for jira-mode tasks"}
         if not task.worktree_path:
             return {"error": "Task has no worktree (was it split into sub-tasks?)"}
 
@@ -680,8 +1136,12 @@ class Orchestrator:
             self._dispatch_review_only(task_id)
         else:
             self._dispatch_revise(task_id)
-        log.info("Revise task [%s] (mode=%s) with manual feedback (%d chars)",
-                 task_id, task.task_mode, len(feedback))
+        log.info(
+            "Revise task [%s] (mode=%s) with manual feedback (%d chars)",
+            task_id,
+            task.task_mode,
+            len(feedback),
+        )
         log.debug("Task [%s] revised with feedback: %s", task_id, feedback)
         return {"ok": True, "task_id": task_id}
 
@@ -734,7 +1194,9 @@ class Orchestrator:
         self.db.save_task(task)
 
         if not self._dispatch_resume(task_id, resume_message):
-            return {"error": "Task could not be resumed right now (already running or at parallel limit)"}
+            return {
+                "error": "Task could not be resumed right now (already running or at parallel limit)"
+            }
 
         log.info(
             "Resume task [%s] using coder session=%s message=%r",
@@ -748,8 +1210,9 @@ class Orchestrator:
             "session_id": coder_session_id,
         }
 
-    def resolve_arbitration(self, task_id: str, action: str,
-                            feedback: str = "") -> dict:
+    def resolve_arbitration(
+        self, task_id: str, action: str, feedback: str = ""
+    ) -> dict:
         """Resolve a NEEDS_ARBITRATION task via human decision.
 
         *action* must be one of:
@@ -763,7 +1226,9 @@ class Orchestrator:
         if not task:
             return {"error": "Task not found"}
         if task.status != TaskStatus.NEEDS_ARBITRATION:
-            return {"error": f"Task is not awaiting arbitration (status={task.status.value})"}
+            return {
+                "error": f"Task is not awaiting arbitration (status={task.status.value})"
+            }
 
         if action == "approve":
             task.status = TaskStatus.COMPLETED
@@ -791,7 +1256,9 @@ class Orchestrator:
             return {"ok": True, "action": "reject", "task_id": task_id}
 
         else:
-            return {"error": f"Unknown action '{action}'; must be approve/revise/reject"}
+            return {
+                "error": f"Unknown action '{action}'; must be approve/revise/reject"
+            }
 
     def _dispatch_revise(self, task_id: str) -> bool:
         """Submit a revise-task for execution (skips planning, reuses worktree)."""
@@ -843,8 +1310,12 @@ class Orchestrator:
         try:
             worktree_path = task.worktree_path
             coder = self._coder_by_complexity.get(task.complexity, self._default_coder)
-            log.info("Revise [%s] using coder model=%s, worktree=%s",
-                     task.id, coder.model, worktree_path)
+            log.info(
+                "Revise [%s] using coder model=%s, worktree=%s",
+                task.id,
+                coder.model,
+                worktree_path,
+            )
 
             # Recover the last coder session id so the coder retains full context
             coder_session_id = self._latest_coder_session_id(task)
@@ -875,7 +1346,8 @@ class Orchestrator:
                     )
                 else:
                     code_run, code_text = coder.retry_with_feedback(
-                        task, worktree_path,
+                        task,
+                        worktree_path,
                         review_feedback=coder_feedback,
                         session_id=coder_session_id,
                     )
@@ -904,27 +1376,39 @@ class Orchestrator:
                 all_passed = True
                 for reviewer in self.reviewers:
                     review_run, passed, review_text = reviewer.review_changes(
-                        task, worktree_path,
+                        task,
+                        worktree_path,
                         revision_context=user_feedback,
                         coder_response=code_text,
                     )
                     self.db.save_agent_run(review_run)
-                    reviewer_results.append({
-                        "model": reviewer.model,
-                        "passed": passed,
-                        "output": review_text,
-                    })
+                    reviewer_results.append(
+                        {
+                            "model": reviewer.model,
+                            "passed": passed,
+                            "output": review_text,
+                        }
+                    )
                     if review_run.session_id:
-                        task.session_ids.setdefault("reviewer", []).append(review_run.session_id)
-                    log.info("Revise [%s] reviewer(%s) passed=%s",
-                             task.id, reviewer.model, passed)
+                        task.session_ids.setdefault("reviewer", []).append(
+                            review_run.session_id
+                        )
+                    log.info(
+                        "Revise [%s] reviewer(%s) passed=%s",
+                        task.id,
+                        reviewer.model,
+                        passed,
+                    )
                     if not passed:
                         all_passed = False
                         rejection_outputs.append(
                             f"=== Reviewer: {reviewer.model} | REQUEST_CHANGES ===\n"
                             + review_text
                         )
-                        log.info("Revise [%s] short-circuiting after first rejection", task.id)
+                        log.info(
+                            "Revise [%s] short-circuiting after first rejection",
+                            task.id,
+                        )
                         break
 
                 if all_passed:
@@ -950,8 +1434,12 @@ class Orchestrator:
                     break
                 else:
                     if attempt < task.max_retries:
-                        log.info("Revise [%s] review failed, retrying (%d/%d)",
-                                 task.id, attempt + 1, task.max_retries)
+                        log.info(
+                            "Revise [%s] review failed, retrying (%d/%d)",
+                            task.id,
+                            attempt + 1,
+                            task.max_retries,
+                        )
                         task.status = TaskStatus.REVIEW_FAILED
                         task.updated_at = time.time()
                         self.db.save_task(task)
@@ -965,7 +1453,8 @@ class Orchestrator:
                         self.db.save_task(task)
                         log.warning(
                             "Revise [%s] needs arbitration: review failed %d times",
-                            task.id, task.max_retries + 1,
+                            task.id,
+                            task.max_retries + 1,
                         )
 
         except Exception as e:
@@ -988,8 +1477,12 @@ class Orchestrator:
         for t in tasks:
             s = t.status.value
             status_counts[s] = status_counts.get(s, 0) + 1
-        active = [t.to_dict() for t in tasks
-                  if t.status in (TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.REVIEWING)]
+        active = [
+            t.to_dict()
+            for t in tasks
+            if t.status
+            in (TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.REVIEWING)
+        ]
         return {
             "running": self.running,
             "total_tasks": len(tasks),
@@ -998,11 +1491,16 @@ class Orchestrator:
             "active_futures": len(self._futures),
         }
 
-    def submit_task(self, title: str, description: str,
-                    priority: str = "medium",
-                    file_path: str = "", line_number: int = 0,
-                    parent_id: str = "",
-                    copy_files: Optional[list] = None) -> Task:
+    def submit_task(
+        self,
+        title: str,
+        description: str,
+        priority: str = "medium",
+        file_path: str = "",
+        line_number: int = 0,
+        parent_id: str = "",
+        copy_files: Optional[list] = None,
+    ) -> Task:
         """Create a pending task that the planner will analyze+split during execution."""
         max_retries = int(self.config.get("orchestrator", {}).get("max_retries", 4))
         task = Task(
@@ -1021,9 +1519,13 @@ class Orchestrator:
         self.dispatch_task(task.id)
         return task
 
-    def submit_review_task(self, title: str, review_input: str,
-                           priority: str = "medium",
-                           copy_files: Optional[list] = None) -> Task:
+    def submit_review_task(
+        self,
+        title: str,
+        review_input: str,
+        priority: str = "medium",
+        copy_files: Optional[list] = None,
+    ) -> Task:
         """Create a review-only task: runs reviewers on user-supplied material."""
         task = Task(
             title=title,
@@ -1072,9 +1574,15 @@ class Orchestrator:
             # Create a worktree if not already present (revise reuses existing)
             if not task.worktree_path:
                 slug = re.sub(r"[^a-z0-9]+", "-", task.title.lower()).strip("-")[:40]
-                branch_name = f"agent/review-{task.id[:8]}-{slug}" if slug else f"agent/review-{task.id[:8]}"
+                branch_name = (
+                    f"agent/review-{task.id[:8]}-{slug}"
+                    if slug
+                    else f"agent/review-{task.id[:8]}"
+                )
                 hooks = self.config.get("repo", {}).get("worktree_hooks", [])
-                worktree_path = self.worktree_mgr.create_worktree(branch_name, hooks=hooks)
+                worktree_path = self.worktree_mgr.create_worktree(
+                    branch_name, hooks=hooks
+                )
                 task.branch_name = branch_name
                 task.worktree_path = worktree_path
                 task.updated_at = time.time()
@@ -1098,19 +1606,28 @@ class Orchestrator:
                     return
 
                 review_run, passed, review_text = reviewer.review_patch(
-                    task, worktree_path,
+                    task,
+                    worktree_path,
                     revision_context=revision_context,
                 )
                 self.db.save_agent_run(review_run)
-                reviewer_results.append({
-                    "model": reviewer.model,
-                    "passed": passed,
-                    "output": review_text,
-                })
+                reviewer_results.append(
+                    {
+                        "model": reviewer.model,
+                        "passed": passed,
+                        "output": review_text,
+                    }
+                )
                 if review_run.session_id:
-                    task.session_ids.setdefault("reviewer", []).append(review_run.session_id)
-                log.info("Review-only [%s] reviewer(%s) passed=%s",
-                         task.id, reviewer.model, passed)
+                    task.session_ids.setdefault("reviewer", []).append(
+                        review_run.session_id
+                    )
+                log.info(
+                    "Review-only [%s] reviewer(%s) passed=%s",
+                    task.id,
+                    reviewer.model,
+                    passed,
+                )
 
             all_passed = all(r["passed"] for r in reviewer_results)
             task.reviewer_results = reviewer_results
@@ -1129,7 +1646,9 @@ class Orchestrator:
             self._cleanup_review_worktree(task)
 
         except Exception as e:
-            log.error("Review-only failed [%s]: %s\n%s", task_id, e, traceback.format_exc())
+            log.error(
+                "Review-only failed [%s]: %s\n%s", task_id, e, traceback.format_exc()
+            )
             task = self.db.get_task(task_id)
             if task:
                 task.status = TaskStatus.FAILED
@@ -1147,7 +1666,9 @@ class Orchestrator:
             return
         try:
             self.worktree_mgr.remove_worktree(task.branch_name)
-            log.info("Removed review worktree for task [%s]: %s", task.id, task.branch_name)
+            log.info(
+                "Removed review worktree for task [%s]: %s", task.id, task.branch_name
+            )
             task.branch_name = ""
         except Exception as e:
             log.warning("Could not remove review worktree [%s]: %s", task.id, e)
@@ -1174,13 +1695,15 @@ class Orchestrator:
         existing_keys = {(t.file_path, t.line_number) for t in existing}
 
         import re as _re
+
         new_items = []
         for item in raw:
             # Skip malformed grep output (empty path or line=0)
             if not item["file"].strip() or item["line"] == 0:
                 log.warning(
                     "scan_todos_raw: skipping malformed grep result file=%r line=%d",
-                    item["file"], item["line"],
+                    item["file"],
+                    item["line"],
                 )
                 continue
             key = (item["file"], item["line"])
@@ -1225,7 +1748,8 @@ class Orchestrator:
         if item.status == TodoItemStatus.DISPATCHED:
             log.warning(
                 "analyze_todo_item: todo [%s] is already dispatched as task [%s]",
-                todo_id, item.task_id,
+                todo_id,
+                item.task_id,
             )
             return {"error": "already_dispatched", "status": 409}
 
@@ -1236,18 +1760,21 @@ class Orchestrator:
         self.db.save_todo_item(item)
         log.info(
             "analyze_todo_item: starting analysis for todo [%s] (prev_status=%s)",
-            todo_id, prev_status.value,
+            todo_id,
+            prev_status.value,
         )
 
         repo_path = self.config["repo"]["path"]
         try:
             run, feasibility, difficulty, note = self._analyze_todo_with_retry(
-                item, repo_path,
+                item,
+                repo_path,
             )
         except Exception as e:
             log.error(
                 "analyze_todo_item: analysis failed for todo [%s]: %s",
-                todo_id, traceback.format_exc(),
+                todo_id,
+                traceback.format_exc(),
             )
             item.status = prev_status
             item.updated_at = time.time()
@@ -1264,7 +1791,10 @@ class Orchestrator:
         self.db.save_todo_item(item)
         log.info(
             "analyze_todo_item: completed todo [%s] feasibility=%.1f difficulty=%.1f note=%r",
-            todo_id, feasibility, difficulty, note[:80],
+            todo_id,
+            feasibility,
+            difficulty,
+            note[:80],
         )
         return item.to_dict()
 
@@ -1312,8 +1842,15 @@ class Orchestrator:
             task.published_at = time.time()
             task.updated_at = time.time()
             self.db.save_task(task)
-            log.info("Published task [%s] branch %s to %s", task_id, task.branch_name, remote)
-        return {"success": ok, "message": msg, "branch": task.branch_name, "remote": remote}
+            log.info(
+                "Published task [%s] branch %s to %s", task_id, task.branch_name, remote
+            )
+        return {
+            "success": ok,
+            "message": msg,
+            "branch": task.branch_name,
+            "remote": remote,
+        }
 
     def revert_todo_items(self, todo_ids: list) -> int:
         """Revert dispatched TodoItems back to ANALYZED status.
@@ -1365,7 +1902,8 @@ class Orchestrator:
         except ModelOutputError as first_err:
             log.warning(
                 "Task [%s] planner output unparseable, retrying once: %s",
-                task.id, first_err,
+                task.id,
+                first_err,
             )
             try:
                 return self.planner.analyze_and_split(
@@ -1390,7 +1928,8 @@ class Orchestrator:
         except ModelOutputError as first_err:
             log.warning(
                 "Todo [%s] analyzer output unparseable, retrying once: %s",
-                item.id, first_err,
+                item.id,
+                first_err,
             )
             try:
                 return self.planner.analyze_todo(item, repo_path)
@@ -1445,6 +1984,9 @@ class Orchestrator:
         if not task:
             log.error("Task not found: %s", task_id)
             return
+        if task.task_mode == "jira":
+            self._jira_task_pipeline(task_id)
+            return
 
         repo_path = self.config["repo"]["path"]
         try:
@@ -1454,14 +1996,19 @@ class Orchestrator:
             task.updated_at = time.time()
             self.db.save_task(task)
 
-            plan_run, is_split, plan_text, sub_tasks, complexity = \
+            plan_run, is_split, plan_text, sub_tasks, complexity = (
                 self._plan_with_retry(task, repo_path)
+            )
             self.db.save_agent_run(plan_run)
             task.complexity = complexity
             if plan_run.session_id:
                 task.session_ids.setdefault("planner", []).append(plan_run.session_id)
-                log.info("Task [%s] planner session: %s (complexity=%s)",
-                         task.id, plan_run.session_id, complexity)
+                log.info(
+                    "Task [%s] planner session: %s (complexity=%s)",
+                    task.id,
+                    plan_run.session_id,
+                    complexity,
+                )
 
             if is_split and task.source == TaskSource.PLANNER:
                 # Sub-tasks created by the planner must not be split further —
@@ -1472,14 +2019,18 @@ class Orchestrator:
                     task.id,
                 )
                 is_split = False
-                plan_text = sub_tasks[0].get("description", plan_text) if sub_tasks else plan_text
+                plan_text = (
+                    sub_tasks[0].get("description", plan_text)
+                    if sub_tasks
+                    else plan_text
+                )
 
             if is_split:
                 # Planner decided to decompose — create sub-tasks and mark parent done
                 log.info("Task [%s] split into %d sub-tasks", task.id, len(sub_tasks))
                 task.plan_output = (
                     f"Split into {len(sub_tasks)} sub-tasks:\n"
-                    + "\n".join(f"- {st.get('title','')}" for st in sub_tasks)
+                    + "\n".join(f"- {st.get('title', '')}" for st in sub_tasks)
                 )
                 # Pass 1: create all child Task objects (IDs assigned at creation)
                 children: List[Task] = []
@@ -1490,19 +2041,25 @@ class Orchestrator:
                         priority=TaskPriority(st.get("priority", "medium")),
                         source=TaskSource.PLANNER,
                         parent_id=task.id,
-                        max_retries=int(self.config.get("orchestrator", {}).get("max_retries", 4)),
+                        max_retries=int(
+                            self.config.get("orchestrator", {}).get("max_retries", 4)
+                        ),
                     )
                     children.append(child)
                 # Pass 2: resolve depends_on indices → real IDs, persist
                 # (raises ModelOutputError on invalid entries; already retried above)
                 child_id_list = [c.id for c in children]
-                resolved_deps = self.dep_tracker.resolve_indices(child_id_list, sub_tasks)
+                resolved_deps = self.dep_tracker.resolve_indices(
+                    child_id_list, sub_tasks
+                )
                 for child, resolved in zip(children, resolved_deps):
                     child.depends_on = resolved
                     self.db.save_task(child)
                     log.info(
                         "Created sub-task [%s] '%s' depends_on=%s",
-                        child.id, child.title, resolved,
+                        child.id,
+                        child.title,
+                        resolved,
                     )
                 self.dep_tracker.register(task.id, children)
                 # Pass 3: dispatch unblocked sub-tasks
@@ -1512,12 +2069,18 @@ class Orchestrator:
                     else:
                         log.info(
                             "Sub-task [%s] '%s' blocked by deps=%s, waiting",
-                            child.id, child.title, child.depends_on,
+                            child.id,
+                            child.title,
+                            child.depends_on,
                         )
-                task.status = TaskStatus.PLANNING  # will be updated when sub-tasks finish
+                task.status = (
+                    TaskStatus.PLANNING
+                )  # will be updated when sub-tasks finish
                 task.updated_at = time.time()
                 self.db.save_task(task)
-                log.info("Task [%s] split into sub-tasks, waiting for children", task.id)
+                log.info(
+                    "Task [%s] split into sub-tasks, waiting for children", task.id
+                )
                 return
 
             task.plan_output = plan_text
@@ -1547,7 +2110,8 @@ class Orchestrator:
                         dep_branches.append(dep_task.branch_name)
                 if dep_branches:
                     merge_summaries = self.worktree_mgr.merge_dependency_branches(
-                        worktree_path, dep_branches,
+                        worktree_path,
+                        dep_branches,
                     )
                     if merge_summaries:
                         dep_context = (
@@ -1559,13 +2123,19 @@ class Orchestrator:
                         )
                         log.info(
                             "Task [%s] merged %d dep branch(es): %s",
-                            task.id, len(dep_branches), dep_branches,
+                            task.id,
+                            len(dep_branches),
+                            dep_branches,
                         )
 
             # Select coder model based on complexity assessed by planner
             coder = self._coder_by_complexity.get(task.complexity, self._default_coder)
-            log.info("Task [%s] using coder model=%s (complexity=%s)",
-                     task.id, coder.model, task.complexity)
+            log.info(
+                "Task [%s] using coder model=%s (complexity=%s)",
+                task.id,
+                coder.model,
+                task.complexity,
+            )
 
             # ── Phase 3: Code → Review loop ──
             # Tracks the coder's opencode session so retries continue in the
@@ -1590,13 +2160,16 @@ class Orchestrator:
                 if attempt == 0 or not coder_session_id:
                     # First attempt or no session: send the full prompt
                     code_run, code_text = coder.implement_task(
-                        task, worktree_path, session_id=coder_session_id,
+                        task,
+                        worktree_path,
+                        session_id=coder_session_id,
                         dep_context=dep_context,
                     )
                 else:
                     # Retry in continued session: send only review feedback
                     code_run, code_text = coder.retry_with_feedback(
-                        task, worktree_path,
+                        task,
+                        worktree_path,
                         review_feedback=task.review_output,
                         session_id=coder_session_id,
                     )
@@ -1606,8 +2179,12 @@ class Orchestrator:
                     # Keep the same session id for all retry rounds
                     coder_session_id = code_run.session_id
                     task.session_ids.setdefault("coder", []).append(code_run.session_id)
-                    log.info("Task [%s] coder session: %s (attempt %d)",
-                             task.id, code_run.session_id, attempt + 1)
+                    log.info(
+                        "Task [%s] coder session: %s (attempt %d)",
+                        task.id,
+                        code_run.session_id,
+                        attempt + 1,
+                    )
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
@@ -1623,7 +2200,8 @@ class Orchestrator:
                 # before stop) — not the entire session transcript.
                 coder_last_response = (
                     self.client.extract_last_text_block(code_run.output)
-                    if attempt > 0 else ""
+                    if attempt > 0
+                    else ""
                 )
 
                 # ── Multi-Reviewer: short-circuit on first REQUEST_CHANGES ──
@@ -1632,24 +2210,33 @@ class Orchestrator:
                 self.db.save_task(task)
 
                 reviewer_results = []
-                rejection_outputs = []   # only from reviewers that rejected
+                rejection_outputs = []  # only from reviewers that rejected
                 all_passed = True
                 for reviewer in self.reviewers:
                     review_run, passed, review_text = reviewer.review_changes(
-                        task, worktree_path,
+                        task,
+                        worktree_path,
                         prior_rejections="\n\n".join(all_prior_rejections),
                         coder_response=coder_last_response,
                     )
                     self.db.save_agent_run(review_run)
-                    reviewer_results.append({
-                        "model": reviewer.model,
-                        "passed": passed,
-                        "output": review_text,
-                    })
+                    reviewer_results.append(
+                        {
+                            "model": reviewer.model,
+                            "passed": passed,
+                            "output": review_text,
+                        }
+                    )
                     if review_run.session_id:
-                        task.session_ids.setdefault("reviewer", []).append(review_run.session_id)
-                    log.info("Task [%s] reviewer(%s) passed=%s",
-                             task.id, reviewer.model, passed)
+                        task.session_ids.setdefault("reviewer", []).append(
+                            review_run.session_id
+                        )
+                    log.info(
+                        "Task [%s] reviewer(%s) passed=%s",
+                        task.id,
+                        reviewer.model,
+                        passed,
+                    )
                     if not passed:
                         all_passed = False
                         rejection_outputs.append(
@@ -1657,8 +2244,9 @@ class Orchestrator:
                             + review_text
                         )
                         # Short-circuit: don't run remaining reviewers
-                        log.info("Task [%s] short-circuiting after first rejection",
-                                 task.id)
+                        log.info(
+                            "Task [%s] short-circuiting after first rejection", task.id
+                        )
                         break
 
                 # Build review output: rejections only (or single APPROVE line)
@@ -1691,7 +2279,10 @@ class Orchestrator:
                     if attempt < task.max_retries:
                         log.info(
                             "Review failed for [%s], retrying (%d/%d) with session=%s",
-                            task.id, attempt + 1, task.max_retries, coder_session_id,
+                            task.id,
+                            attempt + 1,
+                            task.max_retries,
+                            coder_session_id,
                         )
                         task.status = TaskStatus.REVIEW_FAILED
                         task.updated_at = time.time()
@@ -1706,11 +2297,14 @@ class Orchestrator:
                         self.db.save_task(task)
                         log.warning(
                             "Task [%s] needs arbitration: review failed %d times",
-                            task.id, task.max_retries + 1,
+                            task.id,
+                            task.max_retries + 1,
                         )
 
         except Exception as e:
-            log.error("Task execution failed [%s]: %s\n%s", task_id, e, traceback.format_exc())
+            log.error(
+                "Task execution failed [%s]: %s\n%s", task_id, e, traceback.format_exc()
+            )
             task = self.db.get_task(task_id)
             if task:
                 task.status = TaskStatus.FAILED
@@ -1760,8 +2354,11 @@ class Orchestrator:
             parent.completed_at = time.time()
         parent.updated_at = time.time()
         self.db.save_task(parent)
-        log.info("Parent task [%s] updated to %s based on sub-task results",
-                 parent.id, parent.status.value)
+        log.info(
+            "Parent task [%s] updated to %s based on sub-task results",
+            parent.id,
+            parent.status.value,
+        )
 
     def dispatch_task(self, task_id: str) -> bool:
         """Submit a single task for execution.
@@ -1771,6 +2368,14 @@ class Orchestrator:
         if self.dep_tracker.is_blocked(task_id):
             log.info("Task [%s] blocked by dependencies — not dispatching yet", task_id)
             return False
+        task = self.db.get_task(task_id)
+        if not task:
+            log.warning("Task not found for dispatch: %s", task_id)
+            return False
+        if task.task_mode == "review":
+            return self._dispatch_review_only(task_id)
+        if task.task_mode == "jira":
+            return self._dispatch_jira_task(task_id)
         with self._lock:
             if task_id in self._futures:
                 log.warning("Task already running: %s", task_id)
@@ -1824,6 +2429,7 @@ class Orchestrator:
 
     def _get_explore_categories(self) -> List[str]:
         from agents.prompts import DEFAULT_EXPLORE_CATEGORIES
+
         return self.config.get("explore", {}).get(
             "categories", DEFAULT_EXPLORE_CATEGORIES
         )
@@ -1899,10 +2505,18 @@ class Orchestrator:
         default_state["repo_name"] = self._repo_name()
         default_state["repo_path"] = self.config["repo"]["path"]
         default_state["cancel_requested"] = False
-        default_state["map_review_required"] = bool(default_state.get("map_review_required", False))
-        default_state["map_review_reason"] = str(default_state.get("map_review_reason", ""))
-        default_state["map_review_module_id"] = str(default_state.get("map_review_module_id", ""))
-        default_state["map_review_category"] = str(default_state.get("map_review_category", ""))
+        default_state["map_review_required"] = bool(
+            default_state.get("map_review_required", False)
+        )
+        default_state["map_review_reason"] = str(
+            default_state.get("map_review_reason", "")
+        )
+        default_state["map_review_module_id"] = str(
+            default_state.get("map_review_module_id", "")
+        )
+        default_state["map_review_category"] = str(
+            default_state.get("map_review_category", "")
+        )
         with self._lock:
             self._explore_map_state = default_state
         self._persist_explore_map_state()
@@ -1992,21 +2606,34 @@ class Orchestrator:
                     self._explore_seq = max(self._explore_seq, qid)
 
                 job.setdefault("job_id", uuid.uuid4().hex)
-                job.setdefault("personality_key", self._pick_personality_for_category(job["category"]))
+                job.setdefault(
+                    "personality_key",
+                    self._pick_personality_for_category(job["category"]),
+                )
                 job.setdefault("queued_at", now)
                 job.setdefault("started_at", 0.0)
                 job.setdefault("session_id", "")
                 job.setdefault("focus_point", "")
-                job.setdefault("task_id", f"__explore__:{job['module_id']}:{job['category']}")
+                job.setdefault(
+                    "task_id", f"__explore__:{job['module_id']}:{job['category']}"
+                )
                 job["state"] = "queued"
-                job["resume_with_continue"] = bool(job.get("session_id")) and prev_state == "running"
+                job["resume_with_continue"] = (
+                    bool(job.get("session_id")) and prev_state == "running"
+                )
                 if not job.get("queued_at"):
                     job["queued_at"] = now
                 job["started_at"] = 0.0
 
                 module = self.db.get_explore_module(job["module_id"])
-                if module and module.category_status.get(job["category"]) != ExploreStatus.IN_PROGRESS.value:
-                    module.category_status[job["category"]] = ExploreStatus.IN_PROGRESS.value
+                if (
+                    module
+                    and module.category_status.get(job["category"])
+                    != ExploreStatus.IN_PROGRESS.value
+                ):
+                    module.category_status[job["category"]] = (
+                        ExploreStatus.IN_PROGRESS.value
+                    )
                     module.updated_at = now
                     self.db.save_explore_module(module)
 
@@ -2065,7 +2692,9 @@ class Orchestrator:
         child_parent_ids = {m.parent_id for m in all_modules if m.parent_id}
         return [m for m in all_modules if m.id not in child_parent_ids]
 
-    def _validate_explore_categories(self, categories: Optional[List[str]]) -> tuple[List[str], List[str]]:
+    def _validate_explore_categories(
+        self, categories: Optional[List[str]]
+    ) -> tuple[List[str], List[str]]:
         configured = self._get_explore_categories()
         configured_set = set(configured)
         if not categories:
@@ -2079,7 +2708,9 @@ class Orchestrator:
         self._explore_seq += 1
         return self._explore_seq
 
-    def _set_module_category_status(self, module_id: str, category: str, status: str, note: Optional[str] = None):
+    def _set_module_category_status(
+        self, module_id: str, category: str, status: str, note: Optional[str] = None
+    ):
         module = self.db.get_explore_module(module_id)
         if not module:
             return
@@ -2090,7 +2721,9 @@ class Orchestrator:
         self.db.save_explore_module(module)
 
     @staticmethod
-    def _append_explore_note(existing: str, new_note: str, max_chars: int = 8000) -> str:
+    def _append_explore_note(
+        existing: str, new_note: str, max_chars: int = 8000
+    ) -> str:
         if not existing.strip():
             merged = new_note.strip()
         elif not new_note.strip():
@@ -2138,20 +2771,24 @@ class Orchestrator:
             "Return the full latest module map JSON in the same schema as map initialization."
         )
 
-    def _request_explore_map_review(self, module: ExploreModule, category: str, reason: str):
+    def _request_explore_map_review(
+        self, module: ExploreModule, category: str, reason: str
+    ):
         review_reason = reason.strip() or (
             f"Explorer requested module structure review for {module.name} ({module.path}) in {category}."
         )
         now = time.time()
         with self._lock:
-            self._explore_map_state.update({
-                "status": "review_required",
-                "updated_at": now,
-                "map_review_required": True,
-                "map_review_reason": review_reason,
-                "map_review_module_id": module.id,
-                "map_review_category": category,
-            })
+            self._explore_map_state.update(
+                {
+                    "status": "review_required",
+                    "updated_at": now,
+                    "map_review_required": True,
+                    "map_review_reason": review_reason,
+                    "map_review_module_id": module.id,
+                    "map_review_category": category,
+                }
+            )
         self._persist_explore_map_state()
 
         review_result = self.start_init_explore_map(review_reason=review_reason)
@@ -2171,7 +2808,10 @@ class Orchestrator:
 
     def _dispatch_explore_queue_locked(self) -> List[dict]:
         to_submit: List[dict] = []
-        while self._explore_queue and len(self._explore_running) < self._explore_parallel_limit:
+        while (
+            self._explore_queue
+            and len(self._explore_running) < self._explore_parallel_limit
+        ):
             job = self._explore_queue.pop(0)
             key = self._explore_job_key(job["module_id"], job["category"])
             job["state"] = "running"
@@ -2305,7 +2945,9 @@ class Orchestrator:
             if not module:
                 continue
             if module.category_status.get(category) == ExploreStatus.IN_PROGRESS.value:
-                self._set_module_category_status(module_id, category, ExploreStatus.TODO.value, "")
+                self._set_module_category_status(
+                    module_id, category, ExploreStatus.TODO.value, ""
+                )
 
         reset_stale = 0
         for module in module_map.values():
@@ -2332,7 +2974,9 @@ class Orchestrator:
             "queue": self.get_exploration_queue_state(),
         }
 
-    def _apply_explore_map(self, run: AgentRun, modules_data: List[dict], model: str) -> int:
+    def _apply_explore_map(
+        self, run: AgentRun, modules_data: List[dict], model: str
+    ) -> int:
         agent_run = AgentRun(
             task_id=self._explore_map_task_id,
             agent_type="explorer_map_init",
@@ -2348,7 +2992,9 @@ class Orchestrator:
         self.db.delete_all_explore_modules()
         categories = self._get_explore_categories()
 
-        def _create_modules(items: List[dict], parent_id: str = "", depth: int = 0) -> int:
+        def _create_modules(
+            items: List[dict], parent_id: str = "", depth: int = 0
+        ) -> int:
             created = 0
             for i, item in enumerate(items):
                 mod = ExploreModule(
@@ -2374,41 +3020,47 @@ class Orchestrator:
     def init_explore_map(self) -> dict:
         """Synchronous map-init entrypoint (used by tests)."""
         repo_path = self.config["repo"]["path"]
-        model = self.config.get("explore", {}).get("map_model", self._get_explorer_model())
+        model = self.config.get("explore", {}).get(
+            "map_model", self._get_explorer_model()
+        )
         explorer = ExplorerAgent(model=model, client=self.client)
 
         try:
             run, modules_data = explorer.init_map(repo_path)
             modules_created = self._apply_explore_map(run, modules_data, model)
             with self._lock:
-                self._explore_map_state.update({
-                    "status": "done",
-                    "started_at": time.time() - run.duration_sec,
-                    "finished_at": time.time(),
-                    "updated_at": time.time(),
-                    "session_id": run.session_id,
-                    "model": model,
-                    "output": self._trim_stream_output(run.output),
-                    "error": "",
-                    "cancel_requested": False,
-                    "modules_created": modules_created,
-                    "map_review_required": False,
-                    "map_review_reason": "",
-                    "map_review_module_id": "",
-                    "map_review_category": "",
-                })
+                self._explore_map_state.update(
+                    {
+                        "status": "done",
+                        "started_at": time.time() - run.duration_sec,
+                        "finished_at": time.time(),
+                        "updated_at": time.time(),
+                        "session_id": run.session_id,
+                        "model": model,
+                        "output": self._trim_stream_output(run.output),
+                        "error": "",
+                        "cancel_requested": False,
+                        "modules_created": modules_created,
+                        "map_review_required": False,
+                        "map_review_reason": "",
+                        "map_review_module_id": "",
+                        "map_review_category": "",
+                    }
+                )
             self._persist_explore_map_state()
             log.info("Explore map initialized: %d modules created", modules_created)
             return {"modules_created": modules_created}
         except Exception as e:
             with self._lock:
-                self._explore_map_state.update({
-                    "status": "failed",
-                    "finished_at": time.time(),
-                    "updated_at": time.time(),
-                    "error": str(e),
-                    "cancel_requested": False,
-                })
+                self._explore_map_state.update(
+                    {
+                        "status": "failed",
+                        "finished_at": time.time(),
+                        "updated_at": time.time(),
+                        "error": str(e),
+                        "cancel_requested": False,
+                    }
+                )
             self._persist_explore_map_state()
             log.error("Map init failed: %s", e)
             return {"error": str(e)}
@@ -2422,28 +3074,38 @@ class Orchestrator:
                     "state": dict(self._explore_map_state),
                 }
 
-            model = self.config.get("explore", {}).get("map_model", self._get_explorer_model())
+            model = self.config.get("explore", {}).get(
+                "map_model", self._get_explorer_model()
+            )
             now = time.time()
             review_reason = review_reason.strip()
-            review_message = self._build_map_review_prompt(review_reason) if review_reason else ""
-            review_session_id = str(self._explore_map_state.get("session_id", "")) if review_message else ""
+            review_message = (
+                self._build_map_review_prompt(review_reason) if review_reason else ""
+            )
+            review_session_id = (
+                str(self._explore_map_state.get("session_id", ""))
+                if review_message
+                else ""
+            )
             self._explore_map_cancel_requested = False
-            self._explore_map_state.update({
-                "status": "in_progress",
-                "started_at": now,
-                "finished_at": 0.0,
-                "updated_at": now,
-                "session_id": "",
-                "model": model,
-                "output": "",
-                "error": "",
-                "cancel_requested": False,
-                "modules_created": 0,
-                "map_review_required": bool(review_message),
-                "map_review_reason": review_reason,
-                "map_review_module_id": "",
-                "map_review_category": "",
-            })
+            self._explore_map_state.update(
+                {
+                    "status": "in_progress",
+                    "started_at": now,
+                    "finished_at": 0.0,
+                    "updated_at": now,
+                    "session_id": "",
+                    "model": model,
+                    "output": "",
+                    "error": "",
+                    "cancel_requested": False,
+                    "modules_created": 0,
+                    "map_review_required": bool(review_message),
+                    "map_review_reason": review_reason,
+                    "map_review_module_id": "",
+                    "map_review_category": "",
+                }
+            )
             self._explore_map_future = self._pool.submit(
                 self._run_init_explore_map_job,
                 model,
@@ -2474,7 +3136,10 @@ class Orchestrator:
         if in_progress:
             self.client.kill_task(self._explore_map_task_id)
             self._persist_explore_map_state()
-        return {"cancel_requested": bool(in_progress), "state": self.get_explore_init_state()}
+        return {
+            "cancel_requested": bool(in_progress),
+            "state": self.get_explore_init_state(),
+        }
 
     def _run_init_explore_map_job(
         self,
@@ -2512,20 +3177,22 @@ class Orchestrator:
             now = time.time()
             with self._lock:
                 self._explore_map_cancel_requested = False
-                self._explore_map_state.update({
-                    "status": "done",
-                    "finished_at": now,
-                    "updated_at": now,
-                    "session_id": run.session_id,
-                    "output": self._trim_stream_output(run.output),
-                    "error": "",
-                    "cancel_requested": False,
-                    "modules_created": modules_created,
-                    "map_review_required": False,
-                    "map_review_reason": "",
-                    "map_review_module_id": "",
-                    "map_review_category": "",
-                })
+                self._explore_map_state.update(
+                    {
+                        "status": "done",
+                        "finished_at": now,
+                        "updated_at": now,
+                        "session_id": run.session_id,
+                        "output": self._trim_stream_output(run.output),
+                        "error": "",
+                        "cancel_requested": False,
+                        "modules_created": modules_created,
+                        "map_review_required": False,
+                        "map_review_reason": "",
+                        "map_review_module_id": "",
+                        "map_review_category": "",
+                    }
+                )
             self._persist_explore_map_state()
             log.info("Explore map initialized: %d modules created", modules_created)
         except Exception as e:
@@ -2533,13 +3200,15 @@ class Orchestrator:
             cancelled = self._explore_map_cancel_requested
             with self._lock:
                 self._explore_map_cancel_requested = False
-                self._explore_map_state.update({
-                    "status": "cancelled" if cancelled else "failed",
-                    "finished_at": now,
-                    "updated_at": now,
-                    "error": "" if cancelled else str(e),
-                    "cancel_requested": False,
-                })
+                self._explore_map_state.update(
+                    {
+                        "status": "cancelled" if cancelled else "failed",
+                        "finished_at": now,
+                        "updated_at": now,
+                        "error": "" if cancelled else str(e),
+                        "cancel_requested": False,
+                    }
+                )
             self._persist_explore_map_state()
             if cancelled:
                 log.info("Map init cancelled")
@@ -2661,7 +3330,8 @@ class Orchestrator:
         from agents.prompts import EXPLORER_PERSONALITIES
 
         candidates = [
-            key for key, info in EXPLORER_PERSONALITIES.items()
+            key
+            for key, info in EXPLORER_PERSONALITIES.items()
             if info.get("category") == category
         ]
         if candidates:
@@ -2669,8 +3339,13 @@ class Orchestrator:
         # Fallback: pick any
         return random.choice(list(EXPLORER_PERSONALITIES.keys()))
 
-    def _run_exploration(self, module_id: str, category: str,
-                         personality_key: str, job: Optional[dict] = None):
+    def _run_exploration(
+        self,
+        module_id: str,
+        category: str,
+        personality_key: str,
+        job: Optional[dict] = None,
+    ):
         """Execute a single exploration run (called in thread pool)."""
         from agents.prompts import EXPLORER_PERSONALITIES
 
@@ -2735,7 +3410,9 @@ class Orchestrator:
                     prior_note=prior_note,
                     task_id=task_id,
                     session_id=session_id,
-                    message_override="Continue" if (resume_with_continue and session_id) else None,
+                    message_override="Continue"
+                    if (resume_with_continue and session_id)
+                    else None,
                     on_output=_on_output,
                     should_cancel=lambda: self._is_explore_cancel_requested(key),
                 )
@@ -2752,7 +3429,9 @@ class Orchestrator:
                     module.updated_at = time.time()
                     self.db.save_explore_module(module)
                 self._clear_explore_cancel_flag(key)
-                log.info("Exploration cancelled: module=%s category=%s", module_id, category)
+                log.info(
+                    "Exploration cancelled: module=%s category=%s", module_id, category
+                )
                 return
 
             run_text = run.output if isinstance(run.output, str) else ""
@@ -2862,21 +3541,30 @@ class Orchestrator:
                 "auto_task_severity", "major"
             )
             severity_levels = ["critical", "major", "minor", "info"]
-            threshold_idx = severity_levels.index(auto_severity) if auto_severity in severity_levels else 1
+            threshold_idx = (
+                severity_levels.index(auto_severity)
+                if auto_severity in severity_levels
+                else 1
+            )
             for finding in findings:
                 sev = finding.get("severity", "info")
-                if sev in severity_levels[:threshold_idx + 1]:
+                if sev in severity_levels[: threshold_idx + 1]:
                     self._create_explore_task(module, category, finding)
 
             log.info(
                 "Exploration complete: module=%s category=%s findings=%d",
-                module.name, category, len(findings),
+                module.name,
+                category,
+                len(findings),
             )
 
         except Exception as e:
             log.error(
                 "Exploration failed: module=%s category=%s: %s\n%s",
-                module_id, category, e, traceback.format_exc(),
+                module_id,
+                category,
+                e,
+                traceback.format_exc(),
             )
             # Reset status so it can be retried
             module = self.db.get_explore_module(module_id)
@@ -2888,8 +3576,9 @@ class Orchestrator:
             self._clear_explore_cancel_flag(key)
 
     @staticmethod
-    def _build_explore_task(module_name: str, module_path: str,
-                            category: str, finding: dict) -> "Task":
+    def _build_explore_task(
+        module_name: str, module_path: str, category: str, finding: dict
+    ) -> "Task":
         """Build a Task object from an exploration finding (no DB save)."""
         return Task(
             title=f"[Explore/{category}] {finding['title']}",
@@ -2901,7 +3590,8 @@ class Orchestrator:
                 f"**Suggested fix**: {finding.get('suggested_fix', 'N/A')}"
             ),
             priority=(
-                TaskPriority.HIGH if finding["severity"] == "critical"
+                TaskPriority.HIGH
+                if finding["severity"] == "critical"
                 else TaskPriority.MEDIUM
             ),
             source=TaskSource.EXPLORE,
@@ -2909,12 +3599,9 @@ class Orchestrator:
             line_number=finding.get("line_number", 0),
         )
 
-    def _create_explore_task(self, module: ExploreModule, category: str,
-                             finding: dict):
+    def _create_explore_task(self, module: ExploreModule, category: str, finding: dict):
         """Create and persist a Task from an exploration finding."""
-        task = self._build_explore_task(
-            module.name, module.path, category, finding
-        )
+        task = self._build_explore_task(module.name, module.path, category, finding)
         self.db.save_task(task)
         log.info("Created explore task [%s]: %s", task.id, task.title)
 
@@ -2940,8 +3627,9 @@ class Orchestrator:
         self.db.save_explore_module(module)
         return module.to_dict()
 
-    def add_explore_module(self, name: str, path: str, parent_id: str = "",
-                           description: str = "") -> dict:
+    def add_explore_module(
+        self, name: str, path: str, parent_id: str = "", description: str = ""
+    ) -> dict:
         """Manually add a module to the exploration map."""
         # Determine depth from parent
         depth = 0
@@ -2993,6 +3681,10 @@ class Orchestrator:
             module_name, module_path, explore_run.category, finding
         )
         self.db.save_task(task)
-        log.info("Created task [%s] from explore run [%s] finding #%d",
-                 task.id, run_id, finding_index)
+        log.info(
+            "Created task [%s] from explore run [%s] finding #%d",
+            task.id,
+            run_id,
+            finding_index,
+        )
         return task.to_dict()

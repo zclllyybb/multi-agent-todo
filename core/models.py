@@ -19,6 +19,7 @@ class TaskStatus(str, enum.Enum):
     PENDING = "pending"
     PLANNING = "planning"
     CODING = "coding"
+    JIRA_ASSIGNING = "jira_assigning"
     REVIEWING = "reviewing"
     REVIEW_FAILED = "review_failed"
     NEEDS_ARBITRATION = "needs_arbitration"
@@ -42,9 +43,9 @@ class TaskSource(str, enum.Enum):
 
 class TodoItemStatus(str, enum.Enum):
     PENDING_ANALYSIS = "pending_analysis"
-    ANALYZING = "analyzing"     # analyzer agent is currently running
+    ANALYZING = "analyzing"  # analyzer agent is currently running
     ANALYZED = "analyzed"
-    DISPATCHED = "dispatched"   # sent to planner → became a task
+    DISPATCHED = "dispatched"  # sent to planner → became a task
     DELETED = "deleted"
 
 
@@ -71,7 +72,7 @@ class Task:
     # Agent outputs
     plan_output: str = ""
     code_output: str = ""
-    review_output: str = ""      # concatenated summary of all reviewer outputs
+    review_output: str = ""  # concatenated summary of all reviewer outputs
     review_pass: bool = False
     # Manual feedback submitted by the user via Revise Task
     user_feedback: str = ""
@@ -104,10 +105,18 @@ class Task:
     # Files to copy from main workspace into the worktree (relative to repo root)
     copy_files: List[str] = field(default_factory=list)
 
-    # Task mode: 'develop' (plan→code→review) or 'review' (reviewer-only)
+    # Task mode: 'develop' (plan→code→review), 'review' (reviewer-only), or 'jira'
     task_mode: str = "develop"
     # For review-only tasks: the patch content / URL / description to review
     review_input: str = ""
+    # For jira tasks: created issue metadata / draft summary
+    jira_issue_key: str = ""
+    jira_issue_url: str = ""
+    jira_payload_preview: str = ""
+    jira_source_task_id: str = ""
+    jira_status: str = ""
+    jira_error: str = ""
+    jira_agent_output: str = ""
 
     # Error info
     error: str = ""
@@ -135,26 +144,38 @@ class Task:
         d.setdefault("review_input", "")
         d.setdefault("user_feedback", "")
         d.setdefault("depends_on", [])
-        return cls(**d)
+        d.setdefault("jira_issue_key", "")
+        d.setdefault("jira_issue_url", "")
+        d.setdefault("jira_payload_preview", "")
+        d.setdefault("jira_source_task_id", "")
+        d.setdefault("jira_status", "")
+        d.setdefault("jira_error", "")
+        d.setdefault("jira_agent_output", "")
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        cleaned = {k: v for k, v in d.items() if k in allowed}
+        return cls(**cleaned)
 
 
 @dataclass
 class TodoItem:
     """A raw scanned TODO comment waiting for user review."""
+
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     file_path: str = ""
     line_number: int = 0
-    raw_text: str = ""        # original comment line
-    description: str = ""    # stripped TODO text
+    raw_text: str = ""  # original comment line
+    description: str = ""  # stripped TODO text
     status: TodoItemStatus = TodoItemStatus.PENDING_ANALYSIS
 
     # Analyzer scores (0-10 each; -1.0 = not yet scored)
-    feasibility_score: float = -1.0   # 0-10: can/should be done now?
-    difficulty_score: float = -1.0    # 0-10: how hard to implement correctly? (higher = harder)
-    analysis_note: str = ""           # two-sentence explanation from analyzer
-    analyze_output: str = ""          # raw model output for progress display
+    feasibility_score: float = -1.0  # 0-10: can/should be done now?
+    difficulty_score: float = (
+        -1.0
+    )  # 0-10: how hard to implement correctly? (higher = harder)
+    analysis_note: str = ""  # two-sentence explanation from analyzer
+    analyze_output: str = ""  # raw model output for progress display
 
-    task_id: str = ""         # set once dispatched to planner
+    task_id: str = ""  # set once dispatched to planner
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -173,10 +194,13 @@ class TodoItem:
         d.pop("relevance_score", None)
         d.setdefault("difficulty_score", -1.0)
         d.setdefault("analyze_output", "")
-        return cls(**d)
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        cleaned = {k: v for k, v in d.items() if k in allowed}
+        return cls(**cleaned)
 
 
 # ── Exploration System ────────────────────────────────────────────────────────
+
 
 class ExploreStatus(str, enum.Enum):
     TODO = "todo"
@@ -188,10 +212,11 @@ class ExploreStatus(str, enum.Enum):
 @dataclass
 class ExploreModule:
     """A node in the hierarchical project map for code exploration."""
+
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     name: str = ""
-    path: str = ""            # directory path relative to repo root
-    parent_id: str = ""       # "" for root modules
+    path: str = ""  # directory path relative to repo root
+    parent_id: str = ""  # "" for root modules
     depth: int = 0
     description: str = ""
 
@@ -221,12 +246,15 @@ class ExploreModule:
         d.setdefault("loc", 0)
         d.setdefault("languages", [])
         d.setdefault("sort_order", 0)
-        return cls(**d)
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        cleaned = {k: v for k, v in d.items() if k in allowed}
+        return cls(**cleaned)
 
 
 @dataclass
 class ExploreRun:
     """Record of a single exploration agent invocation."""
+
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     module_id: str = ""
     category: str = ""
@@ -238,11 +266,11 @@ class ExploreRun:
 
     # Exploration intent / evaluation metadata
     focus_point: str = ""
-    actionability_score: float = -1.0   # 0-10: how worth addressing
-    reliability_score: float = -1.0     # 0-10: confidence of analysis
-    explored_scope: str = ""          # what this run actually covered
+    actionability_score: float = -1.0  # 0-10: how worth addressing
+    reliability_score: float = -1.0  # 0-10: confidence of analysis
+    explored_scope: str = ""  # what this run actually covered
     completion_status: str = "complete"  # complete / partial
-    supplemental_note: str = ""        # concise note for future explorers
+    supplemental_note: str = ""  # concise note for future explorers
     map_review_required: bool = False
     map_review_reason: str = ""
 
@@ -281,6 +309,7 @@ class ExploreRun:
 @dataclass
 class AgentRun:
     """Record of a single agent invocation."""
+
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     task_id: str = ""
     agent_type: str = ""  # planner / coder / reviewer
@@ -299,4 +328,6 @@ class AgentRun:
     def from_dict(cls, d: dict) -> "AgentRun":
         d = dict(d)
         d.setdefault("session_id", "")
-        return cls(**d)
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        cleaned = {k: v for k, v in d.items() if k in allowed}
+        return cls(**cleaned)

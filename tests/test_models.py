@@ -29,6 +29,11 @@ class TestTaskRoundtrip:
         assert d["status"] == "coding"
         assert d["priority"] == "high"
 
+    def test_jira_assigning_status_serialized_as_strings(self, make_task):
+        t = make_task(status=TaskStatus.JIRA_ASSIGNING)
+        d = t.to_dict()
+        assert d["status"] == "jira_assigning"
+
     def test_complex_fields_roundtrip(self, make_task):
         t = make_task(
             session_ids={"planner": ["ses1"], "coder": ["ses2", "ses3"]},
@@ -80,9 +85,26 @@ class TestTaskFromDictBackwardCompat:
         t = Task.from_dict(d)
         assert t.published_at == 0.0
 
+    def test_missing_jira_fields(self):
+        d = Task(title="old task").to_dict()
+        del d["jira_issue_key"]
+        del d["jira_issue_url"]
+        del d["jira_payload_preview"]
+        t = Task.from_dict(d)
+        assert t.jira_issue_key == ""
+        assert t.jira_issue_url == ""
+        assert t.jira_payload_preview == ""
+
+    def test_unknown_future_fields_are_ignored(self):
+        d = Task(title="old task").to_dict()
+        d["future_field"] = "unexpected"
+        d["jira_issue_key"] = "QA-1"
+        t = Task.from_dict(d)
+        assert t.title == "old task"
+        assert t.jira_issue_key == "QA-1"
+
 
 class TestTodoItemRoundtrip:
-
     def test_basic_roundtrip(self):
         item = TodoItem(
             file_path="src/main.py",
@@ -116,7 +138,6 @@ class TestTodoItemRoundtrip:
 
 
 class TestAgentRunRoundtrip:
-
     def test_basic_roundtrip(self):
         run = AgentRun(
             task_id="task1",

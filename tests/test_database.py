@@ -15,7 +15,6 @@ from core.models import (
 
 
 class TestTaskCRUD:
-
     def test_save_and_get(self, tmp_db, make_task):
         t = make_task(title="Save me")
         tmp_db.save_task(t)
@@ -51,11 +50,16 @@ class TestTaskCRUD:
     def test_get_active_tasks(self, tmp_db, make_task):
         tmp_db.save_task(make_task(status=TaskStatus.PENDING))
         tmp_db.save_task(make_task(status=TaskStatus.CODING))
+        tmp_db.save_task(make_task(status=TaskStatus.JIRA_ASSIGNING))
         tmp_db.save_task(make_task(status=TaskStatus.REVIEWING))
         tmp_db.save_task(make_task(status=TaskStatus.COMPLETED))
         active = tmp_db.get_active_tasks()
-        assert len(active) == 2
-        assert all(t.status in (TaskStatus.CODING, TaskStatus.REVIEWING) for t in active)
+        assert len(active) == 3
+        assert all(
+            t.status
+            in (TaskStatus.CODING, TaskStatus.JIRA_ASSIGNING, TaskStatus.REVIEWING)
+            for t in active
+        )
 
     def test_delete_task(self, tmp_db, make_task):
         t = make_task()
@@ -70,7 +74,16 @@ class TestTaskCRUD:
         assert loaded.depends_on == ["dep1", "dep2"]
 
     def test_comments_persist(self, tmp_db, make_task):
-        t = make_task(comments=[{"id": "c1", "username": "alice", "content": "looks good", "created_at": 123.0}])
+        t = make_task(
+            comments=[
+                {
+                    "id": "c1",
+                    "username": "alice",
+                    "content": "looks good",
+                    "created_at": 123.0,
+                }
+            ]
+        )
         tmp_db.save_task(t)
         loaded = tmp_db.get_task(t.id)
         assert len(loaded.comments) == 1
@@ -79,7 +92,6 @@ class TestTaskCRUD:
 
 
 class TestTodoItemCRUD:
-
     def test_save_and_get(self, tmp_db):
         item = TodoItem(file_path="a.py", line_number=10, description="fix bug")
         tmp_db.save_todo_item(item)
@@ -110,7 +122,6 @@ class TestTodoItemCRUD:
 
 
 class TestAgentRunCRUD:
-
     def test_save_and_get_by_task(self, tmp_db):
         r1 = AgentRun(task_id="t1", agent_type="planner", output="plan")
         r2 = AgentRun(task_id="t1", agent_type="coder", output="code")

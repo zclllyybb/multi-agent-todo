@@ -35,12 +35,20 @@ async def api_timing_middleware(request: Request, call_next):
         if elapsed_ms >= 800:
             log.warning(
                 "API slow: %s %s status=%d elapsed_ms=%.1f content_length=%s",
-                request.method, path, response.status_code, elapsed_ms, size,
+                request.method,
+                path,
+                response.status_code,
+                elapsed_ms,
+                size,
             )
         else:
             log.info(
                 "API: %s %s status=%d elapsed_ms=%.1f content_length=%s",
-                request.method, path, response.status_code, elapsed_ms, size,
+                request.method,
+                path,
+                response.status_code,
+                elapsed_ms,
+                size,
             )
     return response
 
@@ -67,6 +75,8 @@ def _task_list_item(task_dict: dict) -> dict:
     keys = (
         "id",
         "title",
+        "jira_issue_key",
+        "jira_issue_url",
         "status",
         "priority",
         "source",
@@ -88,6 +98,7 @@ def _task_list_item(task_dict: dict) -> dict:
 
 
 # ── API Routes ───────────────────────────────────────────────────────
+
 
 @app.get("/api/status")
 async def api_status():
@@ -190,7 +201,9 @@ async def api_add_task(request: Request):
     body = await request.json()
     # Parse copy_files: newline-separated list of relative paths
     copy_raw = body.get("copy_files", "")
-    copy_files = [f.strip() for f in copy_raw.split("\n") if f.strip()] if copy_raw else []
+    copy_files = (
+        [f.strip() for f in copy_raw.split("\n") if f.strip()] if copy_raw else []
+    )
     task = orchestrator.submit_task(
         title=body.get("title", "Untitled"),
         description=body.get("description", ""),
@@ -211,7 +224,9 @@ async def api_add_review_task(request: Request):
     if not review_input:
         return JSONResponse({"error": "review_input required"}, status_code=400)
     copy_raw = body.get("copy_files", "")
-    copy_files = [f.strip() for f in copy_raw.split("\n") if f.strip()] if copy_raw else []
+    copy_files = (
+        [f.strip() for f in copy_raw.split("\n") if f.strip()] if copy_raw else []
+    )
     task = orchestrator.submit_review_task(
         title=title or "Review Task",
         review_input=review_input,
@@ -219,6 +234,53 @@ async def api_add_review_task(request: Request):
         copy_files=copy_files,
     )
     return task.to_dict()
+
+
+@app.post("/api/tasks/jira")
+async def api_add_jira_task(request: Request):
+    """Submit a Jira task that drafts and files an issue."""
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    title = body.get("title", "").strip()
+    description = body.get("description", "").strip()
+    if not title:
+        return JSONResponse({"error": "title required"}, status_code=400)
+    if not description:
+        return JSONResponse({"error": "description required"}, status_code=400)
+    log.info(
+        "API submit jira task: title=%s priority=%s source_task=%s",
+        title,
+        body.get("priority", "medium"),
+        body.get("source_task_id", "") or "-",
+    )
+    task = orchestrator.submit_jira_task(
+        title=title,
+        description=description,
+        priority=body.get("priority", "medium"),
+        source_task_id=body.get("source_task_id", ""),
+    )
+    return task.to_dict()
+
+
+@app.post("/api/tasks/{task_id}/jira")
+async def api_assign_jira_for_task(task_id: str):
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    log.info("API assign jira for existing task: source_task=%s", task_id)
+    result = orchestrator.assign_jira_for_task(task_id)
+    if "error" in result:
+        log.warning(
+            "API assign jira failed: source_task=%s error=%s",
+            task_id,
+            result["error"],
+        )
+        return JSONResponse(result, status_code=400)
+    log.info(
+        "API assign jira accepted: source_task=%s",
+        task_id,
+    )
+    return result
 
 
 @app.post("/api/tasks/{task_id}/dispatch")
@@ -298,7 +360,9 @@ async def api_arbitrate_task(task_id: str, request: Request):
     action = body.get("action", "").strip()
     feedback = body.get("feedback", "").strip()
     if not action:
-        return JSONResponse({"error": "action required (approve/revise/reject)"}, status_code=400)
+        return JSONResponse(
+            {"error": "action required (approve/revise/reject)"}, status_code=400
+        )
     result = orchestrator.resolve_arbitration(task_id, action, feedback)
     if "error" in result:
         return JSONResponse(result, status_code=400)
@@ -321,12 +385,20 @@ async def api_exec_in_worktree(task_id: str, request: Request):
         return JSONResponse({"error": "command required"}, status_code=400)
     try:
         result = subprocess.run(
-            cmd, shell=True, cwd=task.worktree_path,
-            capture_output=True, text=True, timeout=30,
+            cmd,
+            shell=True,
+            cwd=task.worktree_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         return {
-            "stdout": result.stdout[-8000:] if len(result.stdout) > 8000 else result.stdout,
-            "stderr": result.stderr[-4000:] if len(result.stderr) > 4000 else result.stderr,
+            "stdout": result.stdout[-8000:]
+            if len(result.stdout) > 8000
+            else result.stdout,
+            "stderr": result.stderr[-4000:]
+            if len(result.stderr) > 4000
+            else result.stderr,
             "exit_code": result.returncode,
         }
     except subprocess.TimeoutExpired:
@@ -378,6 +450,8 @@ async def api_config():
         "reviewer_models": oc.get("reviewer_models", []),
         "explorer_model": cfg.get("explore", {}).get("explorer_model", ""),
         "map_model": cfg.get("explore", {}).get("map_model", ""),
+        "jira_project_key": cfg.get("jira", {}).get("project_key", ""),
+        "jira_issue_type": cfg.get("jira", {}).get("issue_type", []),
         "max_retries": orch.get("max_retries", 4),
         "publish_remote": cfg.get("publish", {}).get("remote", "origin"),
     }
@@ -400,6 +474,7 @@ async def api_update_config(request: Request):
 async def api_models():
     """Return available opencode model IDs by running `opencode models`."""
     import subprocess as _sp
+
     try:
         out = _sp.check_output(["opencode", "models"], text=True, timeout=10)
         models = sorted(line.strip() for line in out.splitlines() if line.strip())
@@ -428,8 +503,7 @@ async def api_todo_queue():
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
     items = orchestrator.db.get_all_todo_items()
-    analyzing = [i.to_dict() for i in items
-                 if i.status.value == "analyzing"]
+    analyzing = [i.to_dict() for i in items if i.status.value == "analyzing"]
     return {"analyzing": analyzing, "count": len(analyzing)}
 
 
@@ -484,6 +558,7 @@ async def api_dispatch_all():
 
 
 # ── Exploration API ──────────────────────────────────────────────────
+
 
 @app.get("/api/explore/modules")
 async def api_explore_modules():
@@ -683,6 +758,7 @@ async def api_explore_categories():
 
 # ── Dashboard HTML ───────────────────────────────────────────────────
 
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     return DASHBOARD_HTML
@@ -692,6 +768,7 @@ def _fmt_time(ts):
     if ts == 0:
         return "-"
     import datetime
+
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -738,6 +815,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge-pending { background: #30363d; color: var(--text-dim); }
   .badge-planning { background: #1f2d3d; color: var(--purple); }
   .badge-coding { background: #0d2d42; color: var(--accent); }
+  .badge-jira_assigning { background: #3a220f; color: #f0883e; border: 1px solid #f0883e; }
   .badge-reviewing { background: #2a1f0d; color: var(--yellow); }
   .badge-completed { background: #0d2d1a; color: var(--green); }
   .badge-failed, .badge-review_failed { background: #2d0d0d; color: var(--red); }
@@ -1092,7 +1170,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Add Task Modal (tabbed: Develop / Review) -->
+<!-- Add Task Modal (tabbed: Develop / Review / Jira) -->
 <div class="modal-overlay" id="add-modal">
   <div class="modal">
     <h2>Submit Task</h2>
@@ -1107,6 +1185,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="tab-bar" id="add-task-tabs">
       <div class="tab active" onclick="switchAddTab(this, 'add-develop')">Develop</div>
       <div class="tab" onclick="switchAddTab(this, 'add-review')">Review</div>
+      <div class="tab" onclick="switchAddTab(this, 'add-jira')">Jira</div>
     </div>
 
     <!-- Develop tab -->
@@ -1141,6 +1220,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <textarea id="review-task-copy-files" placeholder="e.g. patches/fix.patch&#10;docs/design.md" style="height:60px;font-family:monospace;font-size:12px"></textarea>
       <div class="actions">
         <button class="btn btn-primary" onclick="addReviewTask()">Submit Review Task</button>
+        <button class="btn" onclick="closeModals()">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Jira tab -->
+    <div class="tab-content" id="add-jira">
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">Draft and submit a Jira issue using the simple coder model plus configured routing hints. No worktree or reviewer run is created for this mode.</p>
+      <input id="jira-task-title" placeholder="Jira issue summary seed" />
+      <textarea id="jira-task-desc" placeholder="Describe the problem, impact, reproduction, expected behavior, and any routing context that should influence assignee or labels."></textarea>
+      <select id="jira-task-priority">
+        <option value="high">High</option>
+        <option value="medium" selected>Medium</option>
+        <option value="low">Low</option>
+      </select>
+      <div id="jira-task-config-hint" style="font-size:12px;color:var(--text-dim);margin:8px 0 0"></div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="addJiraTask()">Submit Jira Task</button>
         <button class="btn" onclick="closeModals()">Cancel</button>
       </div>
     </div>
@@ -1466,7 +1562,7 @@ async function refresh() {
   document.getElementById('stats').innerHTML = `
     <div class="stat-card"><div class="num">${status.total_tasks||0}</div><div class="label">Total</div></div>
     <div class="stat-card"><div class="num" style="color:var(--text-dim)">${sc.pending||0}</div><div class="label">Pending</div></div>
-    <div class="stat-card"><div class="num" style="color:var(--accent)">${(sc.planning||0)+(sc.coding||0)+(sc.reviewing||0)}</div><div class="label">Active</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--accent)">${(sc.planning||0)+(sc.coding||0)+(sc.jira_assigning||0)+(sc.reviewing||0)}</div><div class="label">Active</div></div>
     <div class="stat-card"><div class="num" style="color:var(--green)">${sc.completed||0}</div><div class="label">Completed</div></div>
     <div class="stat-card"><div class="num" style="color:#f0a040">${sc.needs_arbitration||0}</div><div class="label">Arbitration</div></div>
     <div class="stat-card"><div class="num" style="color:var(--red)">${(sc.failed||0)+(sc.review_failed||0)}</div><div class="label">Failed</div></div>
@@ -1507,8 +1603,11 @@ async function refresh() {
         };border:1px solid currentColor;padding:1px 4px;border-radius:3px">${t.complexity.replace('_',' ')}</span>`
       : '';
     const isPublished = t.published_at > 0;
-    const publishBtn = (t.status==='completed' && t.branch_name && t.task_mode !== 'review')
+    const publishBtn = (t.status==='completed' && t.branch_name && !['review','jira'].includes(t.task_mode))
       ? `<button class="btn btn-sm" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push' : '&#8593; Publish'}</button>`
+      : '';
+    const jiraBtn = t.task_mode !== 'jira'
+      ? `<button class="btn btn-sm" style="color:#f0883e" onclick="assignJiraForTask('${t.id}')">${t.jira_issue_key ? 'Reassign Jira' : 'Assign Jira'}</button>`
       : '';
     const indent = depth > 0 ? `padding-left:${depth * 24}px` : '';
     const childIcon = depth > 0 ? '<span style="color:var(--text-dim);margin-right:4px">&#8627;</span>' : '';
@@ -1533,9 +1632,14 @@ async function refresh() {
     const commentsBadge = t.has_comments
       ? `<span style="font-size:10px;margin-left:5px;color:var(--purple);border:1px solid var(--purple);padding:1px 5px;border-radius:3px">${t.comment_count || 0} comment${(t.comment_count || 0) === 1 ? '' : 's'}</span>`
       : '';
+    const jiraIdBadge = t.jira_issue_key
+      ? (t.jira_issue_url
+        ? `<a href="${esc(t.jira_issue_url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" style="font-size:10px;margin-left:5px;color:#f0883e;border:1px solid #f0883e;padding:1px 5px;border-radius:3px;text-decoration:none;display:inline-block">${esc(t.jira_issue_key)}</a>`
+        : `<span style="font-size:10px;margin-left:5px;color:#f0883e;border:1px solid #f0883e;padding:1px 5px;border-radius:3px">${esc(t.jira_issue_key)}</span>`)
+      : '';
     return `<tr style="${depth > 0 ? 'background:rgba(88,166,255,0.02)' : ''}">
       <td><code style="font-size:${depth > 0 ? '10' : '12'}px">${t.id}</code></td>
-      <td style="cursor:pointer;color:var(--accent);${indent}" onclick="showDetail('${t.id}')">${childIcon}${esc(t.title)}${modeBadge}${complexityBadge}${childBadge}${blockedBadge}${depsBadge}${commentsBadge}</td>
+      <td style="cursor:pointer;color:var(--accent);${indent}" onclick="showDetail('${t.id}')">${childIcon}${esc(t.title)}${jiraIdBadge}${modeBadge}${complexityBadge}${childBadge}${blockedBadge}${depsBadge}${commentsBadge}</td>
       <td><span class="badge badge-${t.status}">${t.status}</span></td>
       <td><span class="badge-${t.priority}">${t.priority}</span></td>
       <td>${t.source}</td>
@@ -1544,6 +1648,7 @@ async function refresh() {
       <td style="white-space:nowrap">
         ${t.status==='pending'&&!isBlocked?`<button class="btn btn-sm" onclick="dispatch('${t.id}')">Run</button>`:''}
         ${publishBtn}
+        ${jiraBtn}
         ${!['completed','cancelled'].includes(t.status)?`<button class="btn btn-sm" onclick="cancel('${t.id}')">Cancel</button>`:''}
         ${t.clean_available?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
       </td>
@@ -1568,7 +1673,7 @@ async function showDetail(id) {
   _currentDetailTaskId = id;
   const data = await api(`/api/tasks/${id}`);
   const t = data.task;
-  document.getElementById('detail-title').textContent = t.title;
+  document.getElementById('detail-title').textContent = t.jira_issue_key ? `${t.title} (${t.jira_issue_key})` : t.title;
 
   // Tab bar
   let html = `<div class="tab-bar">
@@ -1582,7 +1687,7 @@ async function showDetail(id) {
   // ── Tab: Overview ──
   html += `<div class="tab-content active" id="tab-overview">`;
   const isPublished = t.published_at > 0;
-  const modeColor = t.task_mode === 'review' ? 'var(--purple)' : 'var(--accent)';
+  const modeColor = t.task_mode === 'review' ? 'var(--purple)' : (t.task_mode === 'jira' ? '#f0883e' : 'var(--accent)');
   html += `<div class="detail-grid">
     <div class="detail-card"><h4>Status</h4><div class="val"><span class="badge badge-${t.status}">${t.status}</span></div></div>
     <div class="detail-card"><h4>Mode</h4><div class="val"><span style="color:${modeColor}">${t.task_mode||'develop'}</span></div></div>
@@ -1608,10 +1713,16 @@ async function showDetail(id) {
     <div class="detail-card"><h4>Completed</h4><div class="val">${fmtTime(t.completed_at)}</div></div>
     <div class="detail-card"><h4>Published</h4><div class="val">${isPublished ? fmtTime(t.published_at) : '-'}</div></div>
   </div>`;
-  if (t.status === 'completed' && t.branch_name && t.task_mode !== 'review') {
+  if (t.status === 'completed' && t.branch_name && !['review','jira'].includes(t.task_mode)) {
     html += `<div style="margin:12px 0">
       ${isPublished ? `<span style="color:var(--green);margin-right:8px">&#10003; Published</span>` : ''}
       <button class="btn" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push to remote' : '&#8593; Publish branch to remote'}</button>
+    </div>`;
+  }
+  if (t.task_mode !== 'jira') {
+    html += `<div style="margin:8px 0">
+      <button class="btn" style="color:#f0883e;border-color:#f0883e" onclick="assignJiraForTask('${t.id}')">${t.jira_issue_key ? 'Reassign Jira for This Task' : 'Assign Jira for This Task'}</button>
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Creates a Jira-mode task linked to this task and syncs the created Jira key back here.</span>
     </div>`;
   }
   if (t.clean_available) {
@@ -1637,6 +1748,16 @@ async function showDetail(id) {
   </div>`;
   if (t.review_input) {
     html += `<div class="detail-section"><h3 style="color:var(--purple)">Review Input</h3><pre style="font-size:12px;max-height:300px;overflow:auto">${esc(t.review_input)}</pre></div>`;
+  }
+  if (t.jira_issue_key || t.jira_issue_url || t.jira_payload_preview || t.jira_agent_output || t.jira_error) {
+    html += `<div class="detail-section"><h3 style="color:#f0883e">Jira Result</h3>`;
+    if (t.jira_issue_key) html += `<div style="font-size:12px;margin-bottom:6px">Issue key: <code>${esc(t.jira_issue_key)}</code></div>`;
+    if (t.jira_issue_url) html += `<div style="font-size:12px;margin-bottom:6px">Issue URL: <code>${esc(t.jira_issue_url)}</code></div>`;
+    if (t.jira_status) html += `<div style="font-size:12px;margin-bottom:6px">Jira status: <code>${esc(t.jira_status)}</code></div>`;
+    if (t.jira_error) html += `<div style="font-size:12px;margin-bottom:6px">Jira error: <code>${esc(t.jira_error)}</code></div>`;
+    if (t.jira_payload_preview) html += `<pre style="font-size:12px;max-height:300px;overflow:auto">${esc(t.jira_payload_preview)}</pre>`;
+    if (t.jira_agent_output) html += `<pre style="font-size:12px;max-height:300px;overflow:auto">${esc(t.jira_agent_output)}</pre>`;
+    html += `</div>`;
   }
   if (t.error) {
     html += `<div class="detail-section"><h3 style="color:var(--red)">Error</h3><pre style="color:var(--red)">${esc(t.error)}</pre></div>`;
@@ -1743,24 +1864,28 @@ async function showDetail(id) {
   // ── Tab: Outputs ──
   html += `<div class="tab-content" id="tab-output">`;
   html += `<div class="detail-section"><h3>Plan Output</h3><pre>${esc(t.plan_output||'-')}</pre></div>`;
-  html += `<div class="detail-section"><h3>Code Output</h3><pre>${esc(t.code_output||'-')}</pre></div>`;
-  // Per-reviewer results
-  if (t.reviewer_results && t.reviewer_results.length) {
-    html += `<div class="detail-section"><h3>Review Results (${t.reviewer_results.length} reviewer${t.reviewer_results.length>1?'s':''})</h3>`;
-    for (const rr of t.reviewer_results) {
-      const verdictColor = rr.passed ? 'var(--green)' : 'var(--red)';
-      const verdict = rr.passed ? 'APPROVE' : 'REQUEST_CHANGES';
-      html += `<div style="margin-bottom:16px;border:1px solid ${verdictColor};border-radius:6px;overflow:hidden">
-        <div style="background:rgba(0,0,0,0.3);padding:8px 12px;display:flex;align-items:center;gap:12px">
-          <span style="color:${verdictColor};font-weight:bold">${verdict}</span>
-          <span style="color:var(--text-dim);font-size:12px">${esc(rr.model)}</span>
-        </div>
-        <pre style="margin:0;padding:12px;border-radius:0;font-size:12px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">${esc(rr.output||'-')}</pre>
-      </div>`;
-    }
-    html += `</div>`;
+  if (t.task_mode === 'jira') {
+    html += `<div class="detail-section"><h3>Jira Agent Output</h3><pre>${esc(t.jira_agent_output||'-')}</pre></div>`;
   } else {
-    html += `<div class="detail-section"><h3>Review Output</h3><pre>${esc(t.review_output||'-')}</pre></div>`;
+    html += `<div class="detail-section"><h3>Code Output</h3><pre>${esc(t.code_output||'-')}</pre></div>`;
+    // Per-reviewer results
+    if (t.reviewer_results && t.reviewer_results.length) {
+      html += `<div class="detail-section"><h3>Review Results (${t.reviewer_results.length} reviewer${t.reviewer_results.length>1?'s':''})</h3>`;
+      for (const rr of t.reviewer_results) {
+        const verdictColor = rr.passed ? 'var(--green)' : 'var(--red)';
+        const verdict = rr.passed ? 'APPROVE' : 'REQUEST_CHANGES';
+        html += `<div style="margin-bottom:16px;border:1px solid ${verdictColor};border-radius:6px;overflow:hidden">
+          <div style="background:rgba(0,0,0,0.3);padding:8px 12px;display:flex;align-items:center;gap:12px">
+            <span style="color:${verdictColor};font-weight:bold">${verdict}</span>
+            <span style="color:var(--text-dim);font-size:12px">${esc(rr.model)}</span>
+          </div>
+          <pre style="margin:0;padding:12px;border-radius:0;font-size:12px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">${esc(rr.output||'-')}</pre>
+        </div>`;
+      }
+      html += `</div>`;
+    } else {
+      html += `<div class="detail-section"><h3>Review Output</h3><pre>${esc(t.review_output||'-')}</pre></div>`;
+    }
   }
   html += `</div>`;
 
@@ -1801,6 +1926,7 @@ function toggleCategoryNote(noteId, trigger) {
 }
 
 let _addTaskBaseBranch = '';
+let _jiraTaskConfigHint = '';
 
 async function refreshAddTaskBaseBranch() {
   const nameEl = document.getElementById('add-task-base-branch-name');
@@ -1815,11 +1941,18 @@ async function refreshAddTaskBaseBranch() {
     const cfg = await api('/api/config');
     const baseBranch = cfg && cfg.base_branch ? cfg.base_branch : 'master';
     _addTaskBaseBranch = baseBranch;
+    _jiraTaskConfigHint = (cfg && (cfg.jira_project_key || cfg.jira_issue_type))
+      ? `Configured Jira target: ${cfg.jira_project_key || '-'} / ${cfg.jira_issue_type || '-'}`
+      : 'Configured Jira target: -';
     nameEl.textContent = baseBranch;
     refEl.textContent = `origin/${baseBranch}`;
+    const jiraHintEl = document.getElementById('jira-task-config-hint');
+    if (jiraHintEl) jiraHintEl.textContent = _jiraTaskConfigHint;
   } catch (e) {
     nameEl.textContent = 'master';
     refEl.textContent = 'origin/master';
+    const jiraHintEl = document.getElementById('jira-task-config-hint');
+    if (jiraHintEl) jiraHintEl.textContent = 'Configured Jira target: -';
   }
 }
 
@@ -1991,6 +2124,44 @@ async function addReviewTask() {
     copy_files: document.getElementById('review-task-copy-files').value,
   })});
   closeModals(); refresh();
+}
+
+async function addJiraTask() {
+  const title = document.getElementById('jira-task-title').value.trim();
+  const description = document.getElementById('jira-task-desc').value.trim();
+  if (!title || !description) return;
+  await api('/api/tasks/jira', { method:'POST', body: JSON.stringify({
+    title,
+    description,
+    priority: document.getElementById('jira-task-priority').value,
+  })});
+  closeModals(); refresh();
+}
+
+async function assignJiraForTask(id) {
+  const btn = event && event.target;
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+    try {
+      const res = await api(`/api/tasks/${id}/jira`, {method:'POST'});
+      if (res && res.error) {
+        await uiAlert(res.error, 'Assign Jira failed');
+      return;
+    }
+    await refresh();
+    const detailOpen = document.getElementById('detail-modal')?.classList.contains('active');
+    if (detailOpen && _currentDetailTaskId === id) {
+      await showDetail(id);
+    }
+    await uiAlert(
+      'Jira assignment has been submitted for this task.',
+      'Assign Jira submitted'
+    );
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Assign Jira';
+    }
+  }
 }
 
 function switchAddTab(el, tabId) {
