@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+from urllib import error, request
 
 # Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,13 +44,31 @@ def cmd_status(args):
 def cmd_add(args):
     """Submit a task (planner will analyze and optionally split it)."""
     config = load_config(args.config)
-    orch = Orchestrator(config)
-    task = orch.submit_task(
-        title=args.title,
-        description=args.description or "",
-        priority=args.priority,
+    host = config["web"]["host"]
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    url = f"http://{host}:{config['web']['port']}/api/tasks"
+    payload = json.dumps(
+        {
+            "title": args.title,
+            "description": args.description or "",
+            "priority": args.priority,
+        }
+    ).encode("utf-8")
+    req = request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    print(f"Submitted task: [{task.id}] {task.title}")
+    try:
+        with request.urlopen(req, timeout=30) as response:
+            task = json.loads(response.read().decode("utf-8"))
+    except error.URLError as exc:
+        print(f"Could not reach daemon API at {url}: {exc}")
+        print("Start the daemon first with `cli.py start`.")
+        return
+    print(f"Submitted task: [{task['id']}] {task['title']}")
     print(
         "(The planner will decide whether to split this into sub-tasks during execution.)"
     )
@@ -201,17 +220,37 @@ def cmd_show(args):
 def cmd_dispatch(args):
     """Dispatch a specific task or all pending tasks."""
     config = load_config(args.config)
-    orch = Orchestrator(config)
+    host = config["web"]["host"]
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    base_url = f"http://{host}:{config['web']['port']}"
     if args.task_id == "all":
-        pending = orch.db.get_pending_tasks()
-        count = 0
-        for t in pending:
-            if orch.dispatch_task(t.id):
-                count += 1
-        print(f"Dispatched {count}/{len(pending)} tasks")
+        req = request.Request(f"{base_url}/api/dispatch-all", data=b"{}", method="POST")
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except error.URLError as exc:
+            print(f"Could not reach daemon API at {base_url}: {exc}")
+            print("Start the daemon first with `cli.py start`.")
+            return
+        print(f"Dispatched {result['dispatched']}/{result['total_pending']} tasks")
     else:
-        ok = orch.dispatch_task(args.task_id)
-        print(f"Dispatched: {ok}")
+        req = request.Request(
+            f"{base_url}/api/tasks/{args.task_id}/dispatch",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except error.URLError as exc:
+            print(f"Could not reach daemon API at {base_url}: {exc}")
+            print("Start the daemon first with `cli.py start`.")
+            return
+        print(f"Dispatched: {result['dispatched']}")
+        if result.get("queued"):
+            print("Queued: True")
 
 
 def cmd_run_one(args):

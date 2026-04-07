@@ -48,7 +48,10 @@ class CoderAgent(BaseAgent):
         return None
 
     def implement_task(
-        self, task: Task, worktree_path: str, session_id: str = "",
+        self,
+        task: Task,
+        worktree_path: str,
+        session_id: str = "",
         dep_context: str = "",
     ) -> Tuple[AgentRun, str]:
         """Use opencode to implement the task in the given worktree.
@@ -60,8 +63,14 @@ class CoderAgent(BaseAgent):
         rel_path = self._resolve_file_path(task.file_path, worktree_path)
         prompt = self._build_prompt(task, rel_path, dep_context=dep_context)
 
-        run = self.run(prompt, worktree_path, task_id=task.id,
-                       session_id=session_id)
+        run = self.run(
+            prompt,
+            worktree_path,
+            task_id=task.id,
+            session_id=session_id,
+            max_continues=8,
+            require_stop=True,
+        )
         output_text = self.get_text(run)
         return run, output_text
 
@@ -78,13 +87,18 @@ class CoderAgent(BaseAgent):
             worktree_path,
             task_id=task.id,
             session_id=session_id,
+            max_continues=8,
+            require_stop=True,
         )
         output_text = self.get_text(run)
         return run, output_text
 
     def retry_with_feedback(
-        self, task: Task, worktree_path: str,
-        review_feedback: str, session_id: str,
+        self,
+        task: Task,
+        worktree_path: str,
+        review_feedback: str,
+        session_id: str,
     ) -> Tuple[AgentRun, str]:
         """Continue an existing coder session with only the review feedback.
 
@@ -95,13 +109,20 @@ class CoderAgent(BaseAgent):
             review_feedback=review_feedback,
             attempt=task.retry_count,
         )
-        run = self.run(prompt, worktree_path, task_id=task.id,
-                       session_id=session_id)
+        run = self.run(
+            prompt,
+            worktree_path,
+            task_id=task.id,
+            session_id=session_id,
+            max_continues=8,
+            require_stop=True,
+        )
         output_text = self.get_text(run)
         return run, output_text
 
-    def _build_prompt(self, task: Task, rel_file_path: Optional[str] = None,
-                      dep_context: str = "") -> str:
+    def _build_prompt(
+        self, task: Task, rel_file_path: Optional[str] = None, dep_context: str = ""
+    ) -> str:
         return coder_implement(
             title=task.title,
             description=task.description,

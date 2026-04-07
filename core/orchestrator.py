@@ -90,6 +90,7 @@ class Orchestrator:
         # Dependency tracking between sub-tasks (pure in-memory, rebuilt on split)
         self.dep_tracker = DependencyTracker()
         self._rebuild_dep_tracker()
+        self._pending_dispatch: List[str] = []
 
         # Cache for UI resource snapshot (git branches/worktrees) to keep
         # dashboard auto-refresh lightweight.
@@ -504,6 +505,8 @@ class Orchestrator:
         jira = self._get_jira_config()
         simple_agent = self._coder_by_complexity.get("simple") or self._default_coder
         source_task_id = (task.jira_source_task_id or task.id).strip()
+        regression_cfg = self.config.get("regression", {})
+        dry_run_enabled = bool(regression_cfg.get("dry_run_jira", False))
         component_hint_count = sum(
             1
             for hint in jira["routing_hints"]
@@ -532,6 +535,7 @@ class Orchestrator:
             available_issue_types=jira["issue_types"],
             available_priorities=jira["priorities"],
             routing_hints=jira["routing_hints"],
+            dry_run=dry_run_enabled,
         )
         repo_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         env = {
@@ -541,6 +545,8 @@ class Orchestrator:
         }
         if jira.get("user"):
             env["JIRA_USER"] = jira["user"]
+        if dry_run_enabled:
+            env["MULTI_AGENT_TODO_JIRA_DRY_RUN"] = "1"
         run = self.client.run(
             message=prompt,
             work_dir=repo_path,
@@ -565,11 +571,14 @@ class Orchestrator:
     def _parse_jira_agent_result(self, task: Task, text: str) -> dict:
         key = ""
         issue_url = ""
+        payload_lines: list[str] = []
         for line in (text or "").splitlines():
             if line.startswith("key="):
                 key = line.split("=", 1)[1].strip()
             elif line.startswith("self="):
                 issue_url = line.split("=", 1)[1].strip()
+            elif line.startswith("payload="):
+                payload_lines.append(line.split("=", 1)[1])
         if not key:
             raise RuntimeError(
                 f"Jira agent [{task.id}] did not return issue key. Output: {text[:500]}"
@@ -581,7 +590,11 @@ class Orchestrator:
             key,
             issue_url,
         )
-        return {"key": key, "self": issue_url}
+        return {
+            "key": key,
+            "self": issue_url,
+            "payload": "\n".join(payload_lines).strip(),
+        }
 
     @staticmethod
     def _build_jira_browse_url(jira_base_url: str, issue_key: str) -> str:
@@ -741,6 +754,7 @@ class Orchestrator:
             result = self._parse_jira_agent_result(task, agent_text)
             key = str(result.get("key", "")).strip()
             issue_url = self._build_jira_browse_url(jira["url"], key)
+            task.jira_payload_preview = str(result.get("payload", "")).strip()
 
             task.jira_issue_key = key
             task.jira_issue_url = issue_url
@@ -861,27 +875,44 @@ class Orchestrator:
         explore = explore or {}
         result = list(lines)
         i = 0
+        current_top_level_section = ""
+
         while i < len(result):
             line = result[i]
             stripped = line.rstrip()
 
+            if stripped and not stripped.lstrip().startswith("#"):
+                section_match = _re.match(
+                    r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*$", stripped
+                )
+                if section_match:
+                    current_top_level_section = section_match.group(1)
+
             # ── planner_model ──────────────────────────────────────────
             m = _re.match(r"^(\s*planner_model\s*:\s*)(.*)$", stripped)
-            if m and "planner_model" in oc:
+            if m and current_top_level_section == "opencode" and "planner_model" in oc:
                 result[i] = m.group(1) + oc["planner_model"] + "\n"
                 i += 1
                 continue
 
             # ── coder_model_default ────────────────────────────────────
             m = _re.match(r"^(\s*coder_model_default\s*:\s*)(.*)$", stripped)
-            if m and "coder_model_default" in oc:
+            if (
+                m
+                and current_top_level_section == "opencode"
+                and "coder_model_default" in oc
+            ):
                 result[i] = m.group(1) + oc["coder_model_default"] + "\n"
                 i += 1
                 continue
 
             # ── coder_model_by_complexity (block) ──────────────────────
             m = _re.match(r"^(\s*coder_model_by_complexity\s*:)", stripped)
-            if m and "coder_model_by_complexity" in oc:
+            if (
+                m
+                and current_top_level_section == "opencode"
+                and "coder_model_by_complexity" in oc
+            ):
                 indent = len(line) - len(line.lstrip())
                 # collect block: next lines with greater indentation
                 block_end = i + 1
@@ -927,7 +958,11 @@ class Orchestrator:
 
             # ── reviewer_models (list block) ───────────────────────────
             m = _re.match(r"^(\s*reviewer_models\s*:)", stripped)
-            if m and "reviewer_models" in oc:
+            if (
+                m
+                and current_top_level_section == "opencode"
+                and "reviewer_models" in oc
+            ):
                 indent = len(line) - len(line.lstrip())
                 block_end = i + 1
                 while block_end < len(result):
@@ -936,7 +971,9 @@ class Orchestrator:
                         block_end += 1
                         continue
                     nxt_indent = len(nxt) - len(nxt.lstrip())
-                    if nxt_indent <= indent:
+                    if nxt_indent < indent:
+                        break
+                    if nxt_indent == indent and not nxt.lstrip().startswith("-"):
                         break
                     block_end += 1
                 child_indent = " " * (indent + 2)
@@ -949,14 +986,18 @@ class Orchestrator:
 
             # ── explorer_model ─────────────────────────────────────────
             m = _re.match(r"^(\s*explorer_model\s*:\s*)(.*)$", stripped)
-            if m and "explorer_model" in explore:
+            if (
+                m
+                and current_top_level_section == "explore"
+                and "explorer_model" in explore
+            ):
                 result[i] = m.group(1) + explore["explorer_model"] + "\n"
                 i += 1
                 continue
 
             # ── map_model ──────────────────────────────────────────────
             m = _re.match(r"^(\s*map_model\s*:\s*)(.*)$", stripped)
-            if m and "map_model" in explore:
+            if m and current_top_level_section == "explore" and "map_model" in explore:
                 result[i] = m.group(1) + explore["map_model"] + "\n"
                 i += 1
                 continue
@@ -1966,7 +2007,7 @@ class Orchestrator:
         if code_run.exit_code == 0:
             if self.client.is_output_complete(code_run.output):
                 return
-            raise RuntimeError(
+            raise ModelOutputError(
                 f"Coder output is incomplete — the last step has no "
                 f"'stop' finish reason (session={code_run.session_id}, "
                 f"attempt={attempt}). The model may have been truncated "
@@ -2326,6 +2367,7 @@ class Orchestrator:
         finally:
             with self._lock:
                 self._futures.pop(task_id, None)
+            self._flush_pending_dispatches()
 
     def _update_parent_status(self, task_id: str):
         """If task has a parent, unblock dependents and check whether all
@@ -2394,11 +2436,40 @@ class Orchestrator:
             max_p = self.config["orchestrator"]["max_parallel_tasks"]
             if len(self._futures) >= max_p:
                 log.warning("Max parallel tasks reached (%d)", max_p)
+                if task_id not in self._pending_dispatch:
+                    self._pending_dispatch.append(task_id)
+                    log.info("Queued task [%s] for deferred dispatch", task_id)
                 return False
+            if task_id in self._pending_dispatch:
+                self._pending_dispatch.remove(task_id)
             future = self._pool.submit(self._execute_task, task_id)
             self._futures[task_id] = future
             log.info("Dispatched task: %s", task_id)
             return True
+
+    def _queue_pending_dispatch(self, task_id: str):
+        """Retry dispatch later when capacity frees up."""
+        with self._lock:
+            if task_id in self._pending_dispatch:
+                return
+            self._pending_dispatch.append(task_id)
+        log.info("Queued task [%s] for deferred dispatch", task_id)
+
+    def _flush_pending_dispatches(self):
+        """Dispatch queued tasks after a running slot becomes available."""
+        while True:
+            with self._lock:
+                if not self._pending_dispatch:
+                    return
+                max_p = self.config["orchestrator"]["max_parallel_tasks"]
+                if len(self._futures) >= max_p:
+                    return
+                task_id = self._pending_dispatch.pop(0)
+            if not self.dispatch_task(task_id):
+                with self._lock:
+                    if task_id not in self._pending_dispatch:
+                        self._pending_dispatch.insert(0, task_id)
+                return
 
     # ── Main Loop ────────────────────────────────────────────────────
 
@@ -2664,9 +2735,7 @@ class Orchestrator:
             init_status = self._explore_map_state.get("status", "idle")
         if init_status == "in_progress":
             return False
-        if init_status == "done":
-            return bool(self.db.get_all_explore_modules())
-        return False
+        return bool(self.db.get_all_explore_modules())
 
     def get_explore_init_state(self) -> dict:
         with self._lock:
@@ -3039,7 +3108,9 @@ class Orchestrator:
         )
         variant = self._get_explore_variant()
         explorer = ExplorerAgent(model=model, client=self.client)
-        log.info("Starting explore map init: model=%s variant=%s", model, variant or "-")
+        log.info(
+            "Starting explore map init: model=%s variant=%s", model, variant or "-"
+        )
 
         try:
             run, modules_data = explorer.init_map(repo_path, agent_variant=variant)

@@ -37,6 +37,7 @@ class ExplorerAgent(BaseAgent):
         prior_note: str = "",
     ) -> str:
         from agents.prompts import explorer_prompt
+
         return explorer_prompt(
             module_name=module.name,
             module_path=module.path,
@@ -96,7 +97,9 @@ class ExplorerAgent(BaseAgent):
                 f"explorer: invalid JSON in model output: {e}"
             ) from e
 
-        completion_status = str(data.get("completion_status", "complete")).strip().lower()
+        completion_status = (
+            str(data.get("completion_status", "complete")).strip().lower()
+        )
         if completion_status not in {"complete", "partial"}:
             completion_status = "complete"
 
@@ -148,6 +151,8 @@ class ExplorerAgent(BaseAgent):
             agent_type=self.agent_type,
             task_id=task_id,
             session_id=session_id,
+            max_continues=8,
+            require_stop=True,
             on_output=on_output,
             should_cancel=should_cancel,
             agent_variant=agent_variant,
@@ -178,17 +183,21 @@ class ExplorerAgent(BaseAgent):
         raw_findings = data.get("findings", [])
         findings = []
         for f in raw_findings:
-            findings.append({
-                "severity": str(f.get("severity", "info")),
-                "title": str(f.get("title", "")),
-                "description": str(f.get("description", "")),
-                "file_path": str(f.get("file_path", "")),
-                "line_number": int(f.get("line_number", 0)),
-                "suggested_fix": str(f.get("suggested_fix", "")),
-            })
+            findings.append(
+                {
+                    "severity": str(f.get("severity", "info")),
+                    "title": str(f.get("title", "")),
+                    "description": str(f.get("description", "")),
+                    "file_path": str(f.get("file_path", "")),
+                    "line_number": int(f.get("line_number", 0)),
+                    "suggested_fix": str(f.get("suggested_fix", "")),
+                }
+            )
         return findings, summary
 
-    def init_map(self, repo_path: str, max_depth: int = 2, agent_variant: str = "") -> Tuple[AgentRun, List[dict]]:
+    def init_map(
+        self, repo_path: str, max_depth: int = 2, agent_variant: str = ""
+    ) -> Tuple[AgentRun, List[dict]]:
         """Run map initialization agent to discover the project module structure.
 
         Returns ``(agent_run, modules_list)`` where each module dict has keys:
@@ -215,7 +224,9 @@ class ExplorerAgent(BaseAgent):
     ) -> Tuple[AgentRun, List[dict]]:
         from agents.prompts import map_init_prompt
 
-        prompt = message_override or map_init_prompt(repo_path=repo_path, max_depth=max_depth)
+        prompt = message_override or map_init_prompt(
+            repo_path=repo_path, max_depth=max_depth
+        )
         run = self.client.run_streaming(
             message=prompt,
             work_dir=repo_path,
@@ -223,6 +234,8 @@ class ExplorerAgent(BaseAgent):
             agent_type="explorer_map_init",
             task_id=task_id,
             session_id=session_id,
+            max_continues=8,
+            require_stop=True,
             on_output=on_output,
             should_cancel=should_cancel,
             agent_variant=agent_variant,

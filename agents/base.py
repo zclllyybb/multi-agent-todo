@@ -21,6 +21,8 @@ class BaseAgent:
         task_id: str = "",
         session_id: str = "",
         agent_variant: str = "",
+        max_continues: int = 1,
+        require_stop: bool = False,
     ) -> AgentRun:
         return self.client.run(
             message=prompt,
@@ -30,6 +32,8 @@ class BaseAgent:
             task_id=task_id,
             session_id=session_id,
             agent_variant=agent_variant,
+            max_continues=max_continues,
+            require_stop=require_stop,
         )
 
     def get_text(self, run: AgentRun) -> str:

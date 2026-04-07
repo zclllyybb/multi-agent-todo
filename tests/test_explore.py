@@ -12,6 +12,7 @@ import asyncio
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
+import yaml
 
 from core.models import (
     ExploreModule,
@@ -1138,13 +1139,18 @@ class TestOrchestratorExplore:
         assert recovered.category_status["performance"] == ExploreStatus.TODO.value
 
     def test_start_exploration_rejected_before_map_ready(self, orch):
+        result = orch.start_exploration(categories=["performance"])
+        assert result["started"] == 0
+        assert result["map_ready"] is False
+        assert "error" in result
+
+    def test_manual_module_map_is_ready_without_map_init(self, orch):
         mod = orch.add_explore_module(name="A", path="a")
         result = orch.start_exploration(
             module_ids=[mod["id"]], categories=["performance"]
         )
-        assert result["started"] == 0
-        assert result["map_ready"] is False
-        assert "error" in result
+        assert result["started"] == 1
+        assert orch.get_explore_status()["map_ready"] is True
 
     def test_init_map_non_reentrant_and_cancellable(self, orch):
         def _fake_init_map_streaming(
@@ -1874,7 +1880,7 @@ class TestModelConfigUpdates:
             "    simple: old-simple\n",
             "  coder_model_default: old-coder\n",
             "  reviewer_models:\n",
-            "    - old-reviewer\n",
+            "  - old-reviewer\n",
             "explore:\n",
             "  explorer_model: old-explorer\n",
             "  map_model: old-map\n",
@@ -1902,6 +1908,74 @@ class TestModelConfigUpdates:
         assert "- new-reviewer-b" in text
         assert "explorer_model: new-explorer" in text
         assert "map_model: new-map" in text
+
+    def test_patch_yaml_lines_does_not_modify_regression_model_profiles(self):
+        from core.orchestrator import Orchestrator
+
+        lines = [
+            "opencode:\n",
+            "  planner_model: old-planner\n",
+            "  coder_model_by_complexity:\n",
+            "    simple: old-simple\n",
+            "  coder_model_default: old-coder\n",
+            "  reviewer_models:\n",
+            "  - old-reviewer\n",
+            "explore:\n",
+            "  explorer_model: old-explorer\n",
+            "  map_model: old-map\n",
+            "regression:\n",
+            "  model_profiles:\n",
+            "    stable:\n",
+            "      planner_model: keep-planner\n",
+            "      coder_model_default: keep-coder\n",
+            "      coder_model_by_complexity: {}\n",
+            "      reviewer_models:\n",
+            "        - keep-reviewer\n",
+            "      explorer_model: keep-explorer\n",
+            "      map_model: keep-map\n",
+        ]
+
+        patched = Orchestrator._patch_yaml_lines(
+            lines,
+            {
+                "planner_model": "new-planner",
+                "coder_model_by_complexity": {"simple": "new-simple"},
+                "coder_model_default": "new-coder",
+                "reviewer_models": ["new-reviewer-a", "new-reviewer-b"],
+            },
+            {
+                "explorer_model": "new-explorer",
+                "map_model": "new-map",
+            },
+        )
+
+        parsed = yaml.safe_load("".join(patched))
+        assert parsed["opencode"]["planner_model"] == "new-planner"
+        assert parsed["opencode"]["coder_model_default"] == "new-coder"
+        assert parsed["opencode"]["coder_model_by_complexity"]["simple"] == "new-simple"
+        assert parsed["opencode"]["reviewer_models"] == [
+            "new-reviewer-a",
+            "new-reviewer-b",
+        ]
+        assert parsed["explore"]["explorer_model"] == "new-explorer"
+        assert parsed["explore"]["map_model"] == "new-map"
+        assert parsed["regression"]["model_profiles"]["stable"]["planner_model"] == (
+            "keep-planner"
+        )
+        assert (
+            parsed["regression"]["model_profiles"]["stable"]["coder_model_default"]
+            == "keep-coder"
+        )
+        assert parsed["regression"]["model_profiles"]["stable"]["reviewer_models"] == [
+            "keep-reviewer"
+        ]
+        assert (
+            parsed["regression"]["model_profiles"]["stable"]["explorer_model"]
+            == "keep-explorer"
+        )
+        assert parsed["regression"]["model_profiles"]["stable"]["map_model"] == (
+            "keep-map"
+        )
 
     def test_api_config_get_and_post_include_explore_models(self, orch):
         from web import app as web_app
@@ -1980,6 +2054,26 @@ class TestModelConfigUpdates:
             response = asyncio.run(web_app.api_add_jira_task(request))
             assert response.status_code == 400
             assert b"description required" in response.body
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_dispatch_task_reports_queued_when_parallel_limit_is_full(self, orch):
+        from web import app as web_app
+
+        task = Task(title="Queued manual task", description="wait for slot")
+        orch.db.save_task(task)
+        orch._pending_dispatch = [task.id]
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            with patch.object(
+                orch, "dispatch_task", return_value=False
+            ) as dispatch_mock:
+                response = asyncio.run(web_app.api_dispatch_task(task.id))
+
+            assert response == {"dispatched": False, "queued": True}
+            dispatch_mock.assert_called_once_with(task.id)
         finally:
             web_app.set_orchestrator(original)
 
@@ -2126,13 +2220,14 @@ class TestModelConfigUpdates:
         assert "all unmatched items" in kwargs["message"]
         assert "required_epic: QA-100" in kwargs["message"]
         assert "Improvement" in kwargs["message"]
-        assert "fixed_label: Doris Explorer" in kwargs["message"]
+        assert "fixed_label:" in kwargs["message"]
+        assert "DorisExplorer" in kwargs["message"]
         assert (
             "Choose assignee, extra labels, and optional component strictly from the routing hints."
             in kwargs["message"]
         )
         assert (
-            "Every created issue must include the fixed label `Doris Explorer` by passing it explicitly with `--label`."
+            "Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`."
             in kwargs["message"]
         )
         assert (

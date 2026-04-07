@@ -53,6 +53,30 @@ DEFAULT_CONFIG = {
         "timeout": 120,
         "skill_path": "skills/jira-issue",
     },
+    "regression": {
+        "default_profile": "stable",
+        "dry_run_jira": False,
+        "model_profiles": {
+            "stable": {
+                "planner_model": "github-copilot/gpt-5.4",
+                "coder_model_default": "github-copilot/gpt-5.4",
+                "coder_model_by_complexity": {},
+                "reviewer_models": ["github-copilot/gpt-5.4"],
+                "explorer_model": "github-copilot/gpt-5.4",
+                "map_model": "github-copilot/gpt-5.4",
+                "timeout": 1800,
+            },
+            "free": {
+                "planner_model": "opencode/qwen3.6-plus-free",
+                "coder_model_default": "opencode/qwen3.6-plus-free",
+                "coder_model_by_complexity": {},
+                "reviewer_models": ["opencode/qwen3.6-plus-free"],
+                "explorer_model": "opencode/qwen3.6-plus-free",
+                "map_model": "opencode/qwen3.6-plus-free",
+                "timeout": 1800,
+            },
+        },
+    },
 }
 
 

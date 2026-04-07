@@ -113,6 +113,26 @@ jira:
       # component is optional
       # labels are optional
 
+# Regression framework profiles
+# These profiles are only consumed by the standalone regression framework.
+# They are expanded into the normal opencode/explore config fields inside a
+# temporary generated config so production settings stay untouched.
+regression:
+  default_profile: free
+  # When true, regression Jira runs inject a dry-run mode into the vendored skill.
+  # The main program still drives the full Jira assignment flow end-to-end.
+  dry_run_jira: false
+  model_profiles:
+    free:
+      planner_model: opencode/qwen3.6-plus-free
+      coder_model_default: opencode/qwen3.6-plus-free
+      coder_model_by_complexity: {}
+      reviewer_models:
+        - opencode/qwen3.6-plus-free
+      explorer_model: opencode/qwen3.6-plus-free
+      map_model: opencode/qwen3.6-plus-free
+      timeout: 1800
+
 # Logging
 logging:
   level: INFO

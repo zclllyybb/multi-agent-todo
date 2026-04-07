@@ -256,6 +256,35 @@ class TestAgentVariantCli:
         idx = cmd.index("--agent")
         assert cmd[idx + 1] == "deep-explorer"
 
+    def test_run_streaming_continues_when_require_stop_and_output_incomplete(
+        self, client
+    ):
+        first_output = _build_output((["partial"], [], "tool-calls"))
+        second_output = _build_output((["final"], [], "stop"))
+
+        with patch.object(
+            client,
+            "_exec_streaming",
+            side_effect=[
+                (first_output, 0, 0.1, "ses_incomplete", False),
+                (second_output, 0, 0.2, "ses_incomplete", False),
+            ],
+        ) as exec_mock:
+            run = client.run_streaming(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                require_stop=True,
+                max_continues=2,
+            )
+
+        assert exec_mock.call_count == 2
+        second_cmd = exec_mock.call_args_list[1].kwargs["cmd"]
+        assert second_cmd[-1] == "Continue"
+        assert run.exit_code == 0
+        assert client.is_output_complete(run.output) is True
+
     def test_multiple_text_segments_in_last_step(self, client):
         output = _build_output(
             (["intro"], [], "tool-calls"),

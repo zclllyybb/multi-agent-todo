@@ -14,7 +14,15 @@ from agents.prompts import (
     planner_plan_task,
     planner_decompose_task,
 )
-from core.models import AgentRun, ModelOutputError, Task, TaskPriority, TaskSource, TodoItem, TodoItemStatus
+from core.models import (
+    AgentRun,
+    ModelOutputError,
+    Task,
+    TaskPriority,
+    TaskSource,
+    TodoItem,
+    TodoItemStatus,
+)
 from core.opencode_client import OpenCodeClient
 
 log = logging.getLogger(__name__)
@@ -26,8 +34,13 @@ class PlannerAgent(BaseAgent):
     def __init__(self, model: str, client: OpenCodeClient):
         super().__init__(model, client)
 
-    def scan_todos(self, repo_path: str, extensions: str = "java,cpp,h,py,go",
-                   subdir: str = "", limit: int = 0) -> List[dict]:
+    def scan_todos(
+        self,
+        repo_path: str,
+        extensions: str = "java,cpp,h,py,go",
+        subdir: str = "",
+        limit: int = 0,
+    ) -> List[dict]:
         """Scan the repository (or a subdirectory) for TODO/FIXME comments.
 
         Args:
@@ -50,9 +63,12 @@ class PlannerAgent(BaseAgent):
 
         try:
             result = subprocess.run(
-                ["grep", "-rn", "--no-messages"] + include_args +
-                ["-E", r"(TODO|FIXME|HACK|XXX)\b", scan_root],
-                capture_output=True, text=True, timeout=60,
+                ["grep", "-rn", "--no-messages"]
+                + include_args
+                + ["-E", r"(TODO|FIXME|HACK|XXX)\b", scan_root],
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             for line in result.stdout.strip().split("\n"):
                 if not line:
@@ -60,17 +76,25 @@ class PlannerAgent(BaseAgent):
                 # Format: file:line:text
                 parts = line.split(":", 2)
                 if len(parts) >= 3:
-                    todos.append({
-                        "file": parts[0],
-                        "line": int(parts[1]),
-                        "text": parts[2].strip(),
-                    })
+                    todos.append(
+                        {
+                            "file": parts[0],
+                            "line": int(parts[1]),
+                            "text": parts[2].strip(),
+                        }
+                    )
         except Exception as e:
             log.error("Failed to scan TODOs: %s", e)
 
         if limit > 0:
             todos = todos[:limit]
-        log.info("Found %d TODOs in %s (subdir=%r limit=%d)", len(todos), repo_path, subdir, limit)
+        log.info(
+            "Found %d TODOs in %s (subdir=%r limit=%d)",
+            len(todos),
+            repo_path,
+            subdir,
+            limit,
+        )
         return todos
 
     def create_tasks_from_todos(
@@ -88,7 +112,7 @@ class PlannerAgent(BaseAgent):
             task = Task(
                 title=f"TODO: {desc[:80]}",
                 description=f"Resolve TODO at {rel_path}:{item['line']}\n\n"
-                           f"Original comment: {text}",
+                f"Original comment: {text}",
                 priority=TaskPriority.MEDIUM,
                 source=TaskSource.TODO_SCAN,
                 file_path=rel_path,
@@ -97,14 +121,20 @@ class PlannerAgent(BaseAgent):
             tasks.append(task)
         return tasks
 
-    def analyze_todo(self, item: TodoItem, repo_path: str) -> Tuple[AgentRun, float, float, str]:
+    def analyze_todo(
+        self, item: TodoItem, repo_path: str
+    ) -> Tuple[AgentRun, float, float, str]:
         """Run the analyzer on a single TodoItem.
         Returns (agent_run, feasibility_score, difficulty_score, note).
         """
         import time as _time
+
         log.info(
             "Analyzer starting for todo [%s]: file=%s:%d desc=%r",
-            item.id, item.file_path, item.line_number, item.description[:80],
+            item.id,
+            item.file_path,
+            item.line_number,
+            item.description[:80],
         )
         prompt = analyzer_todo(
             file_path=item.file_path,
@@ -122,14 +152,19 @@ class PlannerAgent(BaseAgent):
 
         log.debug(
             "Analyzer raw output for todo [%s] (%.1fs, exit=%d):\n%s",
-            item.id, elapsed, run.exit_code, text[:500],
+            item.id,
+            elapsed,
+            run.exit_code,
+            text[:500],
         )
 
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             # Model gave plain text without JSON — acceptable for analysis,
             # caller sees -1 scores and raw text as note.
-            log.warning("Analyzer output for todo [%s] contained no JSON object", item.id)
+            log.warning(
+                "Analyzer output for todo [%s] contained no JSON object", item.id
+            )
             feasibility = -1.0
             difficulty = -1.0
             note = text[:300]
@@ -153,12 +188,19 @@ class PlannerAgent(BaseAgent):
 
         log.info(
             "Analyzer done for todo [%s]: feasibility=%.1f difficulty=%.1f note=%r (%.1fs)",
-            item.id, feasibility, difficulty, note[:80], elapsed,
+            item.id,
+            feasibility,
+            difficulty,
+            note[:80],
+            elapsed,
         )
         return run, feasibility, difficulty, note
 
     def analyze_and_split(
-        self, title: str, description: str, repo_path: str,
+        self,
+        title: str,
+        description: str,
+        repo_path: str,
         task_id: str = "",
     ) -> Tuple[AgentRun, bool, str, List[dict], str]:
         """Unified entry-point: assess complexity, decide atomicity, produce plan or sub-tasks.
@@ -172,7 +214,13 @@ class PlannerAgent(BaseAgent):
             description=description,
             repo_path=repo_path,
         )
-        run = self.run(prompt, repo_path, task_id=task_id)
+        run = self.run(
+            prompt,
+            repo_path,
+            task_id=task_id,
+            max_continues=8,
+            require_stop=True,
+        )
         text = self.get_text(run)
 
         match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -214,7 +262,13 @@ class PlannerAgent(BaseAgent):
             repo_path=repo_path,
         )
 
-        run = self.run(prompt, repo_path, task_id=task.id)  # already correct
+        run = self.run(
+            prompt,
+            repo_path,
+            task_id=task.id,
+            max_continues=8,
+            require_stop=True,
+        )
         plan_text = self.get_text(run)
         return run, plan_text
 
@@ -229,7 +283,7 @@ class PlannerAgent(BaseAgent):
             repo_path=repo_path,
         )
 
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, max_continues=8, require_stop=True)
         text = self.get_text(run)
 
         match = re.search(r"\[.*\]", text, re.DOTALL)

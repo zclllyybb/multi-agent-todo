@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -137,6 +138,19 @@ def main(
         assignee=assignee,
         priority=priority,
     )
+
+    forced_dry_run = os.getenv("MULTI_AGENT_TODO_JIRA_DRY_RUN", "").strip() == "1"
+
+    if forced_dry_run:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        synthetic_key = f"DRYRUN-{project_key}-1"
+        synthetic_self = f"https://dry-run.invalid/rest/api/2/issue/{synthetic_key}"
+        click.echo(f"key={synthetic_key}")
+        click.echo(f"self={synthetic_self}")
+        click.echo(f"payload={json.dumps(payload, ensure_ascii=False, sort_keys=True)}")
+        if epic:
+            click.echo(f"epic_linked={str(epic).strip()}")
+        return
 
     if print_payload or dry_run:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))

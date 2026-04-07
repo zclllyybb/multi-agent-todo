@@ -15,10 +15,14 @@ from core.config import load_config
 from core.orchestrator import Orchestrator
 from web.app import app, set_orchestrator
 
-PID_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "data", "daemon.pid"
-)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _pid_file_path(config: dict) -> str:
+    configured = str(config.get("regression", {}).get("pid_file", "")).strip()
+    if configured:
+        return configured
+    return os.path.join(PROJECT_ROOT, "data", "daemon.pid")
 
 
 def setup_logging(config: dict) -> str:
@@ -39,20 +43,20 @@ def setup_logging(config: dict) -> str:
     return log_file
 
 
-def write_pid():
-    os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
-    with open(PID_FILE, "w") as f:
+def write_pid(pid_file: str):
+    os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+    with open(pid_file, "w") as f:
         f.write(str(os.getpid()))
 
 
-def remove_pid():
-    if os.path.exists(PID_FILE):
-        os.remove(PID_FILE)
+def remove_pid(pid_file: str):
+    if os.path.exists(pid_file):
+        os.remove(pid_file)
 
 
-def read_pid() -> int:
-    if os.path.exists(PID_FILE):
-        with open(PID_FILE) as f:
+def read_pid(pid_file: str) -> int:
+    if os.path.exists(pid_file):
+        with open(pid_file) as f:
             try:
                 return int(f.read().strip())
             except ValueError:
@@ -134,21 +138,23 @@ def _terminate_pid(pid: int) -> bool:
 
 
 def is_running() -> bool:
-    pid = read_pid()
+    config = load_config(None)
+    pid = read_pid(_pid_file_path(config))
     return _is_pid_alive(pid)
 
 
-def start(config_path: str = None, foreground: bool = False):
+def start(config_path: Optional[str] = None, foreground: bool = False):
     """Start the daemon."""
     config = load_config(config_path)
     port = int(config["web"]["port"])
+    pid_file = _pid_file_path(config)
 
-    pid = read_pid()
+    pid = read_pid(pid_file)
     if pid and _is_pid_alive(pid):
         print(f"Daemon already running (pid={pid})")
         return
     if pid and not _is_pid_alive(pid):
-        remove_pid()
+        remove_pid(pid_file)
 
     listener_pid = _find_listener_pid(port)
     if listener_pid:
@@ -177,7 +183,9 @@ def start(config_path: str = None, foreground: bool = False):
             if started:
                 print(f"Daemon started (pid={pid})")
                 print(f"Dashboard: http://localhost:{config['web']['port']}")
-                print(f"Logs: {os.path.dirname(os.path.abspath(config['logging']['file']))}")
+                print(
+                    f"Logs: {os.path.dirname(os.path.abspath(config['logging']['file']))}"
+                )
             else:
                 print(
                     f"Daemon failed to start (pid={pid}). "
@@ -191,13 +199,13 @@ def start(config_path: str = None, foreground: bool = False):
     log = logging.getLogger("daemon")
     log.info("Log file: %s", log_file)
 
-    write_pid()
+    write_pid(pid_file)
     log.info("Daemon starting (pid=%d)", os.getpid())
 
     def handle_signal(signum, frame):
         log.info("Received signal %d, shutting down...", signum)
         orch.stop()
-        remove_pid()
+        remove_pid(pid_file)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, handle_signal)
@@ -209,7 +217,10 @@ def start(config_path: str = None, foreground: bool = False):
 
     # Start orchestrator loop
     orch.start()
-    log.info("Orchestrator started, launching web dashboard on port %d", config["web"]["port"])
+    log.info(
+        "Orchestrator started, launching web dashboard on port %d",
+        config["web"]["port"],
+    )
 
     # Run web server (blocks)
     try:
@@ -224,22 +235,23 @@ def start(config_path: str = None, foreground: bool = False):
             orch.stop()
         except Exception:
             pass
-        remove_pid()
+        remove_pid(pid_file)
 
 
 def stop(config_path: Optional[str] = None):
     """Stop the daemon."""
     config = load_config(config_path)
     port = int(config["web"]["port"])
+    pid_file = _pid_file_path(config)
 
-    pid = read_pid()
+    pid = read_pid(pid_file)
     stopped_pids = []
 
     if pid and _is_pid_alive(pid):
         if _terminate_pid(pid):
             stopped_pids.append(pid)
     elif pid:
-        remove_pid()
+        remove_pid(pid_file)
 
     listener_pid = _find_listener_pid(port)
     if listener_pid and listener_pid not in stopped_pids:
@@ -256,15 +268,16 @@ def stop(config_path: Optional[str] = None):
     else:
         print("Daemon is not running")
 
-    remove_pid()
+    remove_pid(pid_file)
 
 
 def status(config_path: Optional[str] = None):
     """Check daemon status."""
     config = load_config(config_path)
     port = int(config["web"]["port"])
+    pid_file = _pid_file_path(config)
 
-    pid = read_pid()
+    pid = read_pid(pid_file)
     running = _is_pid_alive(pid)
     listener_pid = _find_listener_pid(port)
 
@@ -273,10 +286,8 @@ def status(config_path: Optional[str] = None):
     else:
         print("Daemon is not running")
         if pid:
-            remove_pid()
+            remove_pid(pid_file)
 
     if listener_pid and listener_pid != pid:
         owner = "project" if _pid_matches_project(listener_pid) else "non-project"
-        print(
-            f"Port {port} listener detected (pid={listener_pid}, owner={owner})"
-        )
+        print(f"Port {port} listener detected (pid={listener_pid}, owner={owner})")

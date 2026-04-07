@@ -226,11 +226,18 @@ def coder_assign_jira_issue(
     available_issue_types: list[str],
     available_priorities: list[str],
     routing_hints: list[dict],
+    dry_run: bool = False,
 ) -> str:
     """Prompt the simple coder model to directly create a Jira issue via the local skill."""
     footer = (
         "此jira由赵长乐的agent创建，如有疑问可飞书联系。"
         "如果确认jira问题不存在/无需处理，或者处理完成，请在http://10.26.20.3:8778评论对应task。"
+    )
+    dry_run_block = (
+        "\nRegression dry-run mode is enabled for this run. When invoking the Jira skill, "
+        "you MUST pass `--dry-run`. Preserve and return any emitted `payload=` line verbatim.\n"
+        if dry_run
+        else ""
     )
     return f"""You are preparing and creating a Jira issue using the vendored local Jira skill in this repository.
 
@@ -249,6 +256,7 @@ Jira target:
 
 Routing hints:
 {routing_hints}
+{dry_run_block}
 
 Required summary prefix:
 [Doris Agent {source_task_id}]
@@ -264,12 +272,13 @@ Your job:
 5. Write a complete Jira description suitable for direct filing. It MUST end with the required footer verbatim.
 6. Use the local skill under `skills/jira-issue/` to create the issue directly. Do not use any external skill path.
 7. Return ONLY a short plain-text result containing `key=<ISSUE_KEY>` and `self=<ISSUE_URL>` on separate lines after successful creation.
-8. Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`.
-9. If the selected routing hint has labels, pass them with `--label`. If it has no labels, do not add any extra routing labels.
-10. If the selected routing hint has a component, pass it via `--component`. If the hint has no component, omit `--component`.
-11. You MUST pass the configured epic with `--epic {jira_epic}` so the new issue is linked to that epic.
-12. When invoking the skill, pass credentials explicitly in the command environment, for example by prefixing the command with `JIRA_URL=... JIRA_TOKEN=... JIRA_USER=...`. Do not rely on inherited shell environment being present inside the tool.
-13. If temporary files are created, remove them after Jira is created.
+8. If the skill was executed in dry-run mode and printed a serialized payload line prefixed with `payload=`, include that `payload=` line verbatim in your final plain-text result.
+9. Every created issue must include the fixed label `DorisExplorer` by passing it explicitly with `--label`.
+10. If the selected routing hint has labels, pass them with `--label`. If it has no labels, do not add any extra routing labels.
+11. If the selected routing hint has a component, pass it via `--component`. If the hint has no component, omit `--component`.
+12. You MUST pass the configured epic with `--epic {jira_epic}` so the new issue is linked to that epic.
+13. When invoking the skill, pass credentials explicitly in the command environment, for example by prefixing the command with `JIRA_URL=... JIRA_TOKEN=... JIRA_USER=...`. Do not rely on inherited shell environment being present inside the tool.
+14. If temporary files are created, remove them after Jira is created.
 
 Rules:
 - Do not invent issue types or priorities outside the provided lists.

@@ -208,6 +208,8 @@ async def api_add_task(request: Request):
         title=body.get("title", "Untitled"),
         description=body.get("description", ""),
         priority=body.get("priority", "medium"),
+        file_path=body.get("file_path", ""),
+        line_number=int(body.get("line_number", 0) or 0),
         copy_files=copy_files,
     )
     return task.to_dict()
@@ -287,8 +289,12 @@ async def api_assign_jira_for_task(task_id: str):
 async def api_dispatch_task(task_id: str):
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
+    task = orchestrator.db.get_task(task_id)
+    if not task:
+        return JSONResponse({"error": "Task not found"}, status_code=404)
     ok = orchestrator.dispatch_task(task_id)
-    return {"dispatched": ok}
+    queued = task_id in getattr(orchestrator, "_pending_dispatch", [])
+    return {"dispatched": ok, "queued": queued}
 
 
 @app.post("/api/tasks/{task_id}/cancel")
@@ -743,7 +749,7 @@ async def api_create_task_from_finding(run_id: str, request: Request):
     body = await request.json()
     finding_index = body.get("finding_index", -1)
     result = orchestrator.create_task_from_finding(run_id, finding_index)
-    if "error" in result:
+    if result.get("error"):
         return JSONResponse(result, status_code=400)
     return result
 
@@ -2173,7 +2179,16 @@ function switchAddTab(el, tabId) {
 }
 
 async function dispatchAll() { await api('/api/dispatch-all', {method:'POST'}); refresh(); }
-async function dispatch(id) { await api(`/api/tasks/${id}/dispatch`, {method:'POST'}); refresh(); }
+async function dispatch(id) {
+  const res = await api(`/api/tasks/${id}/dispatch`, {method:'POST'});
+  if (res && res.queued && !res.dispatched) {
+    await uiAlert(
+      'Task was queued because all worker slots are busy. It will start automatically when a slot frees up.',
+      'Task Queued'
+    );
+  }
+  refresh();
+}
 async function cancel(id) {
   const res = await api(`/api/tasks/${id}/cancel`, {method:'POST'});
   if (res && res.error) { await uiAlert(res.error, 'Cancel failed'); return; }
