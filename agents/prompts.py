@@ -212,6 +212,7 @@ def coder_retry_feedback(review_feedback: str, attempt: int) -> str:
         f"## Review Feedback (attempt {attempt})\n"
         f"{review_feedback}\n\n"
         "Please confirm whether the issues/optimization suggestions mentioned in the review are present/feasible, and if there are no issues, modify the code according to the suggestions."
+        "Do not ask me any questions. If you think the review comments are reasonable, make the modifications you believe are appropriate directly. You can decide on any intermediate issues on your own and finally explain them all together."
         "You still need to follow the instructions in AGENTS.md, but the environment part should already be ready as you just used it. Make sure the tests pass after the modifications and that the code is organized to be basically the clearest."
     )
 

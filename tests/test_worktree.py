@@ -1197,3 +1197,119 @@ class TestCoderRunFailureClassification:
         assert "TIMEOUT after 7200s" in saved.error
         assert "timed out" in saved.error.lower()
         assert "incomplete" not in saved.error.lower()
+
+
+class TestReviewerCoderResponseSelection:
+    def _make_execute_orchestrator(self, tmp_db):
+        from core.orchestrator import Orchestrator
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {
+            "repo": {
+                "path": "/r",
+                "base_branch": "master",
+                "worktree_dir": "/wt",
+                "worktree_hooks": [],
+            },
+            "opencode": {
+                "planner_model": "m",
+                "coder_model_default": "m",
+                "reviewer_models": [],
+                "coder_model_by_complexity": {},
+            },
+            "orchestrator": {
+                "max_retries": 0,
+                "max_workers": 1,
+                "max_parallel_tasks": 4,
+            },
+            "database": {"path": ":memory:"},
+            "publish": {"remote": "origin"},
+        }
+        orch.db = tmp_db
+        orch.worktree_mgr = MagicMock()
+        orch.worktree_mgr.create_worktree.return_value = "/wt/branch"
+        orch.client = MagicMock()
+        orch.dep_tracker = MagicMock()
+        orch.dep_tracker.get_children.return_value = set()
+        orch.dep_tracker.is_blocked.return_value = False
+        orch.dep_tracker.resolve_indices.return_value = [[], []]
+        orch._coder_by_complexity = {}
+        orch._default_coder = MagicMock()
+        orch.reviewers = []
+        orch.planner = MagicMock()
+        orch._lock = __import__("threading").Lock()
+        orch._futures = {}
+        orch._pending_dispatch = []
+        orch._executor = MagicMock()
+        return orch
+
+    def _make_plan_run(self, task_id=""):
+        from core.models import AgentRun
+
+        return AgentRun(
+            task_id=task_id,
+            agent_type="planner",
+            model="m",
+            prompt="p",
+            output="o",
+            exit_code=0,
+            session_id="",
+        )
+
+    def test_execute_task_passes_only_last_coder_text_block_to_reviewer(
+        self, tmp_db, make_task
+    ):
+        from core.models import AgentRun
+
+        task = make_task(status=TaskStatus.PENDING, source=TaskSource.MANUAL)
+        tmp_db.save_task(task)
+        orch = self._make_execute_orchestrator(tmp_db)
+
+        orch.planner.analyze_and_split.return_value = (
+            self._make_plan_run(task.id),
+            False,
+            "plan text",
+            [],
+            "simple",
+        )
+
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="p",
+            output="full coder transcript with many steps",
+            exit_code=0,
+            session_id="ses_code",
+        )
+        orch._default_coder.implement_task.return_value = (
+            code_run,
+            "full coder transcript with many steps",
+        )
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.return_value = "final coder summary"
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review",
+        )
+        reviewer.review_changes.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._execute_task(task.id)
+
+        orch.client.extract_last_text_block.assert_called_once_with(code_run.output)
+        assert reviewer.review_changes.call_args.kwargs["coder_response"] == (
+            "final coder summary"
+        )
+        assert (
+            reviewer.review_changes.call_args.kwargs["coder_response"]
+            != "full coder transcript with many steps"
+        )

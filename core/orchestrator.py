@@ -1418,6 +1418,8 @@ class Orchestrator:
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
+                coder_response = self._extract_coder_response(code_run)
+
                 reviewer_results = []
                 rejection_outputs = []
                 all_passed = True
@@ -1426,7 +1428,7 @@ class Orchestrator:
                         task,
                         worktree_path,
                         revision_context=user_feedback,
-                        coder_response=code_text,
+                        coder_response=coder_response,
                     )
                     self.db.save_agent_run(review_run)
                     reviewer_results.append(
@@ -2002,6 +2004,10 @@ class Orchestrator:
                 return run.session_id
         return ""
 
+    def _extract_coder_response(self, code_run: AgentRun) -> str:
+        """Return only the coder's final stop-step text for reviewer context."""
+        return self.client.extract_last_text_block(code_run.output)
+
     def _ensure_coder_run_success(self, code_run: AgentRun, attempt: int):
         """Validate coder run result and raise an accurate failure error."""
         if code_run.exit_code == 0:
@@ -2250,11 +2256,7 @@ class Orchestrator:
 
                 # Extract only the coder's final summary (last text block
                 # before stop) — not the entire session transcript.
-                coder_last_response = (
-                    self.client.extract_last_text_block(code_run.output)
-                    if attempt > 0
-                    else ""
-                )
+                coder_response = self._extract_coder_response(code_run)
 
                 # ── Multi-Reviewer: short-circuit on first REQUEST_CHANGES ──
                 task.status = TaskStatus.REVIEWING
@@ -2269,7 +2271,7 @@ class Orchestrator:
                         task,
                         worktree_path,
                         prior_rejections="\n\n".join(all_prior_rejections),
-                        coder_response=coder_last_response,
+                        coder_response=coder_response,
                     )
                     self.db.save_agent_run(review_run)
                     reviewer_results.append(

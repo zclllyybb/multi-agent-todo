@@ -10,20 +10,29 @@ from core.models import Task, TaskStatus, TaskPriority, TaskSource
 def _make_orchestrator(tmp_db):
     """Return a minimal Orchestrator with mocked dependencies."""
     from core.orchestrator import Orchestrator
+
     cfg = {
-        "repo": {"path": "/fake/repo", "base_branch": "master",
-                 "worktree_dir": "/fake/wt", "worktree_hooks": []},
-        "opencode": {"planner_model": "m", "coder_model_default": "m",
-                     "reviewer_models": []},
-        "orchestrator": {"max_retries": 1, "max_workers": 1,
-                         "max_parallel_tasks": 2},
+        "repo": {
+            "path": "/fake/repo",
+            "base_branch": "master",
+            "worktree_dir": "/fake/wt",
+            "worktree_hooks": [],
+        },
+        "opencode": {
+            "planner_model": "m",
+            "coder_model_default": "m",
+            "reviewer_models": [],
+        },
+        "orchestrator": {"max_retries": 1, "max_workers": 1, "max_parallel_tasks": 2},
         "database": {"path": ":memory:"},
         "publish": {"remote": "origin"},
     }
-    with patch("core.orchestrator.WorktreeManager"), \
-         patch("core.orchestrator.OpenCodeClient"), \
-         patch("core.orchestrator.PlannerAgent"), \
-         patch("core.orchestrator.Database", return_value=tmp_db):
+    with (
+        patch("core.orchestrator.WorktreeManager"),
+        patch("core.orchestrator.OpenCodeClient"),
+        patch("core.orchestrator.PlannerAgent"),
+        patch("core.orchestrator.Database", return_value=tmp_db),
+    ):
         orch = Orchestrator.__new__(Orchestrator)
         orch.config = cfg
         orch.db = tmp_db
@@ -292,3 +301,60 @@ class TestResumeTask:
         assert call_args[1] == "/wt/task"
         assert call_kwargs["user_message"] == "Continue"
         assert call_kwargs["session_id"] == "ses_resume_raw"
+
+    def test_resume_pipeline_passes_only_last_coder_text_block_to_reviewer(
+        self, tmp_db, make_task
+    ):
+        from core.models import AgentRun
+
+        task = make_task(
+            status=TaskStatus.PENDING,
+            worktree_path="/wt/task",
+            branch_name="agent/task-r3",
+            task_mode="develop",
+            max_retries=0,
+            session_ids={"coder": ["ses_resume_last_block"]},
+        )
+        tmp_db.save_task(task)
+        orch = _make_orchestrator(tmp_db)
+
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="Continue",
+            output="full resumed transcript",
+            exit_code=0,
+            session_id="ses_resume_last_block",
+        )
+        orch._default_coder.continue_session.return_value = (
+            code_run,
+            "full resumed transcript",
+        )
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.return_value = "final resumed summary"
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review",
+        )
+        reviewer.review_changes.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._revise_task_pipeline(task.id, "Continue", True)
+
+        orch.client.extract_last_text_block.assert_called_once_with(code_run.output)
+        assert reviewer.review_changes.call_args.kwargs["coder_response"] == (
+            "final resumed summary"
+        )
+        assert (
+            reviewer.review_changes.call_args.kwargs["coder_response"]
+            != "full resumed transcript"
+        )
