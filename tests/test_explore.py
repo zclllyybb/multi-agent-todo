@@ -2008,6 +2008,23 @@ class TestModelConfigUpdates:
         assert saved.task_mode == "develop"
         assert saved.jira_status == "pending"
 
+    def test_assign_jira_for_task_rolls_back_pending_status_when_dispatch_fails(
+        self, orch
+    ):
+        source_task = Task(
+            title="Resolve planner bug",
+            description="Planner crashes on malformed task graphs.",
+        )
+        orch.db.save_task(source_task)
+
+        with patch.object(orch, "_dispatch_jira_task", return_value=False):
+            result = orch.assign_jira_for_task(source_task.id)
+
+        assert result == {"error": "Failed to dispatch Jira assignment"}
+        saved = orch.db.get_task(source_task.id)
+        assert saved is not None
+        assert saved.jira_status == ""
+
     def test_api_assign_jira_for_existing_task_dispatches_in_place(self, orch):
         from web import app as web_app
 
@@ -2040,6 +2057,22 @@ class TestModelConfigUpdates:
         result = orch.assign_jira_for_task(source_task.id)
 
         assert result == {"error": "Jira assignment already in progress for this task"}
+
+    def test_get_status_includes_jira_assigning_in_active_tasks(self, orch):
+        pending = Task(title="Pending task", description="x", status=TaskStatus.PENDING)
+        jira = Task(
+            title="Assign jira",
+            description="x",
+            status=TaskStatus.JIRA_ASSIGNING,
+        )
+        orch.db.save_task(pending)
+        orch.db.save_task(jira)
+
+        status = orch.get_status()
+
+        active_ids = {t["id"] for t in status["active_tasks"]}
+        assert jira.id in active_ids
+        assert pending.id not in active_ids
 
     def test_jira_task_pipeline_syncs_result_back_to_source_task(self, orch):
         source_task = Task(title="Planner issue", description="Planner stalls")

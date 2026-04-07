@@ -670,6 +670,9 @@ class Orchestrator:
             dispatched,
         )
         if not dispatched:
+            source_task.jira_status = ""
+            source_task.updated_at = time.time()
+            self.db.save_task(source_task)
             return {"error": "Failed to dispatch Jira assignment"}
         return {"ok": True, "task": source_task.to_dict()}
 
@@ -1484,7 +1487,12 @@ class Orchestrator:
             t.to_dict()
             for t in tasks
             if t.status
-            in (TaskStatus.PLANNING, TaskStatus.CODING, TaskStatus.REVIEWING)
+            in (
+                TaskStatus.PLANNING,
+                TaskStatus.CODING,
+                TaskStatus.JIRA_ASSIGNING,
+                TaskStatus.REVIEWING,
+            )
         ]
         return {
             "running": self.running,

@@ -928,6 +928,7 @@ await showDetail('task123');
 const html = document.getElementById('detail-content').innerHTML;
 assert.match(html, /Assign Jira for This Task/);
 assert.match(html, /assignJiraForTask\('task123'\)/);
+assert.match(html, /Runs Jira assignment directly on this task and syncs the created Jira key here/);
 """
     )
 

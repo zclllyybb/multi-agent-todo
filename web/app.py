@@ -1722,7 +1722,7 @@ async function showDetail(id) {
   if (t.task_mode !== 'jira') {
     html += `<div style="margin:8px 0">
       <button class="btn" style="color:#f0883e;border-color:#f0883e" onclick="assignJiraForTask('${t.id}')">${t.jira_issue_key ? 'Reassign Jira for This Task' : 'Assign Jira for This Task'}</button>
-      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Creates a Jira-mode task linked to this task and syncs the created Jira key back here.</span>
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Runs Jira assignment directly on this task and syncs the created Jira key here.</span>
     </div>`;
   }
   if (t.clean_available) {
