@@ -310,6 +310,7 @@ assert.match(html, /performance/);
 def test_refresh_renders_task_list_successfully():
     status_payload = {
         "total_tasks": 3,
+        "active_task_count": 1,
         "status_counts": {
             "pending": 1,
             "planning": 0,
@@ -411,11 +412,13 @@ globalThis.fetch = async (url) => {{
   if (url === '/api/tasks') return {{ json: async () => tasksPayload }};
   throw new Error('unexpected url ' + url);
 }};
-await refresh();
-const statsHtml = document.getElementById('stats').innerHTML;
-const rowsHtml = document.getElementById('task-list').innerHTML;
-assert.match(statsHtml, /Total/);
-assert.match(statsHtml, />3</);
+    await refresh();
+    const statsHtml = document.getElementById('stats').innerHTML;
+    const rowsHtml = document.getElementById('task-list').innerHTML;
+    assert.match(statsHtml, /Total/);
+    assert.match(statsHtml, />3</);
+    assert.match(statsHtml, /Active/);
+    assert.match(statsHtml, /style="color:var\(--accent\)">1</);
     assert.match(rowsHtml, /Implement dashboard metrics/);
     assert.match(rowsHtml, /Refine metrics labels/);
     assert.match(rowsHtml, /Queue follow-up polish/);
@@ -614,7 +617,11 @@ assert.match(html, /changes look correct/);
 
 
 def test_refresh_renders_jira_mode_badge_successfully():
-    status_payload = {"total_tasks": 1, "status_counts": {"completed": 1}}
+    status_payload = {
+        "total_tasks": 1,
+        "active_task_count": 0,
+        "status_counts": {"completed": 1},
+    }
     tasks_payload = [
         {
             "id": "jira1",

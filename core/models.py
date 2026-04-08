@@ -27,6 +27,20 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+    @classmethod
+    def active_statuses(cls) -> tuple["TaskStatus", ...]:
+        """Canonical statuses considered actively executing by the system."""
+        return (
+            cls.PLANNING,
+            cls.CODING,
+            cls.JIRA_ASSIGNING,
+            cls.REVIEWING,
+        )
+
+    @classmethod
+    def is_active(cls, status: "TaskStatus") -> bool:
+        return status in cls.active_statuses()
+
 
 class TaskPriority(str, enum.Enum):
     HIGH = "high"

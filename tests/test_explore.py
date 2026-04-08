@@ -2167,6 +2167,7 @@ class TestModelConfigUpdates:
         active_ids = {t["id"] for t in status["active_tasks"]}
         assert jira.id in active_ids
         assert pending.id not in active_ids
+        assert status["active_task_count"] == 1
 
     def test_jira_task_pipeline_syncs_result_back_to_source_task(self, orch):
         source_task = Task(title="Planner issue", description="Planner stalls")

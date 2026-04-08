@@ -7,8 +7,13 @@ import threading
 from typing import List, Optional
 
 from core.models import (
-    Task, TaskStatus, AgentRun, TodoItem, TodoItemStatus,
-    ExploreModule, ExploreRun,
+    Task,
+    TaskStatus,
+    AgentRun,
+    TodoItem,
+    TodoItemStatus,
+    ExploreModule,
+    ExploreRun,
 )
 
 
@@ -103,14 +108,8 @@ class Database:
         return [t for t in tasks if t.status == status]
 
     def get_active_tasks(self) -> List[Task]:
-        active_statuses = {
-            TaskStatus.PLANNING,
-            TaskStatus.CODING,
-            TaskStatus.JIRA_ASSIGNING,
-            TaskStatus.REVIEWING,
-        }
         tasks = self.get_all_tasks()
-        return [t for t in tasks if t.status in active_statuses]
+        return [t for t in tasks if TaskStatus.is_active(t.status)]
 
     def get_pending_tasks(self) -> List[Task]:
         return self.get_tasks_by_status(TaskStatus.PENDING)

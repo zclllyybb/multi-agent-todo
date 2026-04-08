@@ -49,17 +49,14 @@ class TestTaskCRUD:
 
     def test_get_active_tasks(self, tmp_db, make_task):
         tmp_db.save_task(make_task(status=TaskStatus.PENDING))
+        tmp_db.save_task(make_task(status=TaskStatus.PLANNING))
         tmp_db.save_task(make_task(status=TaskStatus.CODING))
         tmp_db.save_task(make_task(status=TaskStatus.JIRA_ASSIGNING))
         tmp_db.save_task(make_task(status=TaskStatus.REVIEWING))
         tmp_db.save_task(make_task(status=TaskStatus.COMPLETED))
         active = tmp_db.get_active_tasks()
-        assert len(active) == 3
-        assert all(
-            t.status
-            in (TaskStatus.CODING, TaskStatus.JIRA_ASSIGNING, TaskStatus.REVIEWING)
-            for t in active
-        )
+        assert len(active) == 4
+        assert all(TaskStatus.is_active(t.status) for t in active)
 
     def test_delete_task(self, tmp_db, make_task):
         t = make_task()

@@ -1558,10 +1558,11 @@ async function refresh() {
   _lastRefreshHash = hash;
 
   const sc = status.status_counts || {};
+  const activeTaskCount = Number(status.active_task_count || 0);
   document.getElementById('stats').innerHTML = `
     <div class="stat-card"><div class="num">${status.total_tasks||0}</div><div class="label">Total</div></div>
     <div class="stat-card"><div class="num" style="color:var(--text-dim)">${sc.pending||0}</div><div class="label">Pending</div></div>
-    <div class="stat-card"><div class="num" style="color:var(--accent)">${(sc.planning||0)+(sc.coding||0)+(sc.jira_assigning||0)+(sc.reviewing||0)}</div><div class="label">Active</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--accent)">${activeTaskCount}</div><div class="label">Active</div></div>
     <div class="stat-card"><div class="num" style="color:var(--green)">${sc.completed||0}</div><div class="label">Completed</div></div>
     <div class="stat-card"><div class="num" style="color:#f0a040">${sc.needs_arbitration||0}</div><div class="label">Arbitration</div></div>
     <div class="stat-card"><div class="num" style="color:var(--red)">${(sc.failed||0)+(sc.review_failed||0)}</div><div class="label">Failed</div></div>

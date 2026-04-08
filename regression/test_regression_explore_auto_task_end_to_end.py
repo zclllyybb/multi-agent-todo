@@ -75,9 +75,7 @@ def test_real_explore_run_auto_creates_task_for_major_finding(
     assert "**Found by exploration**" in auto_task["description"], auto_task
     assert auto_task["status"] in {
         TaskStatus.PENDING.value,
-        TaskStatus.PLANNING.value,
-        TaskStatus.CODING.value,
-        TaskStatus.REVIEWING.value,
+        *(status.value for status in TaskStatus.active_statuses()),
         TaskStatus.COMPLETED.value,
         TaskStatus.FAILED.value,
         TaskStatus.NEEDS_ARBITRATION.value,

@@ -59,9 +59,7 @@ def test_real_explore_run_can_create_task_from_finding_via_public_api(
     assert task_payload["file_path"] == "app/reporting.py", task_detail
     assert task_payload["status"] in {
         TaskStatus.PENDING.value,
-        TaskStatus.PLANNING.value,
-        TaskStatus.CODING.value,
-        TaskStatus.REVIEWING.value,
+        *(status.value for status in TaskStatus.active_statuses()),
         TaskStatus.COMPLETED.value,
         TaskStatus.FAILED.value,
         TaskStatus.NEEDS_ARBITRATION.value,

@@ -34,6 +34,16 @@ class TestTaskRoundtrip:
         d = t.to_dict()
         assert d["status"] == "jira_assigning"
 
+    def test_active_statuses_centralized(self):
+        assert TaskStatus.active_statuses() == (
+            TaskStatus.PLANNING,
+            TaskStatus.CODING,
+            TaskStatus.JIRA_ASSIGNING,
+            TaskStatus.REVIEWING,
+        )
+        assert TaskStatus.is_active(TaskStatus.JIRA_ASSIGNING) is True
+        assert TaskStatus.is_active(TaskStatus.PENDING) is False
+
     def test_complex_fields_roundtrip(self, make_task):
         t = make_task(
             session_ids={"planner": ["ses1"], "coder": ["ses2", "ses3"]},

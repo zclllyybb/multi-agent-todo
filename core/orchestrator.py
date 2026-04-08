@@ -651,21 +651,12 @@ class Orchestrator:
         for t in tasks:
             s = t.status.value
             status_counts[s] = status_counts.get(s, 0) + 1
-        active = [
-            t.to_dict()
-            for t in tasks
-            if t.status
-            in (
-                TaskStatus.PLANNING,
-                TaskStatus.CODING,
-                TaskStatus.JIRA_ASSIGNING,
-                TaskStatus.REVIEWING,
-            )
-        ]
+        active = [t.to_dict() for t in tasks if TaskStatus.is_active(t.status)]
         return {
             "running": self.running,
             "total_tasks": len(tasks),
             "status_counts": status_counts,
+            "active_task_count": len(active),
             "active_tasks": active,
             "active_futures": len(self._futures),
         }
