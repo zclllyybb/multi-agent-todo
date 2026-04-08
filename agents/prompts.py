@@ -195,12 +195,12 @@ def coder_implement(
     parts += [
         "",
         "## Requirements",
-        "1. Make the minimal necessary changes to resolve this task",
+        "1. Make the minimal necessary changes to resolve this task. If changing leads to a more optimal organization of related functions and files, and the modifications are not difficult, please apply the relevant refactoring accordingly.",
         "2. Follow existing code style and conventions",
-        "3. You must actually execute compilation and testing (if any) to verify the correctness of the code",
+        "3. You must actually execute compilation and testing (if any) to verify the correctness of the code. Don't need to run all tests; only run those related to the functionality and code segment you've modified.",
         "4. Do not introduce new TODOs",
         "5. Use ONLY relative file paths (never absolute paths)",
-        "6. Ensure the commit content is correct, the final commit(s) submitted by you will be reviewed by the reviewer",
+        "6. Ensure the commit content is correct and all relevant code (Does not include environment modifications you make for compilation and testing) modifications eventually entered the commit. The final commit(s) submitted by you will be reviewed by the reviewer",
     ]
     return "\n".join(parts)
 
@@ -214,6 +214,8 @@ def coder_retry_feedback(review_feedback: str, attempt: int) -> str:
         "Please confirm whether the issues/optimization suggestions mentioned in the review are present/feasible, and if there are no issues, modify the code according to the suggestions."
         "Do not ask me any questions. If you think the review comments are reasonable, make the modifications you believe are appropriate directly. You can decide on any intermediate issues on your own and finally explain them all together."
         "You still need to follow the instructions in AGENTS.md, but the environment part should already be ready as you just used it. Make sure the tests pass after the modifications and that the code is organized to be basically the clearest."
+        "The overall code style and conventions must still be followed."
+        "All changes must still be made as commit(s) so that the reviewer can see them."
     )
 
 
@@ -231,8 +233,8 @@ def coder_assign_jira_issue(
 ) -> str:
     """Prompt the simple coder model to directly create a Jira issue via the local skill."""
     footer = (
-        "此jira由赵长乐的agent创建，如有疑问可飞书联系。"
-        "如果确认jira问题不存在/无需处理，或者处理完成，请在http://10.26.20.3:8778评论对应task。"
+        "此jira由赵长乐的agent创建，AI 有误判可能，如有疑问可飞书联系。"
+        "如果确认jira问题不存在/无需处理，或者处理完成，请在 http://10.26.20.3:8778 评论对应task。"
     )
     dry_run_block = (
         "\nRegression dry-run mode is enabled for this run. When invoking the Jira skill, "
@@ -298,7 +300,7 @@ REVIEW_REQUIREMENTS = """
 ## Instructions
 The coding agent has already committed its changes to this repository's git history. You should only focus on the content of the commits; the content in the working area that has not been committed is NOT part of the submission and does not require review.
 Use the available tools to inspect the work:
-  - Run `git log --oneline -5` to see recent commits.
+  - Run `git log --oneline -10` to see recent commits.
   - Run `git show HEAD` (may with appropriate offset) to view the content of the commits. DON'T use `git diff` because it shows the diff between the working area.
   - Read any modified files to check correctness and style.
 
