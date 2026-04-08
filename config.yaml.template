@@ -101,7 +101,7 @@ jira:
   # Routing hints passed directly to the simple coder model.
   # Include a catch-all unmatched item if you want fallback assignee/component behavior.
   # labels and component are both optional on each hint.
-  # Every created issue will always include the fixed label: Doris Explorer.
+  # Every created issue will always include the fixed label: DorisExplorer.
   routing_hints:
     - about: query execution issues in be/src/exec and be/src/pipeline
       assignee: your-jira-username

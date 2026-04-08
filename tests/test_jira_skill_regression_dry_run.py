@@ -46,3 +46,4 @@ def test_regression_forced_dry_run_emits_synthetic_key_self_and_payload(tmp_path
     payload = json.loads(payload_line.split("=", 1)[1])
     assert payload["fields"]["project"]["key"] == "QA"
     assert payload["fields"]["summary"] == "Regression summary"
+    assert payload["fields"]["labels"] == ["DorisExplorer"]

@@ -591,13 +591,6 @@ async def api_explore_module_detail(module_id: str):
         rd["parsed"] = client.parse_readable_output(r.output)
         rd.pop("output", None)
         parsed_runs.append(rd)
-    client = orchestrator.client
-    parsed_runs = []
-    for r in runs:
-        rd = r.to_dict()
-        rd["parsed"] = client.parse_readable_output(r.output)
-        rd.pop("output", None)
-        parsed_runs.append(rd)
     return {
         "module": module.to_dict(),
         "runs": parsed_runs,

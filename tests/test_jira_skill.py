@@ -44,7 +44,7 @@ def _run_jira_create_issue_dry_run(*args: str, description_text: str) -> dict:
 def test_jira_create_issue_dry_run_executes_and_includes_fixed_label_and_component():
     payload = _run_jira_create_issue_dry_run(
         "--label",
-        "Doris Explorer",
+        "DorisExplorer",
         "--label",
         "planner",
         "--component",
@@ -63,7 +63,7 @@ def test_jira_create_issue_dry_run_executes_and_includes_fixed_label_and_compone
     assert fields["issuetype"]["name"] == "Bug"
     assert fields["summary"] == "Dry run issue"
     assert fields["description"] == "Dry-run description"
-    assert fields["labels"] == ["Doris Explorer", "planner"]
+    assert fields["labels"] == ["DorisExplorer", "planner"]
     assert fields["components"] == [{"name": "query execution"}]
     assert fields["assignee"] == {"name": "alice"}
     assert fields["priority"] == {"name": "High"}
@@ -72,14 +72,14 @@ def test_jira_create_issue_dry_run_executes_and_includes_fixed_label_and_compone
 def test_jira_create_issue_dry_run_allows_empty_extra_labels_and_empty_component():
     payload = _run_jira_create_issue_dry_run(
         "--label",
-        "Doris Explorer",
+        "DorisExplorer",
         "--epic",
         "DORIS-24979",
         description_text="Only fixed label",
     )
 
     fields = payload["fields"]
-    assert fields["labels"] == ["Doris Explorer"]
+    assert fields["labels"] == ["DorisExplorer"]
     assert "components" not in fields
 
 
@@ -89,7 +89,7 @@ def test_jira_create_issue_dry_run_ignores_epic_in_payload():
         "--epic",
         "DORIS-24979",
         "--label",
-        "Doris Explorer",
+        "DorisExplorer",
         description_text="Issue with epic link",
     )
 
@@ -114,7 +114,7 @@ def test_jira_create_issue_epic_linking_calls_agile_api():
             issue_type="Bug",
             summary="Test issue",
             description="Test desc",
-            labels=["Doris Explorer"],
+            labels=["DorisExplorer"],
             components=[],
             affects_versions=[],
             fix_versions=[],
