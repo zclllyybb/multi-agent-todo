@@ -53,14 +53,6 @@ class TaskViewService:
         branch_worktrees: dict[str, list[str]],
     ) -> dict:
         """Compute actual git-resource existence used by UI clean visibility."""
-        cleanable_statuses = {
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.REVIEW_FAILED,
-            TaskStatus.CANCELLED,
-            TaskStatus.NEEDS_ARBITRATION,
-        }
-
         actual_branch_exists = bool(
             task.branch_name and task.branch_name in local_branches
         )
@@ -75,14 +67,36 @@ class TaskViewService:
                     break
 
         actual_worktree_exists = recorded_worktree_exists or branch_worktree_exists
-        clean_available = task.status in cleanable_statuses and (
+        clean_available = TaskStatus.is_cleanable(task.status) and (
             actual_branch_exists or actual_worktree_exists
         )
+        can_publish = (
+            TaskStatus.is_publishable(task.status)
+            and bool(task.branch_name)
+            and task.task_mode not in {"review", "jira"}
+        )
+        can_assign_jira = task.task_mode != "jira"
+        can_cancel = not TaskStatus.is_cancel_terminal(task.status)
+        can_resume = (
+            TaskStatus.is_resumable(task.status)
+            and task.task_mode == "develop"
+            and bool(task.worktree_path)
+        )
+        can_revise = TaskStatus.is_revisable(task.status) and bool(task.worktree_path)
+        can_arbitrate = TaskStatus.is_awaiting_arbitration(task.status)
+        dependency_satisfied = TaskStatus.is_dependency_satisfied(task.status)
 
         return {
             "actual_branch_exists": actual_branch_exists,
             "actual_worktree_exists": actual_worktree_exists,
             "clean_available": clean_available,
+            "can_publish": can_publish,
+            "can_assign_jira": can_assign_jira,
+            "can_cancel": can_cancel,
+            "can_resume": can_resume,
+            "can_revise": can_revise,
+            "can_arbitrate": can_arbitrate,
+            "dependency_satisfied": dependency_satisfied,
         }
 
     def serialize_tasks_for_ui(self, tasks: List[Task]) -> List[dict]:

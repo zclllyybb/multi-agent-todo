@@ -118,6 +118,10 @@ class Database:
         self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         self._conn.commit()
 
+    def delete_agent_runs_for_task(self, task_id: str):
+        self._conn.execute("DELETE FROM agent_runs WHERE task_id = ?", (task_id,))
+        self._conn.commit()
+
     # ── TodoItem CRUD ─────────────────────────────────────────────────
 
     def save_todo_item(self, item: TodoItem):

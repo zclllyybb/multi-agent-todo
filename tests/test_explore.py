@@ -22,6 +22,8 @@ from core.models import (
     TaskSource,
     TaskStatus,
     ModelOutputError,
+    TodoItem,
+    TodoItemStatus,
 )
 from core.database import Database
 from core.opencode_client import OpenCodeClient
@@ -2077,6 +2079,131 @@ class TestModelConfigUpdates:
         finally:
             web_app.set_orchestrator(original)
 
+    def test_api_delete_tasks_requires_ids(self, orch):
+        from web import app as web_app
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {"ids": []}
+
+            request.json = _json
+            response = asyncio.run(web_app.api_delete_tasks(request))
+            assert response.status_code == 400
+            assert b"ids required" in response.body
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_delete_tasks_returns_400_when_all_deletes_fail(self, orch):
+        from web import app as web_app
+
+        task = Task(title="Keep me", description="still referenced")
+        child = Task(title="Child", description="x", parent_id=task.id)
+        blocked = Task(title="Blocked", description="y", depends_on=[child.id])
+        orch.db.save_task(task)
+        orch.db.save_task(child)
+        orch.db.save_task(blocked)
+        orch.client._task_procs = {}
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {"ids": [task.id]}
+
+            request.json = _json
+            with patch.object(
+                orch, "_collect_resource_snapshot", return_value=(set(), {})
+            ):
+                response = asyncio.run(web_app.api_delete_tasks(request))
+            assert response.status_code == 400
+            assert b"Task is referenced by dependent task" in response.body
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_delete_tasks_returns_partial_success_payload(self, orch):
+        from web import app as web_app
+
+        deletable = Task(
+            title="Delete me", description="isolated", status=TaskStatus.FAILED
+        )
+        blocked = Task(
+            title="Keep me", description="still referenced", status=TaskStatus.FAILED
+        )
+        child = Task(title="Child", description="x", parent_id=blocked.id)
+        external = Task(title="External", description="z", depends_on=[child.id])
+        orch.db.save_task(deletable)
+        orch.db.save_task(blocked)
+        orch.db.save_task(child)
+        orch.db.save_task(external)
+        orch.client._task_procs = {}
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {"ids": [deletable.id, blocked.id]}
+
+            request.json = _json
+            with patch.object(
+                orch, "_collect_resource_snapshot", return_value=(set(), {})
+            ):
+                response = asyncio.run(web_app.api_delete_tasks(request))
+            assert response["deleted"] == 1
+            assert response["deleted_ids"] == [deletable.id]
+            assert (
+                "Task is referenced by dependent task" in response["errors"][blocked.id]
+            )
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_delete_tasks_deletes_safe_task_and_related_records(self, orch):
+        from web import app as web_app
+
+        task = Task(title="Delete me", description="isolated", status=TaskStatus.FAILED)
+        orch.db.save_task(task)
+        orch.db.save_agent_run(
+            _mock_agent_run(prompt="p", output="o", session_id="ses_delete")
+        )
+        todo = TodoItem(
+            file_path="a.py",
+            line_number=1,
+            status=TodoItemStatus.DISPATCHED,
+            task_id=task.id,
+        )
+        orch.db.save_todo_item(todo)
+        orch.client._task_procs = {}
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {"ids": [task.id]}
+
+            request.json = _json
+            with patch.object(
+                orch, "_collect_resource_snapshot", return_value=(set(), {})
+            ):
+                response = asyncio.run(web_app.api_delete_tasks(request))
+            assert response["deleted"] == 1
+            assert response["deleted_ids"] == [task.id]
+            assert response["errors"] == {}
+            assert orch.db.get_task(task.id) is None
+            reverted = orch.db.get_todo_item(todo.id)
+            assert reverted.status == TodoItemStatus.ANALYZED
+            assert reverted.task_id == ""
+        finally:
+            web_app.set_orchestrator(original)
+
     def test_assign_jira_for_task_dispatches_in_place_without_creating_new_task(
         self, orch
     ):
@@ -2194,6 +2321,81 @@ class TestModelConfigUpdates:
         assert saved_source.jira_issue_url == "https://jira.example/browse/QA-321"
         assert saved_source.jira_status == "created"
 
+    def test_in_place_jira_assignment_success_restores_task_to_pending(self, orch):
+        task = Task(
+            title="Planner issue",
+            description="Planner stalls",
+            status=TaskStatus.REVIEW_FAILED,
+            review_pass=False,
+            review_output="REQUEST_CHANGES\nFix null handling",
+            reviewer_results=[
+                {
+                    "model": "reviewer-a",
+                    "passed": False,
+                    "output": "Fix null handling",
+                }
+            ],
+            error="Review failed",
+            completed_at=123.0,
+        )
+        orch.db.save_task(task)
+
+        run = _mock_agent_run(
+            prompt="jira prompt",
+            output="key=QA-321\nself=https://jira.example/rest/api/2/issue/321\ncreated body",
+            session_id="ses_jira",
+        )
+        with patch.object(orch, "_run_jira_agent", return_value=(run, run.output)):
+            orch._jira_task_pipeline(task.id)
+
+        saved = orch.db.get_task(task.id)
+        assert saved.status == TaskStatus.PENDING
+        assert saved.jira_status == "created"
+        assert saved.jira_issue_key == "QA-321"
+        assert saved.review_pass is False
+        assert saved.review_output == "REQUEST_CHANGES\nFix null handling"
+        assert saved.reviewer_results == [
+            {
+                "model": "reviewer-a",
+                "passed": False,
+                "output": "Fix null handling",
+            }
+        ]
+        assert saved.completed_at == 0.0
+
+    def test_in_place_jira_assignment_failure_restores_prior_status(self, orch):
+        task = Task(
+            title="Planner issue",
+            description="Planner stalls",
+            status=TaskStatus.NEEDS_ARBITRATION,
+            review_pass=False,
+            review_output="REQUEST_CHANGES\nStill broken",
+            reviewer_results=[
+                {"model": "reviewer-a", "passed": False, "output": "Still broken"}
+            ],
+            error="Awaiting arbitration",
+            completed_at=456.0,
+        )
+        orch.db.save_task(task)
+
+        run = _mock_agent_run(
+            prompt="jira prompt",
+            output="unexpected output without issue key",
+            session_id="ses_jira",
+        )
+        with patch.object(orch, "_run_jira_agent", return_value=(run, run.output)):
+            orch._jira_task_pipeline(task.id)
+
+        saved = orch.db.get_task(task.id)
+        assert saved.status == TaskStatus.FAILED
+        assert saved.jira_status == "failed"
+        assert saved.review_pass is False
+        assert saved.review_output == "REQUEST_CHANGES\nStill broken"
+        assert saved.reviewer_results == [
+            {"model": "reviewer-a", "passed": False, "output": "Still broken"}
+        ]
+        assert saved.completed_at == 456.0
+
     def test_run_jira_agent_uses_simple_coder_model_and_prompt_rules(self, orch):
         task = Task(
             title="Planner issue",
@@ -2246,8 +2448,8 @@ class TestModelConfigUpdates:
         assert "Do not omit or change the configured epic." in kwargs["message"]
         assert f"[Doris Agent src-task-777]" in kwargs["message"]
         assert (
-            "此jira由赵长乐的agent创建，如有疑问可飞书联系。"
-            "如果确认jira问题不存在/无需处理，或者处理完成，请在http://10.26.20.3:8778评论对应task。"
+            "此jira由赵长乐的agent创建，AI 有误判可能，如有疑问可飞书联系。"
+            "如果确认jira问题不存在/无需处理，或者处理完成，请在 http://10.26.20.3:8778 评论对应task。"
             in kwargs["message"]
         )
         assert "skills/jira-issue/SKILL.md" in kwargs["message"]
@@ -2393,5 +2595,31 @@ class TestModelConfigUpdates:
             assert saved is not None
             assert len(saved.comments) == 1
             assert saved.comments[0]["content"] == "Please check the edge case."
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_task_detail_uses_backend_review_verdict_parsing(self, orch):
+        from web import app as web_app
+
+        task = Task(title="Review me", description="desc")
+        orch.db.save_task(task)
+        reviewer_run = _mock_agent_run(
+            prompt="review prompt",
+            output="APPROVE\nPreviously I would have said REQUEST_CHANGES but it's fixed now.",
+            session_id="ses_review_verdict",
+        )
+        reviewer_run.task_id = task.id
+        reviewer_run.agent_type = "reviewer"
+        orch.db.save_agent_run(reviewer_run)
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            with patch.object(
+                orch, "_collect_resource_snapshot", return_value=(set(), {})
+            ):
+                orch.client.extract_text_response.return_value = reviewer_run.output
+                response = asyncio.run(web_app.api_task_detail(task.id))
+            assert response["runs"][0]["review_verdict"] == "approve"
         finally:
             web_app.set_orchestrator(original)

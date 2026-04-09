@@ -11,7 +11,15 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from core.worktree import WorktreeManager
-from core.models import Task, TaskStatus, TaskPriority, TaskSource
+from core.models import (
+    Task,
+    TaskStatus,
+    TaskPriority,
+    TaskSource,
+    AgentRun,
+    TodoItem,
+    TodoItemStatus,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -738,13 +746,21 @@ def _orch_helper(tmp_db):
     orch.db = tmp_db
     orch.worktree_mgr = MagicMock()
     orch.worktree_mgr.remove_worktree.return_value = None
+    orch.worktree_mgr._run_git.return_value = MagicMock(
+        returncode=0, stdout="", stderr=""
+    )
+    orch.worktree_mgr.list_worktrees.return_value = []
     orch.client = MagicMock()
+    orch.client._task_procs = {}
     orch.dep_tracker = MagicMock()
     orch.dep_tracker.get_children.return_value = set()
     orch._coder_by_complexity = {}
     orch._default_coder = MagicMock()
     orch.reviewers = []
     orch._executor = MagicMock()
+    orch._pending_dispatch = []
+    orch._resource_snapshot_cache = (set(), {})
+    orch._resource_snapshot_cached_at = 0.0
     return orch
 
 
@@ -835,6 +851,183 @@ class TestCascadingClean:
         result = orch.clean_task(parent.id)
         assert result.get("cleaned") is True
         orch.worktree_mgr.remove_worktree.assert_called_once()
+
+
+class TestTaskDeletion:
+    def test_delete_task_removes_isolated_task_agent_runs_and_todo_links(
+        self, tmp_db, make_task
+    ):
+        task = make_task(status=TaskStatus.FAILED)
+        tmp_db.save_task(task)
+        tmp_db.save_agent_run(
+            AgentRun(task_id=task.id, agent_type="planner", output="x")
+        )
+        tmp_db.save_agent_run(AgentRun(task_id=task.id, agent_type="coder", output="y"))
+        dispatched = TodoItem(
+            file_path="a.py",
+            line_number=1,
+            status=TodoItemStatus.DISPATCHED,
+            task_id=task.id,
+        )
+        analyzed = TodoItem(
+            file_path="b.py",
+            line_number=2,
+            status=TodoItemStatus.ANALYZED,
+            task_id=task.id,
+        )
+        tmp_db.save_todo_item(dispatched)
+        tmp_db.save_todo_item(analyzed)
+        orch = _orch_helper(tmp_db)
+        orch._pending_dispatch = ["other"]
+
+        result = orch.delete_tasks([task.id])
+
+        assert result == {"deleted": 1, "deleted_ids": [task.id], "errors": {}}
+        assert tmp_db.get_task(task.id) is None
+        assert tmp_db.get_runs_for_task(task.id) == []
+        reverted = tmp_db.get_todo_item(dispatched.id)
+        assert reverted.status == TodoItemStatus.ANALYZED
+        assert reverted.task_id == ""
+        unlinked = tmp_db.get_todo_item(analyzed.id)
+        assert unlinked.status == TodoItemStatus.ANALYZED
+        assert unlinked.task_id == ""
+        orch.client.kill_task.assert_called_once_with(task.id)
+        orch.dep_tracker.cleanup.assert_called_once_with(task.id)
+        assert orch._pending_dispatch == ["other"]
+
+    def test_delete_task_rejects_running_task(self, tmp_db, make_task):
+        task = make_task(status=TaskStatus.CODING)
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch._futures = {task.id: MagicMock()}
+
+        result = orch.delete_tasks([task.id])
+
+        assert result["deleted"] == 0
+        assert result["errors"][task.id] == "Task is currently running"
+        assert tmp_db.get_task(task.id) is not None
+
+    def test_delete_task_rejects_queued_task(self, tmp_db, make_task):
+        task = make_task(status=TaskStatus.PENDING)
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch._pending_dispatch = [task.id]
+
+        result = orch.delete_tasks([task.id])
+
+        assert result["errors"][task.id] == "Task is queued for dispatch"
+
+    def test_delete_task_rejects_active_process(self, tmp_db, make_task):
+        task = make_task(status=TaskStatus.FAILED)
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+        orch.client._task_procs = {task.id: object()}
+
+        result = orch.delete_tasks([task.id])
+
+        assert result["errors"][task.id] == "Task still has an active process"
+
+    def test_delete_task_rejects_uncleaned_resources(self, tmp_db, make_task):
+        task = make_task(
+            status=TaskStatus.COMPLETED,
+            branch_name="agent/task-delete",
+            worktree_path="/wt/task-delete",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        with (
+            patch.object(
+                orch,
+                "_collect_resource_snapshot",
+                return_value=(
+                    {"agent/task-delete"},
+                    {"agent/task-delete": ["/wt/task-delete"]},
+                ),
+            ),
+            patch("core.task_view.os.path.isdir", return_value=True),
+        ):
+            result = orch.delete_tasks([task.id])
+
+        assert (
+            result["errors"][task.id]
+            == "Task still has branch/worktree resources; clean it first"
+        )
+
+    def test_delete_task_cascades_to_children(self, tmp_db, make_task):
+        parent = make_task(status=TaskStatus.FAILED)
+        child = make_task(status=TaskStatus.COMPLETED, parent_id=parent.id)
+        grandchild = make_task(status=TaskStatus.CANCELLED, parent_id=child.id)
+        tmp_db.save_task(parent)
+        tmp_db.save_task(child)
+        tmp_db.save_task(grandchild)
+        orch = _orch_helper(tmp_db)
+
+        result = orch.delete_tasks([parent.id])
+
+        assert result["errors"] == {}
+        assert result["deleted"] == 3
+        assert result["deleted_ids"] == [grandchild.id, child.id, parent.id]
+        assert tmp_db.get_task(parent.id) is None
+        assert tmp_db.get_task(child.id) is None
+        assert tmp_db.get_task(grandchild.id) is None
+
+    def test_delete_task_rejects_dependency_reference(self, tmp_db, make_task):
+        parent = make_task(status=TaskStatus.FAILED)
+        child = make_task(status=TaskStatus.COMPLETED, parent_id=parent.id)
+        blocked = make_task(status=TaskStatus.PENDING, depends_on=[child.id])
+        tmp_db.save_task(parent)
+        tmp_db.save_task(child)
+        tmp_db.save_task(blocked)
+        orch = _orch_helper(tmp_db)
+
+        result = orch.delete_tasks([parent.id])
+
+        assert (
+            result["errors"][parent.id]
+            == f"Descendant task {child.id}: Task is referenced by dependent task {blocked.id}; delete it first"
+        )
+
+    def test_delete_task_rejects_jira_source_reference(self, tmp_db, make_task):
+        source = make_task(status=TaskStatus.COMPLETED)
+        child = make_task(status=TaskStatus.COMPLETED, parent_id=source.id)
+        jira = make_task(
+            status=TaskStatus.COMPLETED,
+            task_mode="jira",
+            jira_source_task_id=child.id,
+        )
+        tmp_db.save_task(source)
+        tmp_db.save_task(child)
+        tmp_db.save_task(jira)
+        orch = _orch_helper(tmp_db)
+
+        result = orch.delete_tasks([source.id])
+
+        assert (
+            result["errors"][source.id]
+            == f"Descendant task {child.id}: Task is referenced by jira-mode task {jira.id}; delete it first"
+        )
+
+    def test_delete_task_allows_stale_recorded_branch_when_no_actual_resources(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.CANCELLED,
+            branch_name="agent/task-stale-delete",
+            worktree_path="",
+        )
+        tmp_db.save_task(task)
+        orch = _orch_helper(tmp_db)
+
+        with patch.object(
+            orch,
+            "_collect_resource_snapshot",
+            return_value=(set(), {}),
+        ):
+            result = orch.delete_tasks([task.id])
+
+        assert result == {"deleted": 1, "deleted_ids": [task.id], "errors": {}}
+        assert tmp_db.get_task(task.id) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1313,3 +1506,98 @@ class TestReviewerCoderResponseSelection:
             reviewer.review_changes.call_args.kwargs["coder_response"]
             != "full coder transcript with many steps"
         )
+
+    def test_execute_task_retry_passes_only_last_reviewer_text_block_to_coder(
+        self, tmp_db, make_task
+    ):
+        from core.models import AgentRun
+
+        task = make_task(
+            status=TaskStatus.PENDING,
+            source=TaskSource.MANUAL,
+            max_retries=1,
+        )
+        tmp_db.save_task(task)
+        orch = self._make_execute_orchestrator(tmp_db)
+
+        orch.planner.analyze_and_split.return_value = (
+            self._make_plan_run(task.id),
+            False,
+            "plan text",
+            [],
+            "simple",
+        )
+
+        first_code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="p1",
+            output="first coder transcript",
+            exit_code=0,
+            session_id="ses_code_retry",
+            created_at=1.0,
+        )
+        second_code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="p2",
+            output="second coder transcript",
+            exit_code=0,
+            session_id="ses_code_retry",
+            created_at=3.0,
+        )
+        orch._default_coder.implement_task.return_value = (
+            first_code_run,
+            "first coder transcript",
+        )
+        orch._default_coder.retry_with_feedback.return_value = (
+            second_code_run,
+            "second coder transcript",
+        )
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.side_effect = [
+            "first coder summary",
+            "second coder summary",
+        ]
+        orch.client.extract_last_text_block_or_raw.return_value = (
+            "final reviewer paragraph"
+        )
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        reject_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="full reviewer transcript with metadata",
+            exit_code=0,
+            session_id="ses_review_retry_1",
+            created_at=2.0,
+        )
+        approve_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review_retry_2",
+            created_at=4.0,
+        )
+        reviewer.review_changes.side_effect = [
+            (reject_run, False, "Please adjust edge cases"),
+            (approve_run, True, "APPROVE"),
+        ]
+        orch.reviewers = [reviewer]
+
+        orch._execute_task(task.id)
+
+        retry_kwargs = orch._default_coder.retry_with_feedback.call_args.kwargs
+        assert retry_kwargs["review_feedback"] == "final reviewer paragraph"
+        assert retry_kwargs["review_feedback"] != (
+            "=== Reviewer: rev-m | REQUEST_CHANGES ===\nPlease adjust edge cases"
+        )
+        orch.client.extract_last_text_block_or_raw.assert_called_with(reject_run.output)

@@ -315,6 +315,13 @@ class JiraService:
             log.error("Jira task not found: %s", task_id)
             return
 
+        original_status = task.status
+        original_completed_at = task.completed_at
+        original_review_pass = task.review_pass
+        original_reviewer_results = list(task.reviewer_results)
+        original_review_output = task.review_output
+        original_error = task.error
+
         try:
             jira = self.get_jira_config()
             if not jira["url"]:
@@ -365,10 +372,18 @@ class JiraService:
             task.jira_issue_key = key
             task.jira_issue_url = issue_url
             task.jira_status = "created"
-            task.review_pass = True
-            task.reviewer_results = []
-            task.status = TaskStatus.COMPLETED
-            task.completed_at = time.time()
+            if task.task_mode == "jira":
+                task.review_pass = True
+                task.reviewer_results = []
+                task.status = TaskStatus.COMPLETED
+                task.completed_at = time.time()
+            else:
+                task.status = TaskStatus.PENDING
+                task.completed_at = 0.0
+                task.review_pass = original_review_pass
+                task.reviewer_results = original_reviewer_results
+                task.review_output = original_review_output
+                task.error = original_error
             task.updated_at = time.time()
             self.db.save_task(task)
 
@@ -413,6 +428,11 @@ class JiraService:
                 task.error = str(e)
                 task.jira_status = "failed"
                 task.jira_error = str(e)
+                if task.task_mode != "jira":
+                    task.review_pass = original_review_pass
+                    task.reviewer_results = original_reviewer_results
+                    task.review_output = original_review_output
+                    task.completed_at = original_completed_at
                 task.updated_at = time.time()
                 self.db.save_task(task)
 

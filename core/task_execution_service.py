@@ -71,8 +71,31 @@ class TaskExecutionService:
                 return run.session_id
         return ""
 
+    def manual_review_context(self, task_id: str) -> str:
+        """Return accumulated manual-review context in chronological order."""
+        runs = self.db.get_runs_for_task(task_id)
+        notes = []
+        for run in sorted(runs, key=lambda r: r.created_at):
+            if run.agent_type != "manual_review":
+                continue
+            text = (run.output or "").strip()
+            if text:
+                notes.append(text)
+        return "\n\n".join(notes)
+
     def extract_coder_response(self, code_run: AgentRun) -> str:
         return self.client.extract_last_text_block(code_run.output)
+
+    def latest_reviewer_feedback(self, task_id: str, fallback: str = "") -> str:
+        """Return the most recent reviewer run's final text block."""
+        runs = self.db.get_runs_for_task(task_id)
+        for run in sorted(runs, key=lambda r: r.created_at, reverse=True):
+            if run.agent_type != "reviewer":
+                continue
+            feedback = self.client.extract_last_text_block_or_raw(run.output).strip()
+            if feedback:
+                return feedback
+        return fallback
 
     def ensure_coder_run_success(self, code_run: AgentRun, attempt: int):
         if code_run.exit_code == 0:
@@ -182,12 +205,7 @@ class TaskExecutionService:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status not in (
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.REVIEW_FAILED,
-            TaskStatus.NEEDS_ARBITRATION,
-        ):
+        if not TaskStatus.is_revisable(task.status):
             return {"error": f"Cannot revise task in {task.status.value} state"}
         if task.task_mode == "jira":
             return {"error": "Revise is not supported for jira-mode tasks"}
@@ -231,7 +249,7 @@ class TaskExecutionService:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status != TaskStatus.FAILED:
+        if not TaskStatus.is_resumable(task.status):
             return {"error": f"Cannot resume task in {task.status.value} state"}
         if task.task_mode != "develop":
             return {"error": "Resume is only supported for develop-mode tasks"}
@@ -307,7 +325,13 @@ class TaskExecutionService:
             )
 
             coder_session_id = self.orchestrator._latest_coder_session_id(task)
-            user_feedback = first_coder_message or task.user_feedback
+            review_revision_context = (
+                self.manual_review_context(task_id) or task.user_feedback
+            )
+            if first_message_raw:
+                initial_coder_feedback = first_coder_message or task.user_feedback
+            else:
+                initial_coder_feedback = review_revision_context
 
             for attempt in range(task.max_retries + 1):
                 task = self.db.get_task(task_id)
@@ -320,7 +344,11 @@ class TaskExecutionService:
                 task.updated_at = time.time()
                 self.db.save_task(task)
 
-                coder_feedback = user_feedback if attempt == 0 else task.review_output
+                coder_feedback = initial_coder_feedback
+                if attempt > 0:
+                    coder_feedback = self.latest_reviewer_feedback(
+                        task.id, fallback=task.review_output
+                    )
                 if attempt == 0 and first_message_raw:
                     code_run, code_text = coder.continue_session(
                         task,
@@ -363,7 +391,7 @@ class TaskExecutionService:
                     review_run, passed, review_text = reviewer.review_changes(
                         task,
                         worktree_path,
-                        revision_context=user_feedback,
+                        revision_context=review_revision_context,
                         coder_response=coder_response,
                     )
                     self.db.save_agent_run(review_run)
@@ -502,7 +530,7 @@ class TaskExecutionService:
                     self.worktree_mgr.copy_files_into(worktree_path, task.copy_files)
 
             worktree_path = task.worktree_path
-            revision_context = task.user_feedback
+            revision_context = self.manual_review_context(task_id) or task.user_feedback
 
             reviewer_results = []
             for reviewer in self.reviewers:
@@ -734,7 +762,9 @@ class TaskExecutionService:
                     code_run, code_text = coder.retry_with_feedback(
                         task,
                         worktree_path,
-                        review_feedback=task.review_output,
+                        review_feedback=self.latest_reviewer_feedback(
+                            task.id, fallback=task.review_output
+                        ),
                         session_id=coder_session_id,
                     )
                 self.db.save_agent_run(code_run)

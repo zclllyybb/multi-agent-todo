@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from agents.reviewer import ReviewerAgent
 from core.orchestrator import Orchestrator
 from core.opencode_client import OpenCodeClient
 
@@ -54,20 +55,9 @@ async def api_timing_middleware(request: Request, call_next):
 
 
 def _evaluate_review_verdict(review_text: str) -> str:
-    """Determine APPROVE / REQUEST_CHANGES from reviewer output text.
-
-    Mirrors ReviewerAgent._evaluate_review but returns a string verdict.
-    """
-    upper = review_text.upper()
-    if "APPROVE" in upper and "REQUEST_CHANGES" not in upper:
-        return "approve"
-    if "REQUEST_CHANGES" in upper:
-        return "request_changes"
-    positive = ["LGTM", "LOOKS GOOD", "APPROVED", "NO ISSUES"]
-    negative = ["BUG", "ERROR", "INCORRECT", "WRONG", "MISSING", "SHOULD BE"]
-    pos = sum(1 for p in positive if p in upper)
-    neg = sum(1 for n in negative if n in upper)
-    return "approve" if pos > neg else "request_changes"
+    """Determine APPROVE / REQUEST_CHANGES from reviewer output text."""
+    verdict = ReviewerAgent._evaluate_review(None, review_text)
+    return "approve" if verdict else "request_changes"
 
 
 def _task_list_item(task_dict: dict) -> dict:
@@ -93,6 +83,13 @@ def _task_list_item(task_dict: dict) -> dict:
         "clean_available",
         "actual_branch_exists",
         "actual_worktree_exists",
+        "can_publish",
+        "can_assign_jira",
+        "can_cancel",
+        "can_resume",
+        "can_revise",
+        "can_arbitrate",
+        "dependency_satisfied",
     )
     return {k: task_dict.get(k) for k in keys}
 
@@ -191,6 +188,21 @@ async def api_add_task_comment(task_id: str, request: Request):
     if "error" in result:
         status = 404 if result["error"] == "Task not found" else 400
         return JSONResponse(result, status_code=status)
+    return result
+
+
+@app.post("/api/tasks/delete")
+async def api_delete_tasks(request: Request):
+    if not orchestrator:
+        return JSONResponse({"error": "Not initialized"}, status_code=503)
+    body = await request.json()
+    ids = body.get("ids", [])
+    cascade_descendants = bool(body.get("cascade_descendants", True))
+    if not ids:
+        return JSONResponse({"error": "ids required"}, status_code=400)
+    result = orchestrator.delete_tasks(ids, cascade_descendants=cascade_descendants)
+    if result.get("errors") and result.get("deleted", 0) == 0:
+        return JSONResponse(result, status_code=400)
     return result
 
 
@@ -941,7 +953,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .tab-content { display: none; }
   .tab-content.active { display: block; }
   .modal-wide .tab-content.active { max-height: 65vh; overflow-y: auto; }
-  .dialog-msg { font-size: 13px; color: var(--text); white-space: pre-wrap; }
+  .dialog-msg { font-size: 13px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
   .modal-danger { border-color: rgba(248,81,73,0.45); box-shadow: 0 0 0 1px rgba(248,81,73,0.15) inset; }
 
   /* Explore tree */
@@ -1023,9 +1035,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <!-- Tasks table -->
   <div id="main-tasks">
+    <div class="actions" style="margin-bottom:12px">
+      <button class="btn" style="color:var(--red)" onclick="deleteSelectedTasks()">&#128465; Delete Selected Tasks</button>
+      <button class="btn btn-sm" onclick="selectAllTasks()">Select All</button>
+      <button class="btn btn-sm" onclick="selectNoneTasks()">Select None</button>
+    </div>
     <table class="task-table">
       <thead>
-        <tr><th>ID</th><th>Title</th><th>Status</th><th>Priority</th><th>Source</th><th>Sessions</th><th>Updated</th><th>Actions</th></tr>
+        <tr><th style="width:32px"><input type="checkbox" id="task-check-all" onchange="toggleAllTasks(this)"></th><th>ID</th><th>Title</th><th>Status</th><th>Priority</th><th>Source</th><th>Sessions</th><th>Updated</th><th>Actions</th></tr>
       </thead>
       <tbody id="task-list"></tbody>
     </table>
@@ -1289,6 +1306,23 @@ function esc(s) {
 
 function fmtMs(ms) {
   return `${ms.toFixed(1)}ms`;
+}
+
+function buildJsonRequest(path, payload, method = 'POST') {
+  return {
+    path,
+    opts: {
+      method,
+      body: JSON.stringify(payload),
+    },
+  };
+}
+
+function renderRequestForConfirmation(req) {
+  const method = (req && req.opts && req.opts.method) || 'POST';
+  const path = (req && req.path) || '';
+  const body = (req && req.opts && typeof req.opts.body === 'string') ? req.opts.body : '';
+  return `${method} ${path}\n${body}`;
 }
 
 function updateRefreshPerfLabel(m) {
@@ -1603,10 +1637,10 @@ async function refresh() {
         };border:1px solid currentColor;padding:1px 4px;border-radius:3px">${t.complexity.replace('_',' ')}</span>`
       : '';
     const isPublished = t.published_at > 0;
-    const publishBtn = (t.status==='completed' && t.branch_name && !['review','jira'].includes(t.task_mode))
+    const publishBtn = t.can_publish
       ? `<button class="btn btn-sm" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push' : '&#8593; Publish'}</button>`
       : '';
-    const jiraBtn = t.task_mode !== 'jira'
+    const jiraBtn = t.can_assign_jira
       ? `<button class="btn btn-sm" style="color:#f0883e" onclick="assignJiraForTask('${t.id}')">${t.jira_issue_key ? 'Reassign Jira' : 'Assign Jira'}</button>`
       : '';
     const indent = depth > 0 ? `padding-left:${depth * 24}px` : '';
@@ -1619,9 +1653,9 @@ async function refresh() {
       ? '<span style="font-size:10px;margin-left:4px;color:var(--purple);border:1px solid var(--purple);padding:1px 4px;border-radius:3px">review</span>'
       : '';
     const deps = t.depends_on || [];
-    // "blocked" badge: pending task with unresolved deps (at least one dep not completed)
+    // "blocked" badge: pending task with unresolved deps (at least one dep not dependency-satisfied)
     const isBlocked = t.status === 'pending' && deps.length > 0 && deps.some(depId => {
-      const dep = byId[depId]; return !dep || dep.status !== 'completed';
+      const dep = byId[depId]; return !dep || !dep.dependency_satisfied;
     });
     const blockedBadge = isBlocked
       ? `<span title="Waiting for: ${deps.map(d=>d).join(', ')}" style="font-size:10px;margin-left:5px;color:var(--yellow);border:1px solid var(--yellow);padding:1px 5px;border-radius:3px">&#9203; blocked</span>`
@@ -1638,6 +1672,7 @@ async function refresh() {
         : `<span style="font-size:10px;margin-left:5px;color:#f0883e;border:1px solid #f0883e;padding:1px 5px;border-radius:3px">${esc(t.jira_issue_key)}</span>`)
       : '';
     return `<tr style="${depth > 0 ? 'background:rgba(88,166,255,0.02)' : ''}">
+      <td><input type="checkbox" class="task-check" data-id="${t.id}"></td>
       <td><code style="font-size:${depth > 0 ? '10' : '12'}px">${t.id}</code></td>
       <td style="cursor:pointer;color:var(--accent);${indent}" onclick="showDetail('${t.id}')">${childIcon}${esc(t.title)}${jiraIdBadge}${modeBadge}${complexityBadge}${childBadge}${blockedBadge}${depsBadge}${commentsBadge}</td>
       <td><span class="badge badge-${t.status}">${t.status}</span></td>
@@ -1649,7 +1684,7 @@ async function refresh() {
         ${t.status==='pending'&&!isBlocked?`<button class="btn btn-sm" onclick="dispatch('${t.id}')">Run</button>`:''}
         ${publishBtn}
         ${jiraBtn}
-        ${!['completed','cancelled'].includes(t.status)?`<button class="btn btn-sm" onclick="cancel('${t.id}')">Cancel</button>`:''}
+        ${t.can_cancel?`<button class="btn btn-sm" onclick="cancel('${t.id}')">Cancel</button>`:''}
         ${t.clean_available?`<button class="btn btn-sm" style="color:var(--red)" onclick="cleanTask('${t.id}')">Clean</button>`:''}
       </td>
     </tr>`;
@@ -1713,13 +1748,13 @@ async function showDetail(id) {
     <div class="detail-card"><h4>Completed</h4><div class="val">${fmtTime(t.completed_at)}</div></div>
     <div class="detail-card"><h4>Published</h4><div class="val">${isPublished ? fmtTime(t.published_at) : '-'}</div></div>
   </div>`;
-  if (t.status === 'completed' && t.branch_name && !['review','jira'].includes(t.task_mode)) {
+  if (t.can_publish) {
     html += `<div style="margin:12px 0">
       ${isPublished ? `<span style="color:var(--green);margin-right:8px">&#10003; Published</span>` : ''}
       <button class="btn" style="color:var(--green)" onclick="publishTask('${t.id}')">${isPublished ? '&#8635; Re-push to remote' : '&#8593; Publish branch to remote'}</button>
     </div>`;
   }
-  if (t.task_mode !== 'jira') {
+  if (t.can_assign_jira) {
     html += `<div style="margin:8px 0">
       <button class="btn" style="color:#f0883e;border-color:#f0883e" onclick="assignJiraForTask('${t.id}')">${t.jira_issue_key ? 'Reassign Jira for This Task' : 'Assign Jira for This Task'}</button>
       <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Runs Jira assignment directly on this task and syncs the created Jira key here.</span>
@@ -1763,7 +1798,7 @@ async function showDetail(id) {
     html += `<div class="detail-section"><h3 style="color:var(--red)">Error</h3><pre style="color:var(--red)">${esc(t.error)}</pre></div>`;
   }
   // Arbitration section for needs_arbitration tasks
-  if (t.status === 'needs_arbitration' && t.worktree_path) {
+  if (t.can_arbitrate) {
     html += `<div class="detail-section" style="margin-top:16px;border:1px solid #f0a040;border-radius:8px;padding:12px">
       <h3 style="margin-top:0;color:#f0a040">&#9888; Human Arbitration Required</h3>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">The coder and reviewer could not reach agreement after all retry attempts. Review the code and reviewer feedback above, then choose an action:</p>
@@ -1777,7 +1812,7 @@ async function showDetail(id) {
     </div>`;
   }
   // Revise section for completed/failed tasks with a worktree
-  if (['failed','review_failed'].includes(t.status) && t.worktree_path) {
+  if (t.can_resume) {
     html += `<div class="detail-section" style="margin-top:16px;border:1px solid var(--yellow);border-radius:8px;padding:12px">
       <h3 style="margin-top:0">Resume Failed Run</h3>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Continue from the last coder session after timeout/interruption. Use <code>Continue</code> or provide a custom resume instruction.</p>
@@ -1786,7 +1821,7 @@ async function showDetail(id) {
     </div>`;
   }
 
-  if (['completed','failed','review_failed'].includes(t.status) && t.worktree_path) {
+  if (t.can_revise) {
     html += `<div class="detail-section" style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:12px">
       <h3 style="margin-top:0">Revise Task</h3>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Provide additional review feedback. The coder will receive this feedback and re-enter the code\u2192review loop with retries reset.</p>
@@ -2648,6 +2683,51 @@ function getCheckedTodoIds() {
   return Array.from(document.querySelectorAll('.todo-check:checked')).map(cb => cb.dataset.id);
 }
 
+function getCheckedTaskIds() {
+  return Array.from(document.querySelectorAll('.task-check:checked')).map(cb => cb.dataset.id);
+}
+
+function expandTaskIdsWithDescendants(taskIds) {
+  const byId = window._taskById || {};
+  const childrenOf = {};
+  for (const task of Object.values(byId)) {
+    if (!task || !task.parent_id) continue;
+    (childrenOf[task.parent_id] = childrenOf[task.parent_id] || []).push(task.id);
+  }
+
+  const expanded = [];
+  const seen = new Set();
+  function walk(taskId) {
+    if (seen.has(taskId)) return;
+    seen.add(taskId);
+    expanded.push(taskId);
+    for (const childId of (childrenOf[taskId] || [])) {
+      walk(childId);
+    }
+  }
+
+  for (const taskId of taskIds) {
+    walk(taskId);
+  }
+  return expanded;
+}
+
+function selectAllTasks() {
+  document.querySelectorAll('.task-check').forEach(cb => cb.checked = true);
+  const master = document.getElementById('task-check-all');
+  if (master) master.checked = true;
+}
+
+function selectNoneTasks() {
+  document.querySelectorAll('.task-check').forEach(cb => cb.checked = false);
+  const master = document.getElementById('task-check-all');
+  if (master) master.checked = false;
+}
+
+function toggleAllTasks(master) {
+  document.querySelectorAll('.task-check').forEach(cb => cb.checked = master.checked);
+}
+
 function selectAllTodos() {
   document.querySelectorAll('.todo-check:not(:disabled)').forEach(cb => cb.checked = true);
 }
@@ -2802,6 +2882,49 @@ async function deleteSelected() {
   if (!await uiConfirm(`Delete ${ids.length} TODO item(s)?`, 'Confirm Deletion')) return;
   await api('/api/todos/delete', {method:'POST', body: JSON.stringify({ids})});
   await loadTodos();
+}
+
+async function deleteSelectedTasks() {
+  const selectedIds = getCheckedTaskIds();
+  if (!selectedIds.length) {
+    await uiAlert('Select at least one task to delete.', 'Nothing Selected');
+    return;
+  }
+
+  const ids = expandTaskIdsWithDescendants(selectedIds);
+  const req = buildJsonRequest('/api/tasks/delete', {
+    ids,
+    cascade_descendants: true,
+  });
+  const confirmed = await uiConfirm(
+    `Permanently delete ${ids.length} task record(s)?\n\n${renderRequestForConfirmation(req)}`,
+    'Delete Tasks'
+  );
+  if (!confirmed) return;
+
+  const res = await api(req.path, req.opts);
+  if (res && res.error) {
+    await uiAlert(String(res.error), 'Delete Tasks Failed');
+    return;
+  }
+
+  const deletedIds = res.deleted_ids || [];
+  const errors = res.errors || {};
+  const failureLines = Object.entries(errors).map(([id, msg]) => `${id}: ${msg}`);
+
+  await refresh();
+
+  const detailOpen = document.getElementById('detail-modal')?.classList.contains('active');
+  if (detailOpen && deletedIds.includes(_currentDetailTaskId)) {
+    closeModals();
+  }
+
+  selectNoneTasks();
+
+  const message = failureLines.length
+    ? `Deleted ${res.deleted || 0} task(s).\n\nFailures:\n${failureLines.join("\\n")}`
+    : `Deleted ${res.deleted || 0} task(s).`;
+  await uiAlert(message, failureLines.length ? 'Delete Tasks Completed with Errors' : 'Delete Tasks Completed');
 }
 
 // ── Explore System ──────────────────────────────────────────────────
@@ -3278,11 +3401,12 @@ async function startExploration() {
     const doneSelections = getDoneExploreSelections(moduleIds, categories);
     if (!await confirmDoneCategoryReplay(doneSelections)) return;
     const scopeText = moduleIds.length ? `${moduleIds.length} selected module(s)` : 'all matching modules';
-    if (!await uiConfirm(`Start exploration for ${scopeText} across categories: ${categories.join(', ')}?`, 'Start Exploration')) return;
     const payload = { categories };
     if (moduleIds.length) payload.module_ids = moduleIds;
     if (focusPoint) payload.focus_point = focusPoint;
-    const res = await api('/api/explore/start', {method:'POST', body: JSON.stringify(payload)});
+    const req = buildJsonRequest('/api/explore/start', payload);
+    if (!await uiConfirm(`Start exploration for ${scopeText} across categories: ${categories.join(', ')}?\n\n${renderRequestForConfirmation(req)}`, 'Start Exploration')) return;
+    const res = await api(req.path, req.opts);
     if (res && res.error) {
       await uiAlert(String(res.error), 'Start Exploration');
       return;
@@ -3327,13 +3451,11 @@ async function exploreModule(moduleId) {
     }
     const doneSelections = getDoneExploreSelections([moduleId], categories);
     if (!await confirmDoneCategoryReplay(doneSelections)) return;
-    if (!await uiConfirm(`Start exploration for this module across categories: ${categories.join(', ')}?`, 'Start Exploration')) return;
     const payload = {module_ids: [moduleId], categories};
     if (focusPoint) payload.focus_point = focusPoint;
-    const res = await api('/api/explore/start', {
-      method:'POST',
-      body: JSON.stringify(payload),
-    });
+    const req = buildJsonRequest('/api/explore/start', payload);
+    if (!await uiConfirm(`Start exploration for this module across categories: ${categories.join(', ')}?\n\n${renderRequestForConfirmation(req)}`, 'Start Exploration')) return;
+    const res = await api(req.path, req.opts);
     if (res && res.error) {
       await uiAlert(String(res.error), 'Start Exploration');
       return;

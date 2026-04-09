@@ -122,6 +122,79 @@ assert.match(html, /\[copy\]/);
     )
 
 
+def test_task_detail_review_verdict_matches_backend_parser_for_approve_with_rejection_text():
+    _run_dashboard_js(
+        r"""
+const detailPayload = {
+  task: {
+    id: 'task-review-parse',
+    title: 'Review parsing task',
+    status: 'completed',
+    task_mode: 'develop',
+    complexity: '',
+    priority: 'medium',
+    source: 'manual',
+    parent_id: '',
+    retry_count: 0,
+    max_retries: 0,
+    depends_on: [],
+    branch_name: '',
+    worktree_path: '',
+    file_path: '',
+    line_number: 0,
+    created_at: 1710002000,
+    started_at: 1710002010,
+    completed_at: 1710002600,
+    published_at: 0,
+    clean_available: false,
+    can_publish: false,
+    can_assign_jira: true,
+    can_cancel: false,
+    can_resume: false,
+    can_revise: false,
+    can_arbitrate: false,
+    description: 'desc',
+    review_input: '',
+    error: '',
+    session_ids: {},
+    plan_output: '',
+    code_output: '',
+    review_output: '',
+    reviewer_results: [],
+    comment_count: 0,
+    has_comments: false,
+    comments: [],
+    jira_issue_key: '',
+    jira_issue_url: '',
+    jira_status: '',
+    jira_error: '',
+    jira_payload_preview: '',
+    jira_agent_output: '',
+  },
+  runs: [{
+    agent_type: 'reviewer',
+    model: 'reviewer-model',
+    prompt: 'review prompt',
+    parsed: { session_id: 'ses_review', summary: {}, steps: [] },
+    session_id: 'ses_review',
+    review_verdict: 'approve',
+    exit_code: 0,
+    duration_sec: 1.0,
+  }],
+  git_status: {},
+};
+globalThis.fetch = async (url) => {
+  if (url === '/api/tasks/task-review-parse') return { json: async () => detailPayload };
+  throw new Error('unexpected url ' + url);
+};
+await showDetail('task-review-parse');
+const html = document.getElementById('detail-content').innerHTML;
+assert.match(html, /APPROVE/);
+assert.doesNotMatch(html, /REQUEST_CHANGES/);
+"""
+    )
+
+
 def test_render_parsed_run_success_path():
     _run_dashboard_js(
         r"""
@@ -308,6 +381,7 @@ assert.match(html, /performance/);
 
 
 def test_refresh_renders_task_list_successfully():
+    assert "task-check-all" in DASHBOARD_HTML
     status_payload = {
         "total_tasks": 3,
         "active_task_count": 1,
@@ -341,6 +415,13 @@ def test_refresh_renders_task_list_successfully():
             "clean_available": False,
             "actual_branch_exists": False,
             "actual_worktree_exists": False,
+            "can_publish": False,
+            "can_assign_jira": True,
+            "can_cancel": True,
+            "can_resume": False,
+            "can_revise": False,
+            "can_arbitrate": False,
+            "dependency_satisfied": False,
             "created_at": 1710000900,
         },
         {
@@ -360,6 +441,13 @@ def test_refresh_renders_task_list_successfully():
             "clean_available": True,
             "actual_branch_exists": True,
             "actual_worktree_exists": True,
+            "can_publish": False,
+            "can_assign_jira": True,
+            "can_cancel": True,
+            "can_resume": False,
+            "can_revise": False,
+            "can_arbitrate": False,
+            "dependency_satisfied": False,
             "created_at": 1710000950,
         },
         {
@@ -379,6 +467,13 @@ def test_refresh_renders_task_list_successfully():
             "clean_available": False,
             "actual_branch_exists": False,
             "actual_worktree_exists": False,
+            "can_publish": False,
+            "can_assign_jira": True,
+            "can_cancel": True,
+            "can_resume": False,
+            "can_revise": False,
+            "can_arbitrate": False,
+            "dependency_satisfied": False,
             "created_at": 1710000960,
         },
         {
@@ -398,6 +493,13 @@ def test_refresh_renders_task_list_successfully():
             "clean_available": True,
             "actual_branch_exists": True,
             "actual_worktree_exists": True,
+            "can_publish": True,
+            "can_assign_jira": True,
+            "can_cancel": False,
+            "can_resume": False,
+            "can_revise": True,
+            "can_arbitrate": False,
+            "dependency_satisfied": True,
             "created_at": 1710000700,
             "comment_count": 2,
             "has_comments": True,
@@ -420,9 +522,10 @@ globalThis.fetch = async (url) => {{
     assert.match(statsHtml, /Active/);
     assert.match(statsHtml, /style="color:var\(--accent\)">1</);
     assert.match(rowsHtml, /Implement dashboard metrics/);
-    assert.match(rowsHtml, /Refine metrics labels/);
-    assert.match(rowsHtml, /Queue follow-up polish/);
+assert.match(rowsHtml, /Refine metrics labels/);
+assert.match(rowsHtml, /Queue follow-up polish/);
 assert.match(rowsHtml, /Ship initial stats cards/);
+assert.match(rowsHtml, /class="task-check"/);
 assert.match(rowsHtml, /blocked/);
 assert.match(rowsHtml, /2 comments/);
 assert.match(rowsHtml, /2 sessions/);
@@ -460,6 +563,12 @@ def test_show_detail_renders_task_overview_sessions_runs_and_outputs_successfull
             "completed_at": 1710002600,
             "published_at": 1710002700,
             "clean_available": True,
+            "can_publish": True,
+            "can_assign_jira": True,
+            "can_cancel": False,
+            "can_resume": False,
+            "can_revise": True,
+            "can_arbitrate": False,
             "description": "Tighten the review loop and improve session visibility.",
             "review_input": "Please review concurrency changes.",
             "error": "",
@@ -690,6 +799,12 @@ def test_show_detail_renders_jira_result_successfully():
             "completed_at": 1710002600,
             "published_at": 0,
             "clean_available": False,
+            "can_publish": False,
+            "can_assign_jira": False,
+            "can_cancel": False,
+            "can_resume": False,
+            "can_revise": False,
+            "can_arbitrate": False,
             "description": "Draft a Jira issue for the flaky test.",
             "review_input": "",
             "error": "",
@@ -871,6 +986,13 @@ globalThis.fetch = async () => ({ json: async () => ([{
   clean_available: false,
   actual_branch_exists: false,
   actual_worktree_exists: false,
+  can_publish: false,
+  can_assign_jira: true,
+  can_cancel: false,
+  can_resume: false,
+  can_revise: false,
+  can_arbitrate: false,
+  dependency_satisfied: true,
 }]) });
 await refresh();
 const rowsHtml = document.getElementById('task-list').innerHTML;
@@ -903,6 +1025,12 @@ def test_show_detail_renders_assign_jira_button_for_existing_task():
             "completed_at": 1710002600,
             "published_at": 0,
             "clean_available": False,
+            "can_publish": False,
+            "can_assign_jira": True,
+            "can_cancel": False,
+            "can_resume": False,
+            "can_revise": False,
+            "can_arbitrate": False,
             "description": "Task description.",
             "review_input": "",
             "error": "",
@@ -1111,6 +1239,48 @@ assert.match(calls[0].message, /Exec: performance/);
     )
 
 
+def test_start_exploration_confirmation_includes_focus_point_from_request_payload():
+    _run_dashboard_js(
+        r"""
+let confirmCalls = [];
+let fetchCalled = false;
+_exploreModules = [
+  {
+    id: 'mod1',
+    name: 'Exec',
+    path: 'be/src/exec',
+    children: [],
+    category_status: { performance: 'todo' },
+    category_notes: { performance: '' },
+  }
+];
+_exploreStatus = { map_ready: true, map_init: { status: 'done' } };
+globalThis.getSelectedExploreModules = () => ['mod1'];
+globalThis.getSelectedExploreCategories = () => ['performance'];
+globalThis.getExploreFocusPoint = () => 'scanner hot loop';
+globalThis.uiAlert = async () => {};
+globalThis.loadExploreModules = async () => {};
+globalThis.showModuleDetail = async () => {};
+document.getElementById('explore-start-btn').innerHTML = 'start';
+globalThis.uiConfirm = async (message, title) => {
+  confirmCalls.push({ message, title });
+  return false;
+};
+globalThis.fetch = async () => {
+  fetchCalled = true;
+  return { json: async () => ({}) };
+};
+await startExploration();
+assert.equal(confirmCalls.length, 1);
+assert.equal(confirmCalls[0].title, 'Start Exploration');
+assert.match(confirmCalls[0].message, /POST \/api\/explore\/start/);
+assert.match(confirmCalls[0].message, /"focus_point":"scanner hot loop"/);
+assert.match(confirmCalls[0].message, /"module_ids":\["mod1"\]/);
+assert.equal(fetchCalled, false);
+"""
+    )
+
+
 def test_add_task_comment_posts_payload_and_refreshes_views():
     _run_dashboard_js(
         r"""
@@ -1133,5 +1303,223 @@ assert.equal(body.username, 'alice');
 assert.equal(body.content, 'Please verify retry handling');
 assert.deepEqual(calls, ['detail:task1', 'refresh']);
 assert.equal(document.getElementById('comment-content-task1').value, '');
+"""
+    )
+
+
+def test_delete_selected_tasks_alerts_when_nothing_selected():
+    _run_dashboard_js(
+        r"""
+let alertCall = null;
+globalThis.uiAlert = async (message, title) => { alertCall = { message, title }; };
+document.querySelectorAll = () => [];
+await deleteSelectedTasks();
+assert.equal(alertCall.title, 'Nothing Selected');
+assert.match(alertCall.message, /Select at least one task to delete/);
+"""
+    )
+
+
+def test_delete_selected_tasks_confirmation_renders_real_request_object_and_can_cancel():
+    _run_dashboard_js(
+        r"""
+let confirmCall = null;
+let fetchCalled = false;
+window._taskById = {
+  'task-a': { id: 'task-a', parent_id: '' },
+  'task-b': { id: 'task-b', parent_id: 'task-a' },
+};
+document.querySelectorAll = (selector) => {
+  if (selector === '.task-check:checked') {
+    return [{ dataset: { id: 'task-a' } }];
+  }
+  return [];
+};
+globalThis.uiConfirm = async (message, title) => {
+  confirmCall = { message, title };
+  return false;
+};
+globalThis.fetch = async () => {
+  fetchCalled = true;
+  return { json: async () => ({}) };
+};
+await deleteSelectedTasks();
+assert.equal(confirmCall.title, 'Delete Tasks');
+assert.match(confirmCall.message, /POST \/api\/tasks\/delete/);
+assert.match(confirmCall.message, /\{"ids":\["task-a","task-b"\],"cascade_descendants":true\}/);
+assert.equal(fetchCalled, false);
+"""
+    )
+
+
+def test_dashboard_dialog_message_supports_long_request_wrapping():
+    assert (
+        ".dialog-msg { font-size: 13px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }"
+        in DASHBOARD_HTML
+    )
+
+
+def test_delete_selected_tasks_posts_same_request_and_reports_partial_failures():
+    _run_dashboard_js(
+        r"""
+const calls = [];
+let alertCall = null;
+let closed = false;
+window._taskById = {
+  'task-a': { id: 'task-a', parent_id: '' },
+  'task-b': { id: 'task-b', parent_id: 'task-a' },
+};
+document.querySelectorAll = (selector) => {
+  if (selector === '.task-check:checked') {
+    return [{ dataset: { id: 'task-a' } }];
+  }
+  if (selector === '.task-check') {
+    return [{ checked: true }, { checked: true }];
+  }
+  return [];
+};
+document.getElementById('detail-modal').classList.contains = () => true;
+globalThis._currentDetailTaskId = 'task-a';
+globalThis.uiConfirm = async () => true;
+globalThis.uiAlert = async (message, title) => { alertCall = { message, title }; };
+globalThis.refresh = async () => { calls.push('refresh'); };
+globalThis.closeModals = () => { closed = true; };
+globalThis.fetch = async (url, opts) => {
+  calls.push({ url, opts });
+  return {
+    json: async () => ({
+      deleted: 1,
+      deleted_ids: ['task-a'],
+      errors: { 'task-a': 'Descendant task task-b: Task is referenced by dependent task task-c; delete it first' },
+    }),
+  };
+};
+await deleteSelectedTasks();
+assert.equal(calls[0].url, '/api/tasks/delete');
+assert.equal(calls[0].opts.method, 'POST');
+assert.equal(calls[0].opts.body, '{"ids":["task-a","task-b"],"cascade_descendants":true}');
+assert.deepEqual(calls.slice(1), ['refresh']);
+assert.equal(alertCall.title, 'Delete Tasks Completed with Errors');
+assert.match(alertCall.message, /Deleted 1 task\(s\)\./);
+assert.match(alertCall.message, /task-a: Descendant task task-b: Task is referenced by dependent task task-c; delete it first/);
+"""
+    )
+
+
+def test_show_detail_uses_server_driven_capabilities_for_resume_revise_and_arbitrate():
+    detail_payload = {
+        "task": {
+            "id": "task_caps",
+            "title": "Capability-driven task",
+            "status": "review_failed",
+            "task_mode": "develop",
+            "complexity": "",
+            "priority": "medium",
+            "source": "manual",
+            "parent_id": "",
+            "retry_count": 0,
+            "max_retries": 4,
+            "depends_on": [],
+            "branch_name": "",
+            "worktree_path": "/tmp/wt",
+            "file_path": "",
+            "line_number": 0,
+            "created_at": 1710002000,
+            "started_at": 1710002010,
+            "completed_at": 0,
+            "published_at": 0,
+            "clean_available": False,
+            "can_publish": False,
+            "can_assign_jira": False,
+            "can_cancel": False,
+            "can_resume": False,
+            "can_revise": True,
+            "can_arbitrate": True,
+            "description": "Task description.",
+            "review_input": "",
+            "error": "",
+            "session_ids": {},
+            "plan_output": "plan",
+            "code_output": "code",
+            "review_output": "review",
+            "reviewer_results": [],
+            "comment_count": 0,
+            "has_comments": False,
+            "comments": [],
+            "jira_issue_key": "",
+            "jira_issue_url": "",
+            "jira_status": "",
+            "jira_error": "",
+            "jira_payload_preview": "",
+            "jira_agent_output": "",
+        },
+        "runs": [],
+        "git_status": {},
+    }
+    _run_dashboard_js(
+        rf"""
+const detailPayload = {json.dumps(detail_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/tasks/task_caps') return {{ json: async () => detailPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await showDetail('task_caps');
+const html = document.getElementById('detail-content').innerHTML;
+assert.doesNotMatch(html, /Resume Failed Run/);
+assert.match(html, /Revise Task/);
+assert.match(html, /Human Arbitration Required/);
+"""
+    )
+
+
+def test_refresh_uses_server_driven_capabilities_for_list_actions():
+    status_payload = {
+        "total_tasks": 1,
+        "active_task_count": 0,
+        "status_counts": {"review_failed": 1},
+    }
+    tasks_payload = [
+        {
+            "id": "task_caps",
+            "title": "Capability-driven list task",
+            "status": "review_failed",
+            "priority": "medium",
+            "source": "manual",
+            "session_ids": {},
+            "comment_count": 0,
+            "has_comments": False,
+            "updated_at": 1710001100,
+            "complexity": "",
+            "published_at": 0,
+            "branch_name": "agent/task_caps",
+            "task_mode": "develop",
+            "parent_id": "",
+            "depends_on": [],
+            "clean_available": False,
+            "actual_branch_exists": True,
+            "actual_worktree_exists": True,
+            "can_publish": False,
+            "can_assign_jira": False,
+            "can_cancel": False,
+            "can_resume": False,
+            "can_revise": True,
+            "can_arbitrate": False,
+            "dependency_satisfied": False,
+        }
+    ]
+    _run_dashboard_js(
+        rf"""
+const statusPayload = {json.dumps(status_payload)};
+const tasksPayload = {json.dumps(tasks_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/status') return {{ json: async () => statusPayload }};
+  if (url === '/api/tasks') return {{ json: async () => tasksPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await refresh();
+const rowsHtml = document.getElementById('task-list').innerHTML;
+assert.doesNotMatch(rowsHtml, /Assign Jira/);
+assert.doesNotMatch(rowsHtml, /Cancel/);
+assert.doesNotMatch(rowsHtml, /Publish/);
 """
     )

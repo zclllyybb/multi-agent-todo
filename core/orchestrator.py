@@ -195,10 +195,9 @@ class Orchestrator:
         # Replay completions for tasks already in terminal states so that
         # their dependents' pending-dep sets are updated correctly.
         # Collect newly unblocked pending tasks for auto-dispatch on start().
-        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
         self._pending_dispatch: List[str] = []
         for t in all_tasks:
-            if t.parent_id and t.status in terminal:
+            if t.parent_id and TaskStatus.is_dependency_terminal(t.status):
                 for uid in self.dep_tracker.on_completed(t.id):
                     unblocked_task = self.db.get_task(uid)
                     if unblocked_task and unblocked_task.status == TaskStatus.PENDING:
@@ -458,13 +457,7 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status not in (
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.REVIEW_FAILED,
-            TaskStatus.CANCELLED,
-            TaskStatus.NEEDS_ARBITRATION,
-        ):
+        if not TaskStatus.is_cleanable(task.status):
             return {
                 "error": f"Cannot clean task in '{task.status.value}' state — it may still be running"
             }
@@ -512,7 +505,7 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        already_terminal = task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED)
+        already_terminal = TaskStatus.is_cancel_terminal(task.status)
         if not already_terminal:
             task.status = TaskStatus.CANCELLED
             task.updated_at = time.time()
@@ -560,7 +553,7 @@ class Orchestrator:
         # Always cascade cancel to non-terminal child tasks (even if this
         # task is already completed/cancelled — descendants may still be running)
         for child in self._get_child_tasks(task_id):
-            if child.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+            if not TaskStatus.is_cancel_terminal(child.status):
                 child_result = self.cancel_task(child.id)
                 if "error" in child_result:
                     log.warning(
@@ -591,7 +584,7 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "Task not found"}
-        if task.status != TaskStatus.NEEDS_ARBITRATION:
+        if not TaskStatus.is_awaiting_arbitration(task.status):
             return {
                 "error": f"Task is not awaiting arbitration (status={task.status.value})"
             }
@@ -877,7 +870,7 @@ class Orchestrator:
         task = self.db.get_task(task_id)
         if not task:
             return {"error": "not found"}
-        if task.status != TaskStatus.COMPLETED:
+        if not TaskStatus.is_publishable(task.status):
             return {"error": f"task is not completed (status={task.status.value})"}
         if not task.branch_name:
             return {"error": "task has no branch (was it split into sub-tasks?)"}
@@ -1019,8 +1012,7 @@ class Orchestrator:
         for cid in child_ids:
             child = self.db.get_task(cid)
             statuses.add(child.status)
-        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
-        if not statuses.issubset(terminal):
+        if not all(TaskStatus.is_dependency_terminal(status) for status in statuses):
             return  # still running
         parent = self.db.get_task(parent_id)
         if TaskStatus.FAILED in statuses:
@@ -1038,6 +1030,229 @@ class Orchestrator:
             parent.id,
             parent.status.value,
         )
+
+    def delete_tasks(
+        self, task_ids: list[str], cascade_descendants: bool = True
+    ) -> dict:
+        deleted: list[str] = []
+        errors: dict[str, str] = {}
+        all_tasks = self.db.get_all_tasks()
+        tasks_by_id = {task.id: task for task in all_tasks}
+        children_by_parent: dict[str, list[str]] = {}
+        for task in all_tasks:
+            if task.parent_id:
+                children_by_parent.setdefault(task.parent_id, []).append(task.id)
+        local_branches, branch_worktrees = self._collect_resource_snapshot()
+
+        requested_ids = list(dict.fromkeys(task_ids))
+        requested_set = set(requested_ids)
+
+        def _has_requested_ancestor(task_id: str) -> bool:
+            task = tasks_by_id.get(task_id)
+            visited: set[str] = set()
+            while task and task.parent_id and task.parent_id not in visited:
+                if task.parent_id in requested_set:
+                    return True
+                visited.add(task.parent_id)
+                task = tasks_by_id.get(task.parent_id)
+            return False
+
+        def _collect_subtree_ids(root_id: str) -> list[str]:
+            ordered: list[str] = []
+            stack = [root_id]
+            seen: set[str] = set()
+            while stack:
+                current_id = stack.pop()
+                if current_id in seen:
+                    continue
+                seen.add(current_id)
+                ordered.append(current_id)
+                for child_id in reversed(children_by_parent.get(current_id, [])):
+                    stack.append(child_id)
+            return ordered
+
+        def _task_delete_error(root_id: str, failing_task_id: str, message: str) -> str:
+            if failing_task_id == root_id:
+                return message
+            return f"Descendant task {failing_task_id}: {message}"
+
+        root_ids: list[str] = []
+        for task_id in requested_ids:
+            if (
+                task_id in tasks_by_id
+                and cascade_descendants
+                and _has_requested_ancestor(task_id)
+            ):
+                continue
+            root_ids.append(task_id)
+
+        root_plans: dict[str, list[str]] = {}
+        root_plan_sets: dict[str, set[str]] = {}
+
+        for root_id in root_ids:
+            root_task = tasks_by_id.get(root_id)
+            if not root_task:
+                errors[root_id] = "Task not found"
+                continue
+
+            plan_ids = (
+                _collect_subtree_ids(root_id) if cascade_descendants else [root_id]
+            )
+            root_plans[root_id] = plan_ids
+            root_plan_sets[root_id] = set(plan_ids)
+
+            for planned_id in plan_ids:
+                task = tasks_by_id[planned_id]
+                if planned_id in getattr(self, "_futures", {}):
+                    errors[root_id] = _task_delete_error(
+                        root_id, planned_id, "Task is currently running"
+                    )
+                    break
+                if planned_id in getattr(self, "_pending_dispatch", []):
+                    errors[root_id] = _task_delete_error(
+                        root_id, planned_id, "Task is queued for dispatch"
+                    )
+                    break
+                if getattr(self.client, "_task_procs", {}).get(planned_id):
+                    errors[root_id] = _task_delete_error(
+                        root_id, planned_id, "Task still has an active process"
+                    )
+                    break
+                resource_state = self._task_resource_state(
+                    task, local_branches, branch_worktrees
+                )
+                if resource_state.get("actual_branch_exists") or resource_state.get(
+                    "actual_worktree_exists"
+                ):
+                    errors[root_id] = _task_delete_error(
+                        root_id,
+                        planned_id,
+                        "Task still has branch/worktree resources; clean it first",
+                    )
+                    break
+
+        valid_root_ids = [
+            root_id
+            for root_id in root_ids
+            if root_id in root_plans and root_id not in errors
+        ]
+
+        while True:
+            planned_delete_ids: set[str] = set()
+            for root_id in valid_root_ids:
+                planned_delete_ids.update(root_plan_sets[root_id])
+
+            newly_invalid: list[str] = []
+            for root_id in valid_root_ids:
+                reason = ""
+                for planned_id in root_plans[root_id]:
+                    external_child = next(
+                        (
+                            other.id
+                            for other in all_tasks
+                            if other.id not in planned_delete_ids
+                            and other.parent_id == planned_id
+                        ),
+                        "",
+                    )
+                    if external_child:
+                        reason = _task_delete_error(
+                            root_id,
+                            planned_id,
+                            f"Task has child task {external_child}; delete it first",
+                        )
+                        break
+
+                    external_dep = next(
+                        (
+                            other.id
+                            for other in all_tasks
+                            if other.id not in planned_delete_ids
+                            and planned_id in other.depends_on
+                        ),
+                        "",
+                    )
+                    if external_dep:
+                        reason = _task_delete_error(
+                            root_id,
+                            planned_id,
+                            f"Task is referenced by dependent task {external_dep}; delete it first",
+                        )
+                        break
+
+                    external_jira = next(
+                        (
+                            other.id
+                            for other in all_tasks
+                            if other.id not in planned_delete_ids
+                            and other.task_mode == "jira"
+                            and other.jira_source_task_id == planned_id
+                        ),
+                        "",
+                    )
+                    if external_jira:
+                        reason = _task_delete_error(
+                            root_id,
+                            planned_id,
+                            f"Task is referenced by jira-mode task {external_jira}; delete it first",
+                        )
+                        break
+
+                if reason:
+                    errors[root_id] = reason
+                    newly_invalid.append(root_id)
+
+            if not newly_invalid:
+                break
+            valid_root_ids = [
+                root_id for root_id in valid_root_ids if root_id not in newly_invalid
+            ]
+
+        depth_cache: dict[str, int] = {}
+
+        def _task_depth(task_id: str) -> int:
+            if task_id in depth_cache:
+                return depth_cache[task_id]
+            task = tasks_by_id.get(task_id)
+            if not task or not task.parent_id:
+                depth_cache[task_id] = 0
+                return 0
+            depth_cache[task_id] = 1 + _task_depth(task.parent_id)
+            return depth_cache[task_id]
+
+        planned_delete_ids: set[str] = set()
+        for root_id in valid_root_ids:
+            planned_delete_ids.update(root_plan_sets[root_id])
+
+        delete_order = sorted(planned_delete_ids, key=_task_depth, reverse=True)
+
+        for task_id in delete_order:
+            task = tasks_by_id[task_id]
+            self.client.kill_task(task_id)
+            self.dep_tracker.cleanup(task_id)
+            self._pending_dispatch = [
+                tid for tid in self._pending_dispatch if tid != task_id
+            ]
+
+            for item in self.db.get_all_todo_items():
+                if item.task_id != task_id:
+                    continue
+                if item.status == TodoItemStatus.DISPATCHED:
+                    item.status = TodoItemStatus.ANALYZED
+                item.task_id = ""
+                item.updated_at = time.time()
+                self.db.save_todo_item(item)
+
+            self.db.delete_agent_runs_for_task(task_id)
+            self.db.delete_task(task_id)
+            deleted.append(task_id)
+            log.warning("Deleted task record: [%s] %s", task_id, task.title)
+
+        return {
+            "deleted": len(deleted),
+            "deleted_ids": deleted,
+            "errors": errors,
+        }
 
     def dispatch_task(self, task_id: str) -> bool:
         """Submit a single task for execution.

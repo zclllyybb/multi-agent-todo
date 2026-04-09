@@ -44,6 +44,59 @@ class TestTaskRoundtrip:
         assert TaskStatus.is_active(TaskStatus.JIRA_ASSIGNING) is True
         assert TaskStatus.is_active(TaskStatus.PENDING) is False
 
+    def test_other_status_semantics_centralized(self):
+        assert TaskStatus.cleanable_statuses() == (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.REVIEW_FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.NEEDS_ARBITRATION,
+        )
+        assert TaskStatus.revisable_statuses() == (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.REVIEW_FAILED,
+            TaskStatus.NEEDS_ARBITRATION,
+        )
+        assert TaskStatus.resumable_statuses() == (TaskStatus.FAILED,)
+        assert TaskStatus.arbitration_statuses() == (TaskStatus.NEEDS_ARBITRATION,)
+        assert TaskStatus.publishable_statuses() == (TaskStatus.COMPLETED,)
+        assert TaskStatus.cancel_terminal_statuses() == (
+            TaskStatus.COMPLETED,
+            TaskStatus.CANCELLED,
+        )
+        assert TaskStatus.dependency_terminal_statuses() == (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        )
+        assert TaskStatus.external_terminal_statuses() == (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.NEEDS_ARBITRATION,
+        )
+        assert TaskStatus.dependency_satisfied_statuses() == (TaskStatus.COMPLETED,)
+
+        assert TaskStatus.is_cleanable(TaskStatus.NEEDS_ARBITRATION) is True
+        assert TaskStatus.is_cleanable(TaskStatus.CODING) is False
+        assert TaskStatus.is_revisable(TaskStatus.REVIEW_FAILED) is True
+        assert TaskStatus.is_revisable(TaskStatus.CANCELLED) is False
+        assert TaskStatus.is_resumable(TaskStatus.FAILED) is True
+        assert TaskStatus.is_resumable(TaskStatus.REVIEW_FAILED) is False
+        assert TaskStatus.is_awaiting_arbitration(TaskStatus.NEEDS_ARBITRATION) is True
+        assert TaskStatus.is_awaiting_arbitration(TaskStatus.COMPLETED) is False
+        assert TaskStatus.is_publishable(TaskStatus.COMPLETED) is True
+        assert TaskStatus.is_publishable(TaskStatus.REVIEW_FAILED) is False
+        assert TaskStatus.is_cancel_terminal(TaskStatus.CANCELLED) is True
+        assert TaskStatus.is_cancel_terminal(TaskStatus.FAILED) is False
+        assert TaskStatus.is_dependency_terminal(TaskStatus.FAILED) is True
+        assert TaskStatus.is_dependency_terminal(TaskStatus.REVIEW_FAILED) is False
+        assert TaskStatus.is_external_terminal(TaskStatus.NEEDS_ARBITRATION) is True
+        assert TaskStatus.is_external_terminal(TaskStatus.REVIEW_FAILED) is False
+        assert TaskStatus.is_dependency_satisfied(TaskStatus.COMPLETED) is True
+        assert TaskStatus.is_dependency_satisfied(TaskStatus.FAILED) is False
+
     def test_complex_fields_roundtrip(self, make_task):
         t = make_task(
             session_ids={"planner": ["ses1"], "coder": ["ses2", "ses3"]},

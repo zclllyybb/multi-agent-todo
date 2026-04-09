@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.models import Task, TaskStatus, TaskPriority, TaskSource
+from core.models import AgentRun, Task, TaskStatus, TaskPriority, TaskSource
 
 
 def _make_orchestrator(tmp_db):
@@ -358,3 +358,162 @@ class TestResumeTask:
             reviewer.review_changes.call_args.kwargs["coder_response"]
             != "full resumed transcript"
         )
+
+
+class TestManualReviewContextAccumulation:
+    def test_revise_pipeline_preserves_all_manual_review_context(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.PENDING,
+            worktree_path="/wt/task",
+            branch_name="agent/task-manual-history",
+            task_mode="develop",
+            max_retries=0,
+            session_ids={"coder": ["ses_manual_history"]},
+        )
+        tmp_db.save_task(task)
+
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="First manual review note",
+                created_at=1.0,
+            )
+        )
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="Second manual review note",
+                created_at=2.0,
+            )
+        )
+
+        orch = _make_orchestrator(tmp_db)
+
+        code_output = (
+            '{"type":"step_start"}\n'
+            '{"type":"text","part":{"text":"done"}}\n'
+            '{"type":"step_finish","part":{"reason":"stop"}}\n'
+        )
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="Continue",
+            output=code_output,
+            exit_code=0,
+            session_id="ses_manual_history",
+        )
+        orch._default_coder.continue_session.return_value = (code_run, "done")
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.return_value = "done"
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review",
+        )
+        reviewer.review_changes.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._revise_task_pipeline(task.id, "Continue", True)
+
+        revision_context = reviewer.review_changes.call_args.kwargs["revision_context"]
+        assert "First manual review note" in revision_context
+        assert "Second manual review note" in revision_context
+
+    def test_revise_pipeline_retry_passes_only_last_reviewer_text_block_to_coder(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.PENDING,
+            worktree_path="/wt/task",
+            branch_name="agent/task-review-feedback",
+            task_mode="develop",
+            max_retries=1,
+            session_ids={"coder": ["ses_manual_retry"]},
+        )
+        tmp_db.save_task(task)
+
+        orch = _make_orchestrator(tmp_db)
+
+        first_code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="revise",
+            output="first coder output",
+            exit_code=0,
+            session_id="ses_manual_retry",
+            created_at=1.0,
+        )
+        second_code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="revise-again",
+            output="second coder output",
+            exit_code=0,
+            session_id="ses_manual_retry",
+            created_at=3.0,
+        )
+        orch._default_coder.retry_with_feedback.side_effect = [
+            (first_code_run, "first coder output"),
+            (second_code_run, "second coder output"),
+        ]
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.side_effect = [
+            "first coder summary",
+            "second coder summary",
+        ]
+        orch.client.extract_last_text_block_or_raw.return_value = (
+            "last reviewer text block"
+        )
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        reject_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="review transcript with wrapper",
+            exit_code=0,
+            session_id="ses_review_1",
+            created_at=2.0,
+        )
+        approve_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review_2",
+            created_at=4.0,
+        )
+        reviewer.review_changes.side_effect = [
+            (reject_run, False, "Please fix the follow-up issue"),
+            (approve_run, True, "APPROVE"),
+        ]
+        orch.reviewers = [reviewer]
+
+        orch._revise_task_pipeline(task.id)
+
+        retry_kwargs = orch._default_coder.retry_with_feedback.call_args.kwargs
+        assert retry_kwargs["review_feedback"] == "last reviewer text block"
+        assert retry_kwargs["review_feedback"] != (
+            "=== Reviewer: rev-m | REQUEST_CHANGES ===\nPlease fix the follow-up issue"
+        )
+        orch.client.extract_last_text_block_or_raw.assert_called_with(reject_run.output)

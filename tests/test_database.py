@@ -131,3 +131,17 @@ class TestAgentRunCRUD:
 
     def test_get_runs_for_nonexistent_task(self, tmp_db):
         assert tmp_db.get_runs_for_task("no_such_task") == []
+
+    def test_delete_agent_runs_for_task(self, tmp_db):
+        run1 = AgentRun(task_id="t1", agent_type="planner", output="plan")
+        run2 = AgentRun(task_id="t1", agent_type="coder", output="code")
+        run3 = AgentRun(task_id="t2", agent_type="reviewer", output="review")
+        for run in (run1, run2, run3):
+            tmp_db.save_agent_run(run)
+
+        tmp_db.delete_agent_runs_for_task("t1")
+
+        assert tmp_db.get_runs_for_task("t1") == []
+        remaining = tmp_db.get_runs_for_task("t2")
+        assert len(remaining) == 1
+        assert remaining[0].agent_type == "reviewer"

@@ -305,6 +305,7 @@ Use the available tools to inspect the work:
   - Read any modified files to check correctness and style.
 
 When reviewing, you must strictly follow AGENTS.md and the related skills. In addition, you can perform any desired review operations to observe suspicious code and details in order to identify issues as much as possible.
+Commit messages are not required; minor fixes that do not affect correctness or quality can be proposed, but if only such minor issues are present, the final conclusion should be APPROVE.
 
 ## Output Format
 Start your review with either APPROVE or REQUEST_CHANGES on the first line. nothing else in this line.

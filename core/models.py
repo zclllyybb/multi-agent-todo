@@ -41,6 +41,89 @@ class TaskStatus(str, enum.Enum):
     def is_active(cls, status: "TaskStatus") -> bool:
         return status in cls.active_statuses()
 
+    @classmethod
+    def cleanable_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (
+            cls.COMPLETED,
+            cls.FAILED,
+            cls.REVIEW_FAILED,
+            cls.CANCELLED,
+            cls.NEEDS_ARBITRATION,
+        )
+
+    @classmethod
+    def is_cleanable(cls, status: "TaskStatus") -> bool:
+        return status in cls.cleanable_statuses()
+
+    @classmethod
+    def revisable_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (
+            cls.COMPLETED,
+            cls.FAILED,
+            cls.REVIEW_FAILED,
+            cls.NEEDS_ARBITRATION,
+        )
+
+    @classmethod
+    def is_revisable(cls, status: "TaskStatus") -> bool:
+        return status in cls.revisable_statuses()
+
+    @classmethod
+    def resumable_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.FAILED,)
+
+    @classmethod
+    def is_resumable(cls, status: "TaskStatus") -> bool:
+        return status in cls.resumable_statuses()
+
+    @classmethod
+    def arbitration_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.NEEDS_ARBITRATION,)
+
+    @classmethod
+    def is_awaiting_arbitration(cls, status: "TaskStatus") -> bool:
+        return status in cls.arbitration_statuses()
+
+    @classmethod
+    def publishable_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.COMPLETED,)
+
+    @classmethod
+    def is_publishable(cls, status: "TaskStatus") -> bool:
+        return status in cls.publishable_statuses()
+
+    @classmethod
+    def cancel_terminal_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.COMPLETED, cls.CANCELLED)
+
+    @classmethod
+    def is_cancel_terminal(cls, status: "TaskStatus") -> bool:
+        return status in cls.cancel_terminal_statuses()
+
+    @classmethod
+    def dependency_terminal_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.COMPLETED, cls.FAILED, cls.CANCELLED)
+
+    @classmethod
+    def is_dependency_terminal(cls, status: "TaskStatus") -> bool:
+        return status in cls.dependency_terminal_statuses()
+
+    @classmethod
+    def external_terminal_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.COMPLETED, cls.FAILED, cls.CANCELLED, cls.NEEDS_ARBITRATION)
+
+    @classmethod
+    def is_external_terminal(cls, status: "TaskStatus") -> bool:
+        return status in cls.external_terminal_statuses()
+
+    @classmethod
+    def dependency_satisfied_statuses(cls) -> tuple["TaskStatus", ...]:
+        return (cls.COMPLETED,)
+
+    @classmethod
+    def is_dependency_satisfied(cls, status: "TaskStatus") -> bool:
+        return status in cls.dependency_satisfied_statuses()
+
 
 class TaskPriority(str, enum.Enum):
     HIGH = "high"
