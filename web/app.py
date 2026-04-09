@@ -1563,6 +1563,62 @@ function renderGitStatus(gs, worktreePath, branchName, taskId) {
 
 let _lastRefreshHash = '';
 let _currentDetailTaskId = '';
+let _detailDrafts = {};
+
+function detailDraftFieldIds(taskId) {
+  if (!taskId) return [];
+  return [
+    `comment-username-${taskId}`,
+    `comment-content-${taskId}`,
+    `arbitrate-feedback-${taskId}`,
+    `resume-message-${taskId}`,
+    `revise-feedback-${taskId}`,
+    'exec-cmd-input',
+  ];
+}
+
+function saveDetailDrafts(taskId = _currentDetailTaskId) {
+  if (!taskId) return;
+  const draft = _detailDrafts[taskId] || {};
+  let hasValue = false;
+  for (const fieldId of detailDraftFieldIds(taskId)) {
+    const el = document.getElementById(fieldId);
+    if (!el || typeof el.value !== 'string') continue;
+    draft[fieldId] = el.value;
+    hasValue = true;
+  }
+  if (hasValue) {
+    _detailDrafts[taskId] = draft;
+  }
+}
+
+function restoreDetailDrafts(taskId) {
+  if (!taskId || !_detailDrafts[taskId]) return;
+  for (const [fieldId, value] of Object.entries(_detailDrafts[taskId])) {
+    const el = document.getElementById(fieldId);
+    if (el && typeof el.value === 'string' && value !== undefined) {
+      el.value = value;
+    }
+  }
+}
+
+function clearDetailDraftFields(taskId, fieldIds) {
+  if (!taskId || !fieldIds || !fieldIds.length) return;
+  const draft = _detailDrafts[taskId] || {};
+  for (const fieldId of fieldIds) {
+    delete draft[fieldId];
+    const el = document.getElementById(fieldId);
+    if (el && typeof el.value === 'string') {
+      el.value = '';
+    }
+  }
+  if (Object.keys(draft).length) {
+    _detailDrafts[taskId] = draft;
+  } else {
+    delete _detailDrafts[taskId];
+  }
+}
+
 async function refresh() {
   const t0 = performance.now();
   const [status, tasks] = await Promise.all([api('/api/status'), api('/api/tasks')]);
@@ -1705,6 +1761,7 @@ async function refresh() {
 }
 
 async function showDetail(id) {
+  saveDetailDrafts();
   _currentDetailTaskId = id;
   const data = await api(`/api/tasks/${id}`);
   const t = data.task;
@@ -1925,6 +1982,7 @@ async function showDetail(id) {
   html += `</div>`;
 
   document.getElementById('detail-content').innerHTML = html;
+  restoreDetailDrafts(t.id);
   document.getElementById('detail-modal').classList.add('active');
 }
 
@@ -2045,6 +2103,7 @@ function showAddTask() {
   refreshAddTaskBaseBranch();
 }
 function closeModals() {
+  saveDetailDrafts();
   document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
   _currentDetailTaskId = '';
 }
@@ -2270,6 +2329,7 @@ async function reviseTask(id) {
     if (res.error) {
       await uiAlert('Revise failed: ' + res.error);
     } else {
+      clearDetailDraftFields(id, [`revise-feedback-${id}`]);
       closeModals(); refresh();
     }
   } finally {
@@ -2290,6 +2350,7 @@ async function resumeTask(id) {
     if (res.error) {
       await uiAlert('Resume failed: ' + res.error);
     } else {
+      clearDetailDraftFields(id, [`resume-message-${id}`]);
       closeModals();
       refresh();
     }
@@ -2326,7 +2387,7 @@ async function addTaskComment(id) {
       await uiAlert(String(res.error), 'Add Comment');
       return;
     }
-    if (contentEl) contentEl.value = '';
+    clearDetailDraftFields(id, [`comment-content-${id}`]);
     await showDetail(id);
     await refresh();
   } catch (e) {
@@ -2356,6 +2417,9 @@ async function arbitrate(id, action) {
   }
   const res = await api(`/api/tasks/${id}/arbitrate`, {method:'POST', body: JSON.stringify({action, feedback})});
   if (res && res.error) { await uiAlert('Arbitration failed: ' + res.error); return; }
+  if (action === 'revise') {
+    clearDetailDraftFields(id, [`arbitrate-feedback-${id}`]);
+  }
   closeModals(); refresh();
 }
 

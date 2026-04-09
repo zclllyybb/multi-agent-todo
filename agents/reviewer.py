@@ -23,7 +23,9 @@ class ReviewerAgent(BaseAgent):
         super().__init__(model, client)
 
     def review_changes(
-        self, task: Task, worktree_path: str,
+        self,
+        task: Task,
+        worktree_path: str,
         revision_context: str = "",
         prior_rejections: str = "",
         coder_response: str = "",
@@ -64,7 +66,10 @@ class ReviewerAgent(BaseAgent):
                 log.warning(
                     "Reviewer(%s) output inconclusive for task [%s], "
                     "auto-retrying (%d/%d)",
-                    self.model, task.id, retry + 1, _MAX_REVIEWER_RETRIES,
+                    self.model,
+                    task.id,
+                    retry + 1,
+                    _MAX_REVIEWER_RETRIES,
                 )
                 run = self.run(prompt, worktree_path, task_id=task.id)
                 review_text = self.get_text(run)
@@ -75,14 +80,19 @@ class ReviewerAgent(BaseAgent):
                 log.error(
                     "Reviewer(%s) still inconclusive after %d retries for "
                     "task [%s], treating as REQUEST_CHANGES",
-                    self.model, _MAX_REVIEWER_RETRIES, task.id,
+                    self.model,
+                    _MAX_REVIEWER_RETRIES,
+                    task.id,
                 )
                 verdict = False
         return run, verdict, review_text
 
     def review_patch(
-        self, task: Task, worktree_path: str,
+        self,
+        task: Task,
+        worktree_path: str,
         revision_context: str = "",
+        prior_rejections: str = "",
     ) -> Tuple[AgentRun, bool, str]:
         """Review a user-supplied patch / PR link / code snippet.
 
@@ -95,6 +105,7 @@ class ReviewerAgent(BaseAgent):
             title=task.title,
             review_input=task.review_input,
             revision_context=revision_context,
+            prior_rejections=prior_rejections,
         )
         run = self.run(prompt, worktree_path, task_id=task.id)
         review_text = self.get_text(run)
@@ -104,7 +115,10 @@ class ReviewerAgent(BaseAgent):
                 log.warning(
                     "Reviewer(%s) patch output inconclusive for task [%s], "
                     "auto-retrying (%d/%d)",
-                    self.model, task.id, retry + 1, _MAX_REVIEWER_RETRIES,
+                    self.model,
+                    task.id,
+                    retry + 1,
+                    _MAX_REVIEWER_RETRIES,
                 )
                 run = self.run(prompt, worktree_path, task_id=task.id)
                 review_text = self.get_text(run)
@@ -115,7 +129,9 @@ class ReviewerAgent(BaseAgent):
                 log.error(
                     "Reviewer(%s) patch still inconclusive after %d retries "
                     "for task [%s], treating as REQUEST_CHANGES",
-                    self.model, _MAX_REVIEWER_RETRIES, task.id,
+                    self.model,
+                    _MAX_REVIEWER_RETRIES,
+                    task.id,
                 )
                 verdict = False
         return run, verdict, review_text

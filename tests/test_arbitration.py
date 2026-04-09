@@ -361,7 +361,7 @@ class TestResumeTask:
 
 
 class TestManualReviewContextAccumulation:
-    def test_revise_pipeline_preserves_all_manual_review_context(
+    def test_revise_pipeline_uses_only_latest_manual_feedback_for_revision_context(
         self, tmp_db, make_task
     ):
         task = make_task(
@@ -430,8 +430,180 @@ class TestManualReviewContextAccumulation:
         orch._revise_task_pipeline(task.id, "Continue", True)
 
         revision_context = reviewer.review_changes.call_args.kwargs["revision_context"]
-        assert "First manual review note" in revision_context
+        assert "First manual review note" not in revision_context
         assert "Second manual review note" in revision_context
+
+    def test_revise_pipeline_first_coder_retry_prompt_keeps_latest_manual_feedback_and_immediate_prior_reviewer_feedback(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.PENDING,
+            worktree_path="/wt/task",
+            branch_name="agent/task-manual-boundary",
+            task_mode="develop",
+            max_retries=0,
+            session_ids={"coder": ["ses_manual_boundary"]},
+        )
+        tmp_db.save_task(task)
+
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="Old manual feedback that should not be replayed",
+                created_at=1.0,
+            )
+        )
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="reviewer",
+                model="rev-old",
+                output="REQUEST_CHANGES\nPrevious reviewer issue to keep",
+                created_at=2.0,
+            )
+        )
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="Latest manual feedback to keep",
+                created_at=3.0,
+            )
+        )
+
+        orch = _make_orchestrator(tmp_db)
+
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="revise",
+            output="coder output",
+            exit_code=0,
+            session_id="ses_manual_boundary",
+            created_at=4.0,
+        )
+        orch._default_coder.retry_with_feedback.return_value = (
+            code_run,
+            "coder output",
+        )
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.return_value = "coder summary"
+        orch.client.extract_last_text_block_or_raw.return_value = (
+            "REQUEST_CHANGES\nPrevious reviewer issue to keep"
+        )
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review",
+            created_at=5.0,
+        )
+        reviewer.review_changes.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._revise_task_pipeline(task.id)
+
+        retry_kwargs = orch._default_coder.retry_with_feedback.call_args.kwargs
+        assert retry_kwargs["manual_feedback"] == "Latest manual feedback to keep"
+        assert retry_kwargs["prior_reviewer_feedback"] == (
+            "REQUEST_CHANGES\nPrevious reviewer issue to keep"
+        )
+        assert (
+            retry_kwargs["review_feedback"]
+            == "Latest manual feedback to keep\n\nREQUEST_CHANGES\nPrevious reviewer issue to keep"
+        )
+        assert (
+            "Old manual feedback that should not be replayed"
+            not in retry_kwargs["review_feedback"]
+        )
+        revision_context = reviewer.review_changes.call_args.kwargs["revision_context"]
+        assert revision_context == "Latest manual feedback to keep"
+
+    def test_revise_pipeline_omits_prior_reviewer_feedback_when_previous_verdict_was_approve(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.PENDING,
+            worktree_path="/wt/task",
+            branch_name="agent/task-manual-approve",
+            task_mode="develop",
+            max_retries=0,
+            session_ids={"coder": ["ses_manual_approve"]},
+        )
+        tmp_db.save_task(task)
+
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="reviewer",
+                model="rev-ok",
+                output="APPROVE\nLooks good already",
+                created_at=1.0,
+            )
+        )
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="Latest manual feedback only",
+                created_at=2.0,
+            )
+        )
+
+        orch = _make_orchestrator(tmp_db)
+
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="revise",
+            output="coder output",
+            exit_code=0,
+            session_id="ses_manual_approve",
+            created_at=3.0,
+        )
+        orch._default_coder.retry_with_feedback.return_value = (
+            code_run,
+            "coder output",
+        )
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.return_value = "coder summary"
+        orch.client.extract_last_text_block_or_raw.return_value = (
+            "APPROVE\nLooks good already"
+        )
+
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            session_id="ses_review",
+            created_at=4.0,
+        )
+        reviewer.review_changes.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._revise_task_pipeline(task.id)
+
+        retry_kwargs = orch._default_coder.retry_with_feedback.call_args.kwargs
+        assert retry_kwargs["manual_feedback"] == "Latest manual feedback only"
+        assert retry_kwargs["prior_reviewer_feedback"] == ""
+        assert retry_kwargs["review_feedback"] == "Latest manual feedback only"
 
     def test_revise_pipeline_retry_passes_only_last_reviewer_text_block_to_coder(
         self, tmp_db, make_task

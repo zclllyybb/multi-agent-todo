@@ -725,6 +725,96 @@ assert.match(html, /changes look correct/);
     )
 
 
+def test_show_detail_preserves_unsent_text_inputs_across_close_and_reopen():
+    detail_payload = {
+        "task": {
+            "id": "task_drafts",
+            "title": "Draft persistence task",
+            "status": "review_failed",
+            "task_mode": "develop",
+            "complexity": "",
+            "priority": "medium",
+            "source": "manual",
+            "parent_id": "",
+            "retry_count": 0,
+            "max_retries": 3,
+            "depends_on": [],
+            "branch_name": "agent/task_drafts",
+            "worktree_path": "/tmp/worktree/task_drafts",
+            "file_path": "",
+            "line_number": 0,
+            "created_at": 1710002000,
+            "started_at": 1710002010,
+            "completed_at": 0,
+            "published_at": 0,
+            "clean_available": False,
+            "can_publish": False,
+            "can_assign_jira": False,
+            "can_cancel": False,
+            "can_resume": True,
+            "can_revise": True,
+            "can_arbitrate": True,
+            "description": "Keep unsent text when closing the detail panel.",
+            "review_input": "",
+            "error": "",
+            "session_ids": {},
+            "plan_output": "plan",
+            "code_output": "code",
+            "review_output": "review",
+            "reviewer_results": [],
+            "comment_count": 0,
+            "has_comments": False,
+            "comments": [],
+            "jira_issue_key": "",
+            "jira_issue_url": "",
+            "jira_status": "",
+            "jira_error": "",
+            "jira_payload_preview": "",
+            "jira_agent_output": "",
+        },
+        "runs": [],
+        "git_status": {
+            "branch": "agent/task_drafts",
+            "ahead": 0,
+            "staged": [],
+            "unstaged": [],
+            "untracked": [],
+            "raw": "## agent/task_drafts",
+        },
+    }
+    _run_dashboard_js(
+        rf"""
+const detailPayload = {json.dumps(detail_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/tasks/task_drafts') return {{ json: async () => detailPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await showDetail('task_drafts');
+let html = document.getElementById('detail-content').innerHTML;
+assert.match(html, /comment-username-task_drafts/);
+assert.match(html, /comment-content-task_drafts/);
+assert.match(html, /revise-feedback-task_drafts/);
+assert.match(html, /resume-message-task_drafts/);
+assert.match(html, /arbitrate-feedback-task_drafts/);
+assert.match(html, /exec-cmd-input/);
+document.getElementById('comment-username-task_drafts').value = 'alice';
+document.getElementById('comment-content-task_drafts').value = 'unsent comment';
+document.getElementById('revise-feedback-task_drafts').value = 'keep revise feedback';
+document.getElementById('resume-message-task_drafts').value = 'resume with custom instruction';
+document.getElementById('arbitrate-feedback-task_drafts').value = 'keep arbitration note';
+document.getElementById('exec-cmd-input').value = 'git status --short';
+closeModals();
+await showDetail('task_drafts');
+assert.equal(document.getElementById('comment-username-task_drafts').value, 'alice');
+assert.equal(document.getElementById('comment-content-task_drafts').value, 'unsent comment');
+assert.equal(document.getElementById('revise-feedback-task_drafts').value, 'keep revise feedback');
+assert.equal(document.getElementById('resume-message-task_drafts').value, 'resume with custom instruction');
+assert.equal(document.getElementById('arbitrate-feedback-task_drafts').value, 'keep arbitration note');
+assert.equal(document.getElementById('exec-cmd-input').value, 'git status --short');
+"""
+    )
+
+
 def test_refresh_renders_jira_mode_badge_successfully():
     status_payload = {
         "total_tasks": 1,

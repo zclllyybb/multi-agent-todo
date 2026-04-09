@@ -205,18 +205,61 @@ def coder_implement(
     return "\n".join(parts)
 
 
-def coder_retry_feedback(review_feedback: str, attempt: int) -> str:
-    """Concise prompt for continued coder sessions — only sends the review
-    feedback since the session already has full task context."""
-    return (
-        f"## Review Feedback (attempt {attempt})\n"
-        f"{review_feedback}\n\n"
-        "Please confirm whether the issues/optimization suggestions mentioned in the review are present/feasible, and if there are no issues, modify the code according to the suggestions."
-        "Do not ask me any questions. If you think the review comments are reasonable, make the modifications you believe are appropriate directly. You can decide on any intermediate issues on your own and finally explain them all together."
-        "You still need to follow the instructions in AGENTS.md, but the environment part should already be ready as you just used it. Make sure the tests pass after the modifications and that the code is organized to be basically the clearest."
+def coder_retry_feedback(
+    review_feedback: str,
+    attempt: int,
+    manual_feedback: str = "",
+    prior_reviewer_feedback: str = "",
+) -> str:
+    """Prompt for continued coder sessions.
+
+    Normal retry rounds only need the latest reviewer feedback because the coder
+    session already has the full task context.
+
+    Revise rounds are different: the latest manual feedback and the reviewer
+    feedback immediately before that manual review must be kept as separate
+    sections so the coder sees the current human instruction without older
+    already-processed manual-review history being re-sent.
+    """
+    sections = []
+    if manual_feedback or prior_reviewer_feedback:
+        sections.append(f"## Revise Context (attempt {attempt})")
+        if manual_feedback:
+            sections.append(
+                "### Current Manual Feedback\n"
+                "This is the latest manual feedback from the user for the "
+                "current revise round. Older manual-review inputs are "
+                "intentionally omitted because they should already be "
+                "addressed or superseded.\n\n"
+                f"{manual_feedback}"
+            )
+        if prior_reviewer_feedback:
+            sections.append(
+                "### Reviewer Feedback Immediately Before This Manual Feedback\n"
+                "Right before the latest manual feedback, the reviewer raised "
+                "the following issues. Address them together with the current "
+                "manual feedback unless they conflict; if they do conflict, "
+                "follow the latest manual feedback.\n\n"
+                f"{prior_reviewer_feedback}"
+            )
+    else:
+        sections.append(f"## Review Feedback (attempt {attempt})\n{review_feedback}")
+    sections.append(
+        "Please confirm whether the issues/optimization suggestions mentioned in "
+        "the review are present/feasible, and if there are no issues, modify the "
+        "code according to the suggestions."
+        "Do not ask me any questions. If you think the review comments are "
+        "reasonable, make the modifications you believe are appropriate directly. "
+        "You can decide on any intermediate issues on your own and finally explain "
+        "them all together."
+        "You still need to follow the instructions in AGENTS.md, but the "
+        "environment part should already be ready as you just used it. Make sure "
+        "the tests pass after the modifications and that the code is organized to "
+        "be basically the clearest."
         "The overall code style and conventions must still be followed."
         "All changes must still be made as commit(s) so that the reviewer can see them."
     )
+    return "\n\n".join(sections)
 
 
 def coder_assign_jira_issue(
@@ -339,9 +382,12 @@ def reviewer_review(
     revision_block = ""
     if revision_context:
         revision_block = (
-            f"## Revision Context"
-            f"The user provided the following manual feedback to the coder. "
-            f"Verify that the coder has addressed it:\n{revision_context}"
+            "## Revision Context\n"
+            "The user provided the following latest manual feedback to the "
+            "coder for this revise round. Older manual-review notes are "
+            "intentionally omitted here because they should already be "
+            "addressed or superseded. Verify that the coder has addressed "
+            f"this current feedback:\n\n{revision_context}\n"
         )
     prior_block = ""
     if prior_rejections:
@@ -379,7 +425,10 @@ Description: {description}
 
 
 def reviewer_review_patch(
-    title: str, review_input: str, revision_context: str = ""
+    title: str,
+    review_input: str,
+    revision_context: str = "",
+    prior_rejections: str = "",
 ) -> str:
     """Prompt for reviewing a user-supplied patch, PR link, or code snippet.
 
@@ -390,14 +439,29 @@ def reviewer_review_patch(
     revision_block = ""
     if revision_context:
         revision_block = f"""## Additional Review Instructions (from user)
-The user has provided additional review guidance. Pay special attention to these points:
+The user has provided the following latest review guidance for this round.
+Older manual-review notes are intentionally omitted because they should
+already be addressed or superseded. Pay special attention to these points:
+
 {revision_context}
+"""
+    prior_block = ""
+    if prior_rejections:
+        prior_block = f"""## Previous Review Rejections (for reference only)
+The following issues were raised by reviewers in earlier round(s) before this
+latest manual review. The patch or external code under review may have changed
+since then, so these complaints may already be resolved — or may have been
+incorrect in the first place. Use them as hints to guide your inspection, but
+reach your own independent conclusion.
+
+{prior_rejections}
 """
     return f"""You are a code review agent.
 
 ## Review Request
 Title: {title}
 {revision_block}
+{prior_block}
 ## Material to Review
 {review_input}
 

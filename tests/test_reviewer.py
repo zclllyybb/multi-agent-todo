@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from agents.prompts import reviewer_review
+from agents.prompts import coder_retry_feedback, reviewer_review, reviewer_review_patch
 from agents.reviewer import ReviewerAgent, _MAX_REVIEWER_RETRIES
 from core.models import AgentRun, Task
 
@@ -12,20 +12,23 @@ from core.models import AgentRun, Task
 @pytest.fixture
 def evaluator():
     """Return a ReviewerAgent with a dummy client — we only test _evaluate_review."""
+
     class _DummyClient:
         pass
+
     return ReviewerAgent(model="test-model", client=_DummyClient())
 
 
 class TestEvaluateReview:
-
     # ── Explicit verdict keywords ──
 
     def test_approve_keyword(self, evaluator):
         assert evaluator._evaluate_review("APPROVE\nAll looks good.") is True
 
     def test_request_changes_keyword(self, evaluator):
-        assert evaluator._evaluate_review("REQUEST_CHANGES\nPlease fix the bug.") is False
+        assert (
+            evaluator._evaluate_review("REQUEST_CHANGES\nPlease fix the bug.") is False
+        )
 
     def test_request_changes_overrides_approve(self, evaluator):
         """If both keywords appear, REQUEST_CHANGES wins."""
@@ -71,7 +74,8 @@ class TestReviewerReviewPrompt:
 
     def test_prior_rejections_included(self):
         prompt = reviewer_review(
-            title="T", description="D",
+            title="T",
+            description="D",
             prior_rejections="=== Reviewer: m1 | REQUEST_CHANGES ===\nFix the null check.",
         )
         assert "Previous Review Rejections (for reference only)" in prompt
@@ -80,18 +84,28 @@ class TestReviewerReviewPrompt:
         assert "reach your own" in prompt
 
     def test_revision_context_included(self):
-        prompt = reviewer_review(title="T", description="D", revision_context="Also fix X")
+        prompt = reviewer_review(
+            title="T", description="D", revision_context="Also fix X"
+        )
         assert "Revision Context" in prompt
         assert "Also fix X" in prompt
 
     def test_both_blocks_present(self):
         prompt = reviewer_review(
-            title="T", description="D",
+            title="T",
+            description="D",
             revision_context="Fix X",
             prior_rejections="Old rejection",
         )
         assert "Revision Context" in prompt
         assert "Previous Review Rejections" in prompt
+
+    def test_revision_context_describes_latest_manual_feedback_only(self):
+        prompt = reviewer_review(
+            title="T", description="D", revision_context="Latest manual feedback"
+        )
+        assert "latest manual feedback" in prompt
+        assert "Older manual-review notes are intentionally omitted" in prompt
 
     def test_empty_prior_rejections_omitted(self):
         prompt = reviewer_review(title="T", description="D", prior_rejections="")
@@ -145,6 +159,7 @@ class TestReviewChangesInterface:
 # Fix 3: Verdict parsing — standalone lines & preamble disambiguation
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestVerdictParsing:
     """Regression tests for _evaluate_review verdict disambiguation."""
 
@@ -171,7 +186,9 @@ class TestVerdictParsing:
 
     def test_standalone_approve_with_request_changes_in_body(self, evaluator):
         """Standalone APPROVE verdict line, REQUEST_CHANGES mentioned in feedback body."""
-        text = "APPROVE\nPreviously I would have said REQUEST_CHANGES but it's fixed now."
+        text = (
+            "APPROVE\nPreviously I would have said REQUEST_CHANGES but it's fixed now."
+        )
         assert evaluator._evaluate_review(text) is True
 
     def test_standalone_request_changes_with_approve_in_body(self, evaluator):
@@ -179,7 +196,9 @@ class TestVerdictParsing:
         text = "REQUEST_CHANGES\nI cannot approve this until the null check is added."
         assert evaluator._evaluate_review(text) is False
 
-    def test_approve_slash_request_changes_preamble_then_standalone_approve(self, evaluator):
+    def test_approve_slash_request_changes_preamble_then_standalone_approve(
+        self, evaluator
+    ):
         """APPROVE/REQUEST_CHANGES in preamble, then standalone APPROVE on next line."""
         text = (
             "My task is to give an APPROVE/REQUEST_CHANGES verdict.\n"
@@ -192,6 +211,7 @@ class TestVerdictParsing:
 # ─────────────────────────────────────────────────────────────────────────────
 # Fix A: Tri-state _evaluate_review + auto-retry on inconclusive output
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestEvaluateReviewTriState:
     """Verify _evaluate_review returns None for inconclusive output."""
@@ -218,7 +238,9 @@ class TestReviewChangesAutoRetry:
     def test_auto_retry_succeeds_on_second_attempt(self):
         """First call returns inconclusive, second returns APPROVE → passed."""
         mock_client = MagicMock()
-        inconclusive_run = AgentRun(agent_type="reviewer", model="m", output="Planning...")
+        inconclusive_run = AgentRun(
+            agent_type="reviewer", model="m", output="Planning..."
+        )
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nOK")
         mock_client.run.side_effect = [inconclusive_run, approve_run]
         mock_client.extract_text_response.side_effect = ["Planning...", "APPROVE\nOK"]
@@ -233,7 +255,9 @@ class TestReviewChangesAutoRetry:
     def test_auto_retry_exhausted_defaults_to_reject(self):
         """All attempts return inconclusive → defaults to False."""
         mock_client = MagicMock()
-        inconclusive_run = AgentRun(agent_type="reviewer", model="m", output="Thinking...")
+        inconclusive_run = AgentRun(
+            agent_type="reviewer", model="m", output="Thinking..."
+        )
         mock_client.run.return_value = inconclusive_run
         mock_client.extract_text_response.return_value = "Thinking..."
 
@@ -247,7 +271,9 @@ class TestReviewChangesAutoRetry:
     def test_definite_verdict_no_retry(self):
         """If first attempt has a clear verdict, no retry happens."""
         mock_client = MagicMock()
-        run_obj = AgentRun(agent_type="reviewer", model="m", output="REQUEST_CHANGES\nBug")
+        run_obj = AgentRun(
+            agent_type="reviewer", model="m", output="REQUEST_CHANGES\nBug"
+        )
         mock_client.run.return_value = run_obj
         mock_client.extract_text_response.return_value = "REQUEST_CHANGES\nBug"
 
@@ -262,15 +288,24 @@ class TestReviewPatchAutoRetry:
     """Same auto-retry logic for review_patch."""
 
     def _make_task(self) -> Task:
-        return Task(title="Review PR", description="d", task_mode="review",
-                    review_input="https://github.com/org/repo/pull/1")
+        return Task(
+            title="Review PR",
+            description="d",
+            task_mode="review",
+            review_input="https://github.com/org/repo/pull/1",
+        )
 
     def test_patch_auto_retry_succeeds(self):
         mock_client = MagicMock()
-        inconclusive_run = AgentRun(agent_type="reviewer", model="m", output="Let me check...")
+        inconclusive_run = AgentRun(
+            agent_type="reviewer", model="m", output="Let me check..."
+        )
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nLGTM")
         mock_client.run.side_effect = [inconclusive_run, approve_run]
-        mock_client.extract_text_response.side_effect = ["Let me check...", "APPROVE\nLGTM"]
+        mock_client.extract_text_response.side_effect = [
+            "Let me check...",
+            "APPROVE\nLGTM",
+        ]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
         _, passed, _ = reviewer.review_patch(self._make_task(), "/repo")
@@ -293,6 +328,7 @@ class TestReviewPatchAutoRetry:
 # Fix B: Coder response channel (coder_response in reviewer prompt)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestCoderResponseChannel:
     """Verify coder_response is included in the reviewer prompt."""
 
@@ -301,7 +337,8 @@ class TestCoderResponseChannel:
 
     def test_coder_response_in_prompt_builder(self):
         prompt = reviewer_review(
-            title="T", description="D",
+            title="T",
+            description="D",
             coder_response="I chose approach X because Y.",
         )
         assert "Coder's Response" in prompt
@@ -317,7 +354,8 @@ class TestCoderResponseChannel:
         reviewer = _make_reviewer("APPROVE\nOK")
         task = self._make_task()
         reviewer.review_changes(
-            task, "/repo",
+            task,
+            "/repo",
             coder_response="I disagree with the reviewer's suggestion because...",
         )
         prompt_sent = reviewer.client.run.call_args.kwargs["message"]
@@ -327,7 +365,8 @@ class TestCoderResponseChannel:
     def test_all_sections_coexist(self):
         """coder_response, prior_rejections, and revision_context all appear together."""
         prompt = reviewer_review(
-            title="T", description="D",
+            title="T",
+            description="D",
             revision_context="User says fix X",
             prior_rejections="Old rejection text",
             coder_response="Coder explanation",
@@ -335,3 +374,43 @@ class TestCoderResponseChannel:
         assert "Revision Context" in prompt
         assert "Previous Review Rejections" in prompt
         assert "Coder's Response" in prompt
+
+
+class TestCoderRetryFeedbackPrompt:
+    def test_standard_retry_uses_review_feedback_section(self):
+        prompt = coder_retry_feedback(
+            review_feedback="Reviewer says fix null check",
+            attempt=2,
+        )
+        assert "## Review Feedback (attempt 2)" in prompt
+        assert "Reviewer says fix null check" in prompt
+        assert "## Revise Context" not in prompt
+
+    def test_revise_retry_separates_manual_and_prior_reviewer_feedback(self):
+        prompt = coder_retry_feedback(
+            review_feedback="combined fallback",
+            attempt=0,
+            manual_feedback="Latest manual instruction",
+            prior_reviewer_feedback="REQUEST_CHANGES\nPrevious reviewer issue",
+        )
+        assert "## Revise Context (attempt 0)" in prompt
+        assert "### Current Manual Feedback" in prompt
+        assert "Latest manual instruction" in prompt
+        assert "### Reviewer Feedback Immediately Before This Manual Feedback" in prompt
+        assert "Previous reviewer issue" in prompt
+        assert "Older manual-review inputs are intentionally omitted" in prompt
+        assert "## Review Feedback" not in prompt
+
+
+class TestReviewerReviewPatchPrompt:
+    def test_review_patch_can_include_prior_rejections(self):
+        prompt = reviewer_review_patch(
+            title="Review T",
+            review_input="patch",
+            revision_context="Latest manual note",
+            prior_rejections="REQUEST_CHANGES\nOld reviewer note",
+        )
+        assert "Additional Review Instructions" in prompt
+        assert "Latest manual note" in prompt
+        assert "Previous Review Rejections" in prompt
+        assert "Old reviewer note" in prompt

@@ -99,6 +99,8 @@ class CoderAgent(BaseAgent):
         worktree_path: str,
         review_feedback: str,
         session_id: str,
+        manual_feedback: str = "",
+        prior_reviewer_feedback: str = "",
     ) -> Tuple[AgentRun, str]:
         """Continue an existing coder session with only the review feedback.
 
@@ -108,6 +110,8 @@ class CoderAgent(BaseAgent):
         prompt = coder_retry_feedback(
             review_feedback=review_feedback,
             attempt=task.retry_count,
+            manual_feedback=manual_feedback,
+            prior_reviewer_feedback=prior_reviewer_feedback,
         )
         run = self.run(
             prompt,

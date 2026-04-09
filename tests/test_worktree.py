@@ -535,6 +535,71 @@ class TestReviewOnlyTaskCleanup:
         assert saved.branch_name == "agent/review-bbb"
         assert saved.worktree_path == ""
 
+    def test_review_only_revise_preserves_latest_manual_feedback_and_prior_reviewer_rejection(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.PENDING,
+            task_mode="review",
+            title="Review patch",
+            review_input="diff --git a/x b/x",
+            branch_name="agent/review-ctx",
+            worktree_path="/wt/agent/review-ctx",
+        )
+        tmp_db.save_task(task)
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="Older manual note that should not reappear",
+                created_at=1.0,
+            )
+        )
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="reviewer",
+                model="rev-old",
+                output="REQUEST_CHANGES\nPrior patch review issue",
+                created_at=2.0,
+            )
+        )
+        tmp_db.save_agent_run(
+            AgentRun(
+                task_id=task.id,
+                agent_type="manual_review",
+                model="user",
+                output="Latest review guidance",
+                created_at=3.0,
+            )
+        )
+
+        orch = _orch_helper(tmp_db)
+        orch.client.extract_last_text_block_or_raw.return_value = (
+            "REQUEST_CHANGES\nPrior patch review issue"
+        )
+        reviewer = MagicMock()
+        reviewer.model = "rev-m"
+        review_run = AgentRun(
+            task_id=task.id,
+            agent_type="reviewer",
+            model="rev-m",
+            prompt="",
+            output="APPROVE",
+            exit_code=0,
+            created_at=4.0,
+        )
+        reviewer.review_patch.return_value = (review_run, True, "APPROVE")
+        orch.reviewers = [reviewer]
+
+        orch._review_only_pipeline(task.id)
+
+        kwargs = reviewer.review_patch.call_args.kwargs
+        assert kwargs["revision_context"] == "Latest review guidance"
+        assert kwargs["prior_rejections"] == "REQUEST_CHANGES\nPrior patch review issue"
+        assert "Older manual note" not in kwargs["revision_context"]
+
 
 class TestCleanVisibilityByActualResources:
     def test_clean_hidden_when_stale_record_has_no_real_resources(
@@ -759,6 +824,8 @@ def _orch_helper(tmp_db):
     orch.reviewers = []
     orch._executor = MagicMock()
     orch._pending_dispatch = []
+    orch._futures = {}
+    orch._lock = __import__("threading").Lock()
     orch._resource_snapshot_cache = (set(), {})
     orch._resource_snapshot_cached_at = 0.0
     return orch

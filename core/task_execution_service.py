@@ -4,8 +4,10 @@ import logging
 import re
 import time
 import traceback
+from dataclasses import dataclass
 from typing import List
 
+from agents.reviewer import ReviewerAgent
 from core.models import (
     AgentRun,
     ModelOutputError,
@@ -16,6 +18,25 @@ from core.models import (
 )
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ReviseContext:
+    manual_feedback: str = ""
+    prior_reviewer_feedback: str = ""
+
+    @property
+    def reviewer_revision_context(self) -> str:
+        return self.manual_feedback
+
+    @property
+    def coder_retry_feedback(self) -> str:
+        parts = []
+        if self.manual_feedback:
+            parts.append(self.manual_feedback)
+        if self.prior_reviewer_feedback:
+            parts.append(self.prior_reviewer_feedback)
+        return "\n\n".join(parts)
 
 
 class TaskExecutionService:
@@ -71,17 +92,51 @@ class TaskExecutionService:
                 return run.session_id
         return ""
 
-    def manual_review_context(self, task_id: str) -> str:
-        """Return accumulated manual-review context in chronological order."""
-        runs = self.db.get_runs_for_task(task_id)
-        notes = []
-        for run in sorted(runs, key=lambda r: r.created_at):
+    def latest_revise_context(self, task_id: str) -> ReviseContext:
+        """Return the latest revise round's manual feedback plus preceding review.
+
+        Semantics:
+        - Keep only the latest manual-review input for the current revise round.
+        - If the immediately preceding relevant reviewer round raised feedback,
+          keep that reviewer feedback too.
+        - Do not re-send older manual-review notes, because those should already
+          have been addressed or superseded.
+        """
+        runs = sorted(self.db.get_runs_for_task(task_id), key=lambda r: r.created_at)
+        latest_manual_idx = -1
+        latest_manual_feedback = ""
+        for idx in range(len(runs) - 1, -1, -1):
+            run = runs[idx]
             if run.agent_type != "manual_review":
                 continue
             text = (run.output or "").strip()
             if text:
-                notes.append(text)
-        return "\n\n".join(notes)
+                latest_manual_idx = idx
+                latest_manual_feedback = text
+                break
+
+        if latest_manual_idx == -1:
+            return ReviseContext()
+
+        prior_reviewer_feedback = ""
+        for idx in range(latest_manual_idx - 1, -1, -1):
+            run = runs[idx]
+            if run.agent_type != "reviewer":
+                continue
+            review_text = self.client.extract_last_text_block_or_raw(run.output).strip()
+            verdict = (
+                ReviewerAgent._evaluate_review(None, review_text)
+                if review_text
+                else None
+            )
+            if verdict is False:
+                prior_reviewer_feedback = review_text
+            break
+
+        return ReviseContext(
+            manual_feedback=latest_manual_feedback,
+            prior_reviewer_feedback=prior_reviewer_feedback,
+        )
 
     def extract_coder_response(self, code_run: AgentRun) -> str:
         return self.client.extract_last_text_block(code_run.output)
@@ -325,13 +380,16 @@ class TaskExecutionService:
             )
 
             coder_session_id = self.orchestrator._latest_coder_session_id(task)
+            revise_context = self.latest_revise_context(task_id)
             review_revision_context = (
-                self.manual_review_context(task_id) or task.user_feedback
+                revise_context.reviewer_revision_context or task.user_feedback
             )
             if first_message_raw:
                 initial_coder_feedback = first_coder_message or task.user_feedback
             else:
-                initial_coder_feedback = review_revision_context
+                initial_coder_feedback = revise_context.coder_retry_feedback or (
+                    review_revision_context
+                )
 
             for attempt in range(task.max_retries + 1):
                 task = self.db.get_task(task_id)
@@ -362,6 +420,14 @@ class TaskExecutionService:
                         worktree_path,
                         review_feedback=coder_feedback,
                         session_id=coder_session_id,
+                        manual_feedback=(
+                            revise_context.manual_feedback if attempt == 0 else ""
+                        ),
+                        prior_reviewer_feedback=(
+                            revise_context.prior_reviewer_feedback
+                            if attempt == 0
+                            else ""
+                        ),
                     )
                 self.db.save_agent_run(code_run)
                 task.code_output = code_text
@@ -530,7 +596,11 @@ class TaskExecutionService:
                     self.worktree_mgr.copy_files_into(worktree_path, task.copy_files)
 
             worktree_path = task.worktree_path
-            revision_context = self.manual_review_context(task_id) or task.user_feedback
+            revise_context = self.latest_revise_context(task_id)
+            revision_context = (
+                revise_context.reviewer_revision_context or task.user_feedback
+            )
+            prior_rejections = revise_context.prior_reviewer_feedback
 
             reviewer_results = []
             for reviewer in self.reviewers:
@@ -543,6 +613,7 @@ class TaskExecutionService:
                     task,
                     worktree_path,
                     revision_context=revision_context,
+                    prior_rejections=prior_rejections,
                 )
                 self.db.save_agent_run(review_run)
                 reviewer_results.append(
