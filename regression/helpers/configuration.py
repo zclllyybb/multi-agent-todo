@@ -133,6 +133,7 @@ class RegressionConfigFactory:
             "auto_scan_todos": False,
         }
         runtime["opencode"] = {
+            "config_path": str(self.repository_root / "opencode.json"),
             "planner_model": profile.planner_model,
             "coder_model_default": profile.coder_model_default,
             "coder_model_by_complexity": dict(profile.coder_model_by_complexity),

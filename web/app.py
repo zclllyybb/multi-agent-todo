@@ -462,6 +462,7 @@ async def api_config():
         "base_branch": repo.get("base_branch", ""),
         "worktree_dir": repo.get("worktree_dir", ""),
         "worktree_hooks": repo.get("worktree_hooks", []),
+        "opencode_config_path": oc.get("config_path", ""),
         "planner_model": oc.get("planner_model", ""),
         "coder_model_by_complexity": oc.get("coder_model_by_complexity", {}),
         "coder_model_default": oc.get("coder_model_default", ""),
@@ -2635,6 +2636,10 @@ async function loadSysInfo() {
     <h4>Repository</h4>
     <div class="val" style="font-size:12px;word-break:break-all">${esc(cfg.repo_path)}</div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:4px">base branch: <code>${esc(cfg.base_branch)}</code></div>
+  </div>`;
+  html += `<div class="detail-card" style="grid-column:span 2">
+    <h4>OpenCode Config</h4>
+    <div class="val" style="font-size:12px;word-break:break-all">${esc(cfg.opencode_config_path || '-')}</div>
   </div>`;
   html += `<div class="detail-card" style="grid-column:span 2">
     <h4>Worktree Directory</h4>

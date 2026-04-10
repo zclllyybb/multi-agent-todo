@@ -414,3 +414,12 @@ class TestReviewerReviewPatchPrompt:
         assert "Latest manual note" in prompt
         assert "Previous Review Rejections" in prompt
         assert "Old reviewer note" in prompt
+
+    def test_review_patch_omits_prior_rejections_when_empty(self):
+        prompt = reviewer_review_patch(
+            title="Review T",
+            review_input="patch",
+            revision_context="Latest manual note",
+            prior_rejections="",
+        )
+        assert "Previous Review Rejections" not in prompt

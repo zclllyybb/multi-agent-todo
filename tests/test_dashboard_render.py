@@ -972,6 +972,7 @@ def test_load_sys_info_renders_explorer_and_map_model_selects_successfully():
         "base_branch": "main",
         "worktree_dir": "/wt",
         "worktree_hooks": ["hooks/setup.sh"],
+        "opencode_config_path": "/workspace/opencode.json",
         "planner_model": "planner-x",
         "explorer_model": "explorer-x",
         "map_model": "map-x",
@@ -1007,9 +1008,11 @@ globalThis.fetch = async (url) => {{
 }};
 await loadSysInfo();
 const html = document.getElementById('sysinfo-content').innerHTML;
-assert.match(html, /Planner Model/);
-assert.match(html, /Explorer Model/);
-assert.match(html, /Map Model/);
+        assert.match(html, /Planner Model/);
+        assert.match(html, /OpenCode Config/);
+        assert.match(html, /workspace\/opencode\.json/);
+        assert.match(html, /Explorer Model/);
+        assert.match(html, /Map Model/);
 assert.match(html, /sys-explorer-model/);
 assert.match(html, /sys-map-model/);
 assert.match(html, /reviewer-a/);

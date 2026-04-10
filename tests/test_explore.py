@@ -678,6 +678,7 @@ def _make_orchestrator_config(tmp_path):
             "worktree_hooks": [],
         },
         "opencode": {
+            "config_path": "opencode.json",
             "planner_model": "test-planner",
             "coder_model_by_complexity": {"simple": "test-coder"},
             "coder_model_default": "test-coder",

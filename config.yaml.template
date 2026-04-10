@@ -16,6 +16,8 @@ repo:
 
 # OpenCode settings
 opencode:
+  # Passed to opencode as OPENCODE_CONFIG. Relative paths are resolved from this repo.
+  config_path: opencode.json
   # Model for planning tasks (complexity assessment, sub-task splitting)
   planner_model: your-provider/planner-model
   # Coder model selected by task complexity (planner assigns one of: very_complex/complex/medium/simple)

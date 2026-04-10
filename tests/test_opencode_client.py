@@ -1,5 +1,6 @@
-"""Tests for core/opencode_client.py: pure parsing methods (no subprocess)."""
+"""Tests for core/opencode_client.py: parsing and subprocess env handling."""
 
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -369,3 +370,89 @@ class TestExecTimeout:
         assert "TIMEOUT after 10s" in output
         assert '{"sessionID":"ses_timeout_1"}' in output
         assert client.extract_session_id(output) == "ses_timeout_1"
+
+
+class TestOpenCodeConfigEnv:
+    def test_default_config_path_points_to_repo_opencode_json(self, client):
+        expected = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "opencode.json")
+        )
+        assert client.config_path == expected
+
+    def test_explicit_config_path_overrides_default(self):
+        client = OpenCodeClient(timeout=10, config_path="custom/opencode-alt.json")
+        expected = os.path.abspath(
+            os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "custom/opencode-alt.json",
+            )
+        )
+        assert client.config_path == expected
+
+    def test_exec_injects_opencode_config_into_subprocess_env(
+        self, client, tmp_path, monkeypatch
+    ):
+        captured_env = {}
+
+        class _FakeProc:
+            def __init__(self):
+                self.returncode = 0
+
+            def communicate(self, timeout=None):
+                return ('{"sessionID":"ses_env"}\n', "")
+
+        def _fake_popen(*args, **kwargs):
+            captured_env.update(kwargs.get("env", {}))
+            return _FakeProc()
+
+        monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+
+        output, exit_code, _ = client._exec(["opencode", "run"], str(tmp_path))
+
+        assert exit_code == 0
+        assert "ses_env" in output
+        assert captured_env["OPENCODE_CONFIG"] == client.config_path
+
+    def test_run_passes_opencode_config_to_all_continue_calls(self, client):
+        first_output = '{"sessionID":"ses_continue"}\n'
+        second_output = _build_output((["done"], [], "stop"))
+        calls = []
+
+        def _fake_exec(cmd, work_dir, task_id="", env=None):
+            calls.append({"cmd": list(cmd), "env": client._build_proc_env(env)})
+            if len(calls) == 1:
+                return first_output, 1, 0.1
+            return second_output, 0, 0.1
+
+        with patch.object(client, "_exec", side_effect=_fake_exec):
+            run = client.run(
+                message="hello",
+                work_dir="/repo",
+                require_stop=True,
+                max_continues=2,
+            )
+
+        assert run.exit_code == 0
+        assert len(calls) == 2
+        assert calls[0]["env"]["OPENCODE_CONFIG"] == client.config_path
+        assert calls[1]["env"]["OPENCODE_CONFIG"] == client.config_path
+        assert calls[1]["cmd"][-1] == "Continue"
+
+    def test_run_streaming_passes_opencode_config_to_stream_exec(self, client):
+        captured_envs = []
+
+        def _fake_exec_streaming(**kwargs):
+            captured_envs.append(client._build_proc_env(kwargs.get("env")))
+            return _build_output((["done"], [], "stop")), 0, 0.1, "ses_stream", False
+
+        with patch.object(client, "_exec_streaming", side_effect=_fake_exec_streaming):
+            run = client.run_streaming(
+                message="hello",
+                work_dir="/repo",
+                require_stop=True,
+                max_continues=1,
+            )
+
+        assert run.exit_code == 0
+        assert len(captured_envs) == 1
+        assert captured_envs[0]["OPENCODE_CONFIG"] == client.config_path

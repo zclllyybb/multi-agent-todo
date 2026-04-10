@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
         "worktree_dir": "/mnt/disk3/zhaochangle/multi-agent-todo/worktrees",
     },
     "opencode": {
+        "config_path": "opencode.json",
         "planner_model": "opencode/gpt-5-nano",
         "coder_model": "opencode/gpt-5-nano",
         "reviewer_model": "opencode/gpt-5-nano",

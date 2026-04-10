@@ -601,6 +601,50 @@ class TestReviewOnlyTaskCleanup:
         assert "Older manual note" not in kwargs["revision_context"]
 
 
+class TestOpenCodeClientConstruction:
+    def test_orchestrator_passes_opencode_config_path_to_client(self):
+        from core.orchestrator import Orchestrator
+
+        config = {
+            "repo": {
+                "path": "/repo",
+                "base_branch": "master",
+                "worktree_dir": "/wt",
+                "worktree_hooks": [],
+            },
+            "opencode": {
+                "timeout": 30,
+                "config_path": "configs/custom-opencode.json",
+                "planner_model": "planner",
+                "coder_model_default": "coder",
+                "coder_model_by_complexity": {},
+                "reviewer_models": [],
+            },
+            "orchestrator": {"max_parallel_tasks": 1, "max_retries": 1},
+            "database": {"path": ":memory:"},
+            "publish": {"remote": "origin"},
+            "explore": {},
+        }
+
+        with (
+            patch("core.orchestrator.Database"),
+            patch("core.orchestrator.WorktreeManager"),
+            patch("core.orchestrator.OpenCodeClient") as client_cls,
+            patch("core.orchestrator.JiraService"),
+            patch("core.orchestrator.TaskExecutionService"),
+            patch("core.orchestrator.ExploreService"),
+            patch("core.orchestrator.PlannerAgent"),
+            patch("core.orchestrator.CoderAgent"),
+            patch("core.orchestrator.ThreadPoolExecutor"),
+        ):
+            Orchestrator(config)
+
+        client_cls.assert_called_once_with(
+            timeout=30,
+            config_path="configs/custom-opencode.json",
+        )
+
+
 class TestCleanVisibilityByActualResources:
     def test_clean_hidden_when_stale_record_has_no_real_resources(
         self, tmp_db, make_task

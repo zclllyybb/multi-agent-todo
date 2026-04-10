@@ -1,10 +1,13 @@
 """Tests for core/config.py: _deep_merge and load_config."""
 
 import os
+from pathlib import Path
 import yaml
 import pytest
 
-from core.config import _deep_merge, load_config
+from core.config import DEFAULT_CONFIG, _deep_merge, load_config
+from regression.helpers.configuration import RegressionConfigFactory
+from regression.helpers.models import RegressionPaths, RegressionWorkspace
 
 
 class TestDeepMerge:
@@ -50,6 +53,9 @@ class TestDeepMerge:
 
 
 class TestLoadConfig:
+    def test_default_config_includes_opencode_config_path(self):
+        assert DEFAULT_CONFIG["opencode"]["config_path"] == "opencode.json"
+
     def test_loads_yaml_file(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(
@@ -76,6 +82,7 @@ class TestLoadConfig:
         assert config["orchestrator"]["max_parallel_tasks"] == 3
         assert config["web"]["port"] == 8778
         assert config["explore"]["variant"] == ""
+        assert config["opencode"]["config_path"] == "opencode.json"
         assert config["_meta"]["config_path"] == str(missing)
 
     def test_partial_override_keeps_defaults(self, tmp_path):
@@ -113,3 +120,71 @@ class TestLoadConfig:
         assert config["jira"]["skill_path"] == "skills/jira-issue"
         assert config["jira"]["routing_hints"][0]["assignee"] == "alice"
         assert config["jira"]["routing_hints"][0]["component"] == "query execution"
+
+    def test_opencode_config_path_can_be_overridden(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            yaml.dump({"opencode": {"config_path": "/tmp/custom-opencode.json"}})
+        )
+        config = load_config(str(cfg_file))
+        assert config["opencode"]["config_path"] == "/tmp/custom-opencode.json"
+
+
+class TestRegressionConfigFactory:
+    def test_runtime_config_writes_opencode_config_path(self, tmp_path):
+        base_config = tmp_path / "base-config.yaml"
+        base_config.write_text(
+            yaml.dump(
+                {
+                    "regression": {
+                        "default_profile": "stable",
+                        "model_profiles": {
+                            "stable": {
+                                "planner_model": "planner-model",
+                                "coder_model_default": "coder-model",
+                                "reviewer_models": ["reviewer-model"],
+                                "explorer_model": "explorer-model",
+                                "map_model": "map-model",
+                                "timeout": 60,
+                            }
+                        },
+                    }
+                }
+            )
+        )
+
+        workspace_root = tmp_path / "workspace"
+        paths = RegressionPaths(
+            root=workspace_root,
+            fixture_source=tmp_path / "fixture-source",
+            repo=workspace_root / "repo",
+            remote=workspace_root / "remote.git",
+            worktrees=workspace_root / "worktrees",
+            data_dir=workspace_root / "data",
+            logs_dir=workspace_root / "logs",
+            config_dir=workspace_root / "config",
+            config_file=workspace_root / "config" / "config.yaml",
+            pid_file=workspace_root / "run" / "daemon.pid",
+        )
+        for path in [
+            paths.root,
+            paths.repo,
+            paths.worktrees,
+            paths.data_dir,
+            paths.logs_dir,
+            paths.config_dir,
+            paths.pid_file.parent,
+        ]:
+            Path(path).mkdir(parents=True, exist_ok=True)
+
+        workspace = RegressionWorkspace(fixture_name="fixture", paths=paths)
+        factory = RegressionConfigFactory(tmp_path, base_config)
+
+        loaded, _profile = factory.create_runtime_config(
+            workspace,
+            profile_name="stable",
+        )
+
+        assert loaded["opencode"]["config_path"] == str(tmp_path / "opencode.json")
+        written = yaml.safe_load(paths.config_file.read_text())
+        assert written["opencode"]["config_path"] == str(tmp_path / "opencode.json")
