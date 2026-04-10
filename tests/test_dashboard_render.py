@@ -43,6 +43,7 @@ function escapeHtml(value) {{
 }}
 
 const elements = new Map();
+const localStorageState = new Map();
 
 function makeElement(id) {{
   if (!elements.has(id)) {{
@@ -71,6 +72,11 @@ Object.defineProperty(globalThis, 'navigator', {{
   value: {{ clipboard: {{ writeText() {{ return Promise.resolve(); }} }} }},
   configurable: true,
 }});
+globalThis.localStorage = {{
+  getItem(key) {{ return localStorageState.has(key) ? localStorageState.get(key) : null; }},
+  setItem(key, value) {{ localStorageState.set(key, String(value)); }},
+  removeItem(key) {{ localStorageState.delete(key); }},
+}};
 globalThis.performance = {{ now: () => 0 }};
 globalThis.setInterval = () => 0;
 globalThis.clearInterval = () => {{}};
@@ -119,6 +125,30 @@ assert.match(html, /ses_123/);
 assert.match(html, /opencode --session ses_123/);
 assert.match(html, /\[copy\]/);
 """
+    )
+
+
+def test_theme_toggle_uses_local_storage_and_updates_body_dataset():
+    _run_dashboard_js(
+        r"""
+localStorage.setItem('multi-agent-dashboard-theme', 'light');
+initTheme();
+assert.equal(document.body.dataset.theme, 'light');
+assert.equal(document.getElementById('theme-toggle-label').textContent, 'Day');
+toggleTheme();
+assert.equal(document.body.dataset.theme, 'dark');
+assert.equal(localStorage.getItem('multi-agent-dashboard-theme'), 'dark');
+assert.equal(document.getElementById('theme-toggle-label').textContent, 'Night');
+"""
+    )
+
+
+def test_dashboard_html_exposes_theme_toggle_and_light_theme_tokens():
+    assert 'id="theme-toggle"' in DASHBOARD_HTML
+    assert 'body[data-theme="light"]' in DASHBOARD_HTML
+    assert (
+        'THEME_STORAGE_KEY = "multi-agent-dashboard-theme"' in DASHBOARD_HTML
+        or "THEME_STORAGE_KEY = 'multi-agent-dashboard-theme'" in DASHBOARD_HTML
     )
 
 

@@ -24,11 +24,35 @@ def _ts_fmt(ts_ms: int) -> str:
 
 
 class OpenCodeClient:
-    def __init__(self, timeout: int = 600):
+    def __init__(self, timeout: int = 600, config_path: str = ""):
         self.timeout = timeout
+        self.config_path = self._resolve_config_path(config_path)
         self._active_procs: Set[subprocess.Popen] = set()
         self._task_procs: dict = {}  # task_id -> Popen
         self._proc_lock = threading.Lock()
+
+    @staticmethod
+    def _default_config_path() -> str:
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "opencode.json",
+        )
+
+    def _resolve_config_path(self, config_path: str = "") -> str:
+        candidate = str(config_path or "").strip() or self._default_config_path()
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                candidate,
+            )
+        return os.path.abspath(candidate)
+
+    def _build_proc_env(self, env: Optional[dict[str, str]] = None) -> dict[str, str]:
+        proc_env = os.environ.copy()
+        if env:
+            proc_env.update(env)
+        proc_env["OPENCODE_CONFIG"] = self.config_path
+        return proc_env
 
     def _exec(
         self,
@@ -39,9 +63,7 @@ class OpenCodeClient:
     ) -> Tuple[str, int, float]:
         """Execute an opencode command and return (stdout, exit_code, duration)."""
         start = time.time()
-        proc_env = os.environ.copy()
-        if env:
-            proc_env.update(env)
+        proc_env = self._build_proc_env(env)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -128,9 +150,7 @@ class OpenCodeClient:
         Returns (output, exit_code, duration, session_id, was_cancelled).
         """
         start = time.time()
-        proc_env = os.environ.copy()
-        if env:
-            proc_env.update(env)
+        proc_env = self._build_proc_env(env)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,

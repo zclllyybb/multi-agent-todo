@@ -57,7 +57,10 @@ class Orchestrator:
             base_branch=config["repo"]["base_branch"],
             hook_env=config.get("hook_env", {}),
         )
-        self.client = OpenCodeClient(timeout=config["opencode"]["timeout"])
+        self.client = OpenCodeClient(
+            timeout=config["opencode"]["timeout"],
+            config_path=config.get("opencode", {}).get("config_path", ""),
+        )
         self.jira = JiraService(self)
         self.task_exec = TaskExecutionService(self)
         self.explore = ExploreService(self)
