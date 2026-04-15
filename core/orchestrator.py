@@ -36,6 +36,15 @@ from core.models import (
     TodoItem,
     TodoItemStatus,
 )
+from core.model_config import (
+    ModelSpec,
+    model_spec_list_to_config_value,
+    model_spec_map_to_config_value,
+    model_spec_to_config_value,
+    parse_model_spec,
+    parse_model_spec_list,
+    parse_model_spec_map,
+)
 from core.opencode_client import OpenCodeClient
 from core.worktree import WorktreeManager
 
@@ -43,6 +52,59 @@ log = logging.getLogger(__name__)
 
 
 class Orchestrator:
+    @staticmethod
+    def _planner_spec_from_config(config: dict) -> ModelSpec:
+        oc = config.get("opencode", {})
+        return parse_model_spec(oc.get("planner", oc.get("planner_model", "")))
+
+    @staticmethod
+    def _default_coder_spec_from_config(config: dict) -> ModelSpec:
+        oc = config.get("opencode", {})
+        return parse_model_spec(
+            oc.get(
+                "coder_default",
+                oc.get("coder_model_default", oc.get("coder_model", "")),
+            )
+        )
+
+    @staticmethod
+    def _coder_specs_by_complexity_from_config(config: dict) -> dict[str, ModelSpec]:
+        oc = config.get("opencode", {})
+        return parse_model_spec_map(
+            oc.get("coder_by_complexity", oc.get("coder_model_by_complexity", {}))
+        )
+
+    @staticmethod
+    def _reviewer_specs_from_config(config: dict) -> list[ModelSpec]:
+        oc = config.get("opencode", {})
+        reviewers = oc.get("reviewers")
+        if reviewers is not None:
+            return parse_model_spec_list(reviewers)
+        legacy = oc.get("reviewer_models", [oc.get("reviewer_model", "")])
+        return parse_model_spec_list(legacy)
+
+    @staticmethod
+    def _explorer_spec_from_config(config: dict) -> ModelSpec:
+        explore = config.get("explore", {})
+        spec = parse_model_spec(explore.get("explorer"))
+        if spec.is_set:
+            return spec
+        legacy = parse_model_spec(explore.get("explorer_model", ""))
+        if legacy.is_set:
+            return legacy
+        return Orchestrator._planner_spec_from_config(config)
+
+    @staticmethod
+    def _map_spec_from_config(config: dict) -> ModelSpec:
+        explore = config.get("explore", {})
+        spec = parse_model_spec(explore.get("map"))
+        if spec.is_set:
+            return spec
+        legacy = parse_model_spec(explore.get("map_model", ""))
+        if legacy.is_set:
+            return legacy
+        return Orchestrator._explorer_spec_from_config(config)
+
     def __init__(self, config: dict):
         self.config = config
         self.running = False
@@ -66,27 +128,32 @@ class Orchestrator:
         self.explore = ExploreService(self)
 
         # Agents
+        planner_spec = self._planner_spec_from_config(config)
         self.planner = PlannerAgent(
-            model=config["opencode"]["planner_model"], client=self.client
+            model=planner_spec.model,
+            variant=planner_spec.variant,
+            client=self.client,
         )
         # Coder: one agent per complexity level, keyed by complexity string
-        oc = config["opencode"]
-        default_coder_model = oc.get("coder_model_default", oc.get("coder_model", ""))
-        complexity_map: dict = oc.get("coder_model_by_complexity", {})
+        default_coder_spec = self._default_coder_spec_from_config(config)
+        complexity_map = self._coder_specs_by_complexity_from_config(config)
         self._coder_by_complexity: Dict[str, CoderAgent] = {}
-        for level, model in complexity_map.items():
+        for level, spec in complexity_map.items():
             self._coder_by_complexity[level] = CoderAgent(
-                model=model, client=self.client
+                model=spec.model, variant=spec.variant, client=self.client
             )
-        self._default_coder = CoderAgent(model=default_coder_model, client=self.client)
+        self._default_coder = CoderAgent(
+            model=default_coder_spec.model,
+            variant=default_coder_spec.variant,
+            client=self.client,
+        )
 
         # Reviewers: one agent per configured model; all must approve
-        reviewer_models: List[str] = oc.get(
-            "reviewer_models",
-            [oc.get("reviewer_model", "")],
-        )
+        reviewer_specs = self._reviewer_specs_from_config(config)
         self.reviewers: List[ReviewerAgent] = [
-            ReviewerAgent(model=m, client=self.client) for m in reviewer_models if m
+            ReviewerAgent(model=spec.model, variant=spec.variant, client=self.client)
+            for spec in reviewer_specs
+            if spec.model
         ]
 
         # Thread pool for parallel execution
@@ -287,6 +354,7 @@ class Orchestrator:
                 message=prompt,
                 work_dir=repo_path,
                 model=simple_agent.model,
+                variant=simple_agent.variant,
                 agent_type="slug",
                 max_continues=0,
             )
@@ -306,63 +374,121 @@ class Orchestrator:
         """Update agent models at runtime without restarting.
 
         Accepted keys (all optional):
-          planner_model: str
-          coder_model_default: str
-          coder_model_by_complexity: dict  (level -> model)
-          reviewer_models: list[str]
-          explorer_model: str
-          map_model: str
+          planner / planner_model
+          coder_default / coder_model_default
+          coder_by_complexity / coder_model_by_complexity
+          reviewers / reviewer_models
+          explorer / explorer_model
+          map / map_model
+
+        Each value can be either:
+          - a plain model string
+          - {model: "...", variant: "..."}
         """
         oc = self.config.setdefault("opencode", {})
         explore = self.config.setdefault("explore", {})
 
-        if "planner_model" in updates and updates["planner_model"]:
-            model = updates["planner_model"].strip()
-            self.planner = PlannerAgent(model=model, client=self.client)
-            oc["planner_model"] = model
-            log.info("Updated planner model: %s", model)
+        if "planner" in updates or "planner_model" in updates:
+            spec = parse_model_spec(
+                updates.get("planner", updates.get("planner_model"))
+            )
+            if spec.is_set:
+                self.planner = PlannerAgent(
+                    model=spec.model,
+                    variant=spec.variant,
+                    client=self.client,
+                )
+                oc["planner"] = model_spec_to_config_value(spec)
+                oc["planner_model"] = spec.model
+                log.info(
+                    "Updated planner model: %s variant=%s",
+                    spec.model,
+                    spec.variant or "-",
+                )
 
-        if "coder_model_default" in updates and updates["coder_model_default"]:
-            model = updates["coder_model_default"].strip()
-            self._default_coder = CoderAgent(model=model, client=self.client)
-            oc["coder_model_default"] = model
-            log.info("Updated default coder model: %s", model)
+        if "coder_default" in updates or "coder_model_default" in updates:
+            spec = parse_model_spec(
+                updates.get("coder_default", updates.get("coder_model_default"))
+            )
+            if spec.is_set:
+                self._default_coder = CoderAgent(
+                    model=spec.model,
+                    variant=spec.variant,
+                    client=self.client,
+                )
+                oc["coder_default"] = model_spec_to_config_value(spec)
+                oc["coder_model_default"] = spec.model
+                log.info(
+                    "Updated default coder model: %s variant=%s",
+                    spec.model,
+                    spec.variant or "-",
+                )
 
-        if "coder_model_by_complexity" in updates:
-            cmap = updates["coder_model_by_complexity"]
-            if isinstance(cmap, dict):
-                new_map = {}
-                for level, model in cmap.items():
-                    m = model.strip() if isinstance(model, str) else ""
-                    if m:
-                        new_map[level] = m
-                        self._coder_by_complexity[level] = CoderAgent(
-                            model=m, client=self.client
-                        )
-                oc["coder_model_by_complexity"] = new_map
-                log.info("Updated coder complexity map: %s", new_map)
+        if "coder_by_complexity" in updates or "coder_model_by_complexity" in updates:
+            cmap = parse_model_spec_map(
+                updates.get(
+                    "coder_by_complexity", updates.get("coder_model_by_complexity")
+                )
+            )
+            if cmap:
+                self._coder_by_complexity = {
+                    level: CoderAgent(
+                        model=spec.model,
+                        variant=spec.variant,
+                        client=self.client,
+                    )
+                    for level, spec in cmap.items()
+                }
+                oc["coder_by_complexity"] = model_spec_map_to_config_value(cmap)
+                oc["coder_model_by_complexity"] = {
+                    level: spec.model for level, spec in cmap.items()
+                }
+                log.info(
+                    "Updated coder complexity map: %s",
+                    {
+                        level: {"model": spec.model, "variant": spec.variant}
+                        for level, spec in cmap.items()
+                    },
+                )
 
-        if "reviewer_models" in updates:
-            models = updates["reviewer_models"]
-            if isinstance(models, list):
-                cleaned = [
-                    m.strip() for m in models if isinstance(m, str) and m.strip()
-                ]
-                self.reviewers = [
-                    ReviewerAgent(model=m, client=self.client) for m in cleaned
-                ]
-                oc["reviewer_models"] = cleaned
-                log.info("Updated reviewer models: %s", cleaned)
+        if "reviewers" in updates or "reviewer_models" in updates:
+            specs = parse_model_spec_list(
+                updates.get("reviewers", updates.get("reviewer_models"))
+            )
+            self.reviewers = [
+                ReviewerAgent(
+                    model=spec.model, variant=spec.variant, client=self.client
+                )
+                for spec in specs
+            ]
+            oc["reviewers"] = model_spec_list_to_config_value(specs)
+            oc["reviewer_models"] = [spec.model for spec in specs]
+            log.info(
+                "Updated reviewer models: %s",
+                [{"model": spec.model, "variant": spec.variant} for spec in specs],
+            )
 
-        if "explorer_model" in updates and updates["explorer_model"]:
-            model = updates["explorer_model"].strip()
-            explore["explorer_model"] = model
-            log.info("Updated explorer model: %s", model)
+        if "explorer" in updates or "explorer_model" in updates:
+            spec = parse_model_spec(
+                updates.get("explorer", updates.get("explorer_model"))
+            )
+            if spec.is_set:
+                explore["explorer"] = model_spec_to_config_value(spec)
+                explore["explorer_model"] = spec.model
+                log.info(
+                    "Updated explorer model: %s variant=%s",
+                    spec.model,
+                    spec.variant or "-",
+                )
 
-        if "map_model" in updates and updates["map_model"]:
-            model = updates["map_model"].strip()
-            explore["map_model"] = model
-            log.info("Updated map model: %s", model)
+        if "map" in updates or "map_model" in updates:
+            spec = parse_model_spec(updates.get("map", updates.get("map_model")))
+            if spec.is_set:
+                explore["map"] = model_spec_to_config_value(spec)
+                explore["map_model"] = spec.model
+                log.info(
+                    "Updated map model: %s variant=%s", spec.model, spec.variant or "-"
+                )
 
         # Persist model config changes so they survive restarts.
         self._save_model_config()
@@ -1359,8 +1485,11 @@ class Orchestrator:
     def _get_explorer_model(self) -> str:
         return self._explore_service().get_explorer_model()
 
-    def _get_explore_variant(self) -> str:
-        return self._explore_service().get_explore_variant()
+    def _get_explorer_spec(self) -> ModelSpec:
+        return self._explore_service().get_explorer_spec()
+
+    def _get_map_spec(self) -> ModelSpec:
+        return self._explore_service().get_map_spec()
 
     def _get_explore_parallel_limit(self) -> int:
         return self._explore_service().get_explore_parallel_limit()

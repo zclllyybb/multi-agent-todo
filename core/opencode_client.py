@@ -239,7 +239,7 @@ class OpenCodeClient:
         max_continues: int = 1,
         env: Optional[dict[str, str]] = None,
         require_stop: bool = False,
-        agent_variant: str = "",
+        variant: str = "",
     ) -> AgentRun:
         """Run opencode with a message in a specific directory.
 
@@ -262,8 +262,8 @@ class OpenCodeClient:
             "--format",
             "json",
         ]
-        if agent_variant:
-            cmd.extend(["--agent", agent_variant])
+        if variant:
+            cmd.extend(["--variant", variant])
         if session_id:
             cmd.extend(["--session", session_id])
         cmd.append(message)
@@ -273,7 +273,7 @@ class OpenCodeClient:
             agent_type,
             model,
             work_dir,
-            agent_variant or "-",
+            variant or "-",
         )
         log.debug("Prompt: %s", message)
 
@@ -311,8 +311,8 @@ class OpenCodeClient:
                 "--format",
                 "json",
             ]
-            if agent_variant:
-                cont_cmd.extend(["--agent", agent_variant])
+            if variant:
+                cont_cmd.extend(["--variant", variant])
             cont_cmd.extend(["--session", sid, "Continue"])
             cont_output, exit_code, cont_duration = self._exec(
                 cont_cmd, work_dir, task_id, env=env
@@ -355,7 +355,7 @@ class OpenCodeClient:
         require_stop: bool = False,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
-        agent_variant: str = "",
+        variant: str = "",
     ) -> AgentRun:
         """Run opencode with streaming output and optional cancellation."""
         total_duration = 0.0
@@ -375,8 +375,8 @@ class OpenCodeClient:
                 "--format",
                 "json",
             ]
-            if agent_variant:
-                cmd.extend(["--agent", agent_variant])
+            if variant:
+                cmd.extend(["--variant", variant])
             if sid:
                 cmd.extend(["--session", sid])
             cmd.append(current_message)
@@ -387,7 +387,7 @@ class OpenCodeClient:
                 model,
                 work_dir,
                 sid,
-                agent_variant or "-",
+                variant or "-",
             )
             chunk_out, exit_code, duration, observed_sid, cancelled = (
                 self._exec_streaming(

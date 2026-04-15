@@ -19,17 +19,30 @@ opencode:
   # Passed to opencode as OPENCODE_CONFIG. Relative paths are resolved from this repo.
   config_path: opencode.json
   # Model for planning tasks (complexity assessment, sub-task splitting)
+  planner:
+    model: your-provider/planner-model
+    # variant is optional, can be omitted for all models
+    variant: ""
   planner_model: your-provider/planner-model
   # Coder model selected by task complexity (planner assigns one of: very_complex/complex/medium/simple)
+  coder_default:
+    model: your-provider/balanced-model
   coder_model_by_complexity:
-    very_complex: your-provider/strongest-model
-    complex: your-provider/strongest-model
-    medium: your-provider/balanced-model
-    simple: your-provider/fast-model
+    very_complex:
+      model: your-provider/strongest-model
+    complex:
+      model: your-provider/strongest-model
+    medium:
+      model: your-provider/balanced-model
+    simple:
+      model: your-provider/fast-model
   # Fallback coder model if complexity is unrecognised
   coder_model_default: your-provider/balanced-model
   # Reviewer models — ALL must approve for a task to pass
   # Using multiple diverse models improves review quality
+  reviewers:
+    - model: your-provider/reviewer-model-1
+    - model: your-provider/reviewer-model-2
   reviewer_models:
     - your-provider/reviewer-model-1
     - your-provider/reviewer-model-2
@@ -63,7 +76,11 @@ publish:
 
 # Code exploration system
 explore:
+  explorer:
+    model: your-provider/explorer-model
   # Model for map initialization and exploration agents
+  map:
+    model: your-provider/explorer-model
   explorer_model: your-provider/explorer-model
   map_model: your-provider/explorer-model
   # Max exploration runs executing at once (overflow goes to queue)
@@ -88,15 +105,8 @@ jira:
   project_key: YOURPROJECT
   epic: YOURPROJECT-12345
   # Candidate values passed to the drafting model; it must choose from these.
-  issue_type:
-    - Bug
-    - Task
-    - Improvement
-  priority:
-    - Highest
-    - High
-    - Medium
-    - Low
+  issue_type: ["Bug", "New Feature", "Improvement", "Task"]
+  priority: ["Highest", "High", "Medium", "Low", "Lowest"]
   # Relative path inside this repo to the vendored jira-issue skill
   skill_path: skills/jira-issue
   timeout: 120

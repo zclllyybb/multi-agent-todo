@@ -134,15 +134,25 @@ class RegressionConfigFactory:
         }
         runtime["opencode"] = {
             "config_path": str(self.repository_root / "opencode.json"),
+            "planner": {"model": profile.planner_model, "variant": ""},
             "planner_model": profile.planner_model,
+            "coder_default": {"model": profile.coder_model_default, "variant": ""},
             "coder_model_default": profile.coder_model_default,
+            "coder_by_complexity": {
+                level: {"model": model, "variant": ""}
+                for level, model in profile.coder_model_by_complexity.items()
+            },
             "coder_model_by_complexity": dict(profile.coder_model_by_complexity),
+            "reviewers": [
+                {"model": model, "variant": ""} for model in profile.reviewer_models
+            ],
             "reviewer_models": list(profile.reviewer_models),
             "timeout": profile.timeout,
         }
         runtime["explore"] = {
-            "variant": "",
+            "explorer": {"model": profile.explorer_model, "variant": ""},
             "explorer_model": profile.explorer_model,
+            "map": {"model": profile.map_model, "variant": ""},
             "map_model": profile.map_model,
             "max_parallel_runs": 1,
             "categories": ["maintainability"],

@@ -9,6 +9,7 @@ import uuid
 from typing import List, Optional, Set
 
 from agents.explorer import ExplorerAgent
+from core.model_config import ModelSpec
 from core.models import (
     AgentRun,
     ExploreModule,
@@ -50,13 +51,13 @@ class ExploreService:
         )
 
     def get_explorer_model(self) -> str:
-        return self.config.get("explore", {}).get(
-            "explorer_model",
-            self.config["opencode"].get("planner_model", ""),
-        )
+        return self.get_explorer_spec().model
 
-    def get_explore_variant(self) -> str:
-        return str(self.config.get("explore", {}).get("variant", "")).strip()
+    def get_explorer_spec(self) -> ModelSpec:
+        return self.orchestrator._explorer_spec_from_config(self.config)
+
+    def get_map_spec(self) -> ModelSpec:
+        return self.orchestrator._map_spec_from_config(self.config)
 
     def get_explore_parallel_limit(self) -> int:
         raw = self.config.get("explore", {}).get(
@@ -651,17 +652,17 @@ class ExploreService:
     def init_explore_map(self) -> dict:
         """Synchronous map-init entrypoint (used by tests)."""
         repo_path = self.config["repo"]["path"]
-        model = self.config.get("explore", {}).get(
-            "map_model", self.orchestrator._get_explorer_model()
+        spec = self.get_map_spec()
+        model = spec.model
+        explorer = ExplorerAgent(
+            model=spec.model, variant=spec.variant, client=self.client
         )
-        variant = self.orchestrator._get_explore_variant()
-        explorer = ExplorerAgent(model=model, client=self.client)
         log.info(
-            "Starting explore map init: model=%s variant=%s", model, variant or "-"
+            "Starting explore map init: model=%s variant=%s", model, spec.variant or "-"
         )
 
         try:
-            run, modules_data = explorer.init_map(repo_path, agent_variant=variant)
+            run, modules_data = explorer.init_map(repo_path)
             modules_created = self.orchestrator._apply_explore_map(
                 run, modules_data, model
             )
@@ -711,10 +712,9 @@ class ExploreService:
                     "state": dict(self.orchestrator._explore_map_state),
                 }
 
-            model = self.config.get("explore", {}).get(
-                "map_model", self.orchestrator._get_explorer_model()
-            )
-            variant = self.orchestrator._get_explore_variant()
+            spec = self.get_map_spec()
+            model = spec.model
+            variant = spec.variant
             now = time.time()
             review_reason = review_reason.strip()
             review_message = (
@@ -790,7 +790,7 @@ class ExploreService:
         review_session_id: str = "",
     ):
         repo_path = self.config["repo"]["path"]
-        explorer = ExplorerAgent(model=model, client=self.client)
+        explorer = ExplorerAgent(model=model, variant=variant, client=self.client)
         last_persist_at = 0.0
 
         def _on_output(chunk: str, sid: str):
@@ -816,7 +816,6 @@ class ExploreService:
                 message_override=review_message or None,
                 on_output=_on_output,
                 should_cancel=lambda: self.orchestrator._explore_map_cancel_requested,
-                agent_variant=variant,
             )
             modules_created = self.orchestrator._apply_explore_map(
                 run, modules_data, model
@@ -1011,8 +1010,8 @@ class ExploreService:
             assert module is not None, f"module {module_id} vanished from DB"
             personality = EXPLORER_PERSONALITIES[personality_key]
             repo_path = self.config["repo"]["path"]
-            model = self.orchestrator._get_explorer_model()
-            variant = self.orchestrator._get_explore_variant()
+            spec = self.get_explorer_spec()
+            model = spec.model
             task_id = f"__explore__:{module_id}:{category}"
             session_id = ""
             focus_point = ""
@@ -1024,13 +1023,15 @@ class ExploreService:
                 focus_point = str(job.get("focus_point", "")).strip()
                 resume_with_continue = bool(job.get("resume_with_continue", False))
 
-            explorer = ExplorerAgent(model=model, client=self.client)
+            explorer = ExplorerAgent(
+                model=spec.model, variant=spec.variant, client=self.client
+            )
             log.info(
                 "Starting exploration run: module=%s category=%s model=%s variant=%s personality=%s",
                 module.path,
                 category,
                 model,
-                variant or "-",
+                spec.variant or "-",
                 personality_key,
             )
             stream_mode = job is not None and isinstance(self.client, OpenCodeClient)
@@ -1043,7 +1044,6 @@ class ExploreService:
                     repo_path=repo_path,
                     focus_point=focus_point,
                     prior_note=prior_note,
-                    agent_variant=variant,
                 )
             else:
                 persist_box = {"last": 0.0}
@@ -1070,7 +1070,6 @@ class ExploreService:
                     if (resume_with_continue and session_id)
                     else None,
                     on_output=_on_output,
-                    agent_variant=variant,
                     should_cancel=lambda: (
                         self.orchestrator._is_explore_cancel_requested(key)
                     ),

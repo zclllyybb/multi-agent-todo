@@ -70,7 +70,7 @@ class TestLoadConfig:
         config = load_config(str(cfg_file))
         assert config["web"]["port"] == 9999
         assert config["orchestrator"]["max_parallel_tasks"] == 10
-        assert config["explore"]["variant"] == "deep-explorer"
+        assert config["explore"]["explorer"]["variant"] == "deep-explorer"
         assert config["_meta"]["config_path"] == str(cfg_file)
         # Default keys still present
         assert "repo" in config
@@ -81,7 +81,7 @@ class TestLoadConfig:
         config = load_config(str(missing))
         assert config["orchestrator"]["max_parallel_tasks"] == 3
         assert config["web"]["port"] == 8778
-        assert config["explore"]["variant"] == ""
+        assert config["explore"]["explorer"]["variant"] == ""
         assert config["opencode"]["config_path"] == "opencode.json"
         assert config["_meta"]["config_path"] == str(missing)
 

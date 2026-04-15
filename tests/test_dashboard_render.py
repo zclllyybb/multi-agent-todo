@@ -973,14 +973,26 @@ def test_load_sys_info_renders_explorer_and_map_model_selects_successfully():
         "worktree_dir": "/wt",
         "worktree_hooks": ["hooks/setup.sh"],
         "opencode_config_path": "/workspace/opencode.json",
+        "planner": {"model": "planner-x", "variant": "planner-v"},
         "planner_model": "planner-x",
+        "explorer": {"model": "explorer-x", "variant": "explorer-v"},
         "explorer_model": "explorer-x",
+        "map": {"model": "map-x", "variant": "map-v"},
         "map_model": "map-x",
+        "coder_by_complexity": {
+            "simple": {"model": "coder-s", "variant": "simple-v"},
+            "complex": {"model": "coder-c", "variant": "complex-v"},
+        },
         "coder_model_by_complexity": {
             "simple": "coder-s",
             "complex": "coder-c",
         },
+        "coder_default": {"model": "coder-default", "variant": "coder-default-v"},
         "coder_model_default": "coder-default",
+        "reviewers": [
+            {"model": "reviewer-a", "variant": "reviewer-a-v"},
+            {"model": "reviewer-b", "variant": ""},
+        ],
         "reviewer_models": ["reviewer-a", "reviewer-b"],
         "max_retries": 4,
         "publish_remote": "origin",
@@ -1013,11 +1025,17 @@ const html = document.getElementById('sysinfo-content').innerHTML;
         assert.match(html, /workspace\/opencode\.json/);
         assert.match(html, /Explorer Model/);
         assert.match(html, /Map Model/);
-assert.match(html, /sys-explorer-model/);
-assert.match(html, /sys-map-model/);
-assert.match(html, /reviewer-a/);
-assert.match(html, /coder-default/);
-"""
+        assert.match(html, /sys-explorer-model/);
+        assert.match(html, /sys-map-model/);
+        assert.match(html, /planner-v/);
+        assert.match(html, /explorer-v/);
+        assert.match(html, /map-v/);
+        assert.match(html, /coder-default-v/);
+        assert.match(html, /simple-v/);
+        assert.match(html, /reviewer-a-v/);
+        assert.match(html, /reviewer-a/);
+        assert.match(html, /coder-default/);
+        """
     )
 
 
@@ -1029,14 +1047,38 @@ globalThis.showSysToast = () => {};
 globalThis.loadSysInfo = () => {};
 document.getElementById('sys-save-btn').textContent = 'Save';
 document.getElementById('sys-planner-model').value = 'planner-save';
+document.getElementById('sys-planner-variant').value = 'planner-variant';
 document.getElementById('sys-explorer-model').value = 'explorer-save';
+document.getElementById('sys-explorer-variant').value = 'explorer-variant';
 document.getElementById('sys-map-model').value = 'map-save';
+document.getElementById('sys-map-variant').value = 'map-variant';
 document.getElementById('sys-coder-default').value = 'coder-save';
+document.getElementById('sys-coder-default-variant').value = 'coder-variant';
+document.getElementById('sys-coder-variant-simple').value = 'simple-variant';
+document.getElementById('sys-coder-variant-complex').value = 'complex-variant';
 document.querySelectorAll = (selector) => {
   if (selector === '[data-complexity]') {
     return [
       { dataset: { complexity: 'simple' }, value: 'coder-simple' },
       { dataset: { complexity: 'complex' }, value: 'coder-complex' },
+    ];
+  }
+  if (selector === '.sys-reviewer-row') {
+    return [
+      {
+        querySelector(sel) {
+          if (sel === '.sys-reviewer-select') return { value: 'reviewer-a' };
+          if (sel === '.sys-reviewer-variant') return { value: 'reviewer-a-variant' };
+          return null;
+        },
+      },
+      {
+        querySelector(sel) {
+          if (sel === '.sys-reviewer-select') return { value: 'reviewer-b' };
+          if (sel === '.sys-reviewer-variant') return { value: '' };
+          return null;
+        },
+      },
     ];
   }
   if (selector === '.sys-reviewer-select') {
@@ -1054,12 +1096,76 @@ globalThis.fetch = async (url, opts) => {
 await saveSysModels();
 assert.equal(captured.url, '/api/config');
 const body = JSON.parse(captured.opts.body);
+assert.deepEqual(body.planner, { model: 'planner-save', variant: 'planner-variant' });
 assert.equal(body.planner_model, 'planner-save');
+assert.deepEqual(body.explorer, { model: 'explorer-save', variant: 'explorer-variant' });
 assert.equal(body.explorer_model, 'explorer-save');
+assert.deepEqual(body.map, { model: 'map-save', variant: 'map-variant' });
 assert.equal(body.map_model, 'map-save');
+assert.deepEqual(body.coder_default, { model: 'coder-save', variant: 'coder-variant' });
 assert.equal(body.coder_model_default, 'coder-save');
+assert.deepEqual(body.coder_by_complexity, {
+  simple: { model: 'coder-simple', variant: 'simple-variant' },
+  complex: { model: 'coder-complex', variant: 'complex-variant' },
+});
 assert.deepEqual(body.coder_model_by_complexity, { simple: 'coder-simple', complex: 'coder-complex' });
+assert.deepEqual(body.reviewers, [
+  { model: 'reviewer-a', variant: 'reviewer-a-variant' },
+  { model: 'reviewer-b', variant: '' },
+]);
 assert.deepEqual(body.reviewer_models, ['reviewer-a', 'reviewer-b']);
+"""
+    )
+
+
+def test_load_sys_info_handles_reviewer_spec_without_variant_key():
+    cfg_payload = {
+        "repo_path": "/repo",
+        "base_branch": "main",
+        "worktree_dir": "/wt",
+        "worktree_hooks": [],
+        "opencode_config_path": "/workspace/opencode.json",
+        "planner": {"model": "planner-x", "variant": ""},
+        "planner_model": "planner-x",
+        "explorer": {"model": "explorer-x", "variant": ""},
+        "explorer_model": "explorer-x",
+        "map": {"model": "map-x", "variant": ""},
+        "map_model": "map-x",
+        "coder_by_complexity": {},
+        "coder_model_by_complexity": {},
+        "coder_default": {"model": "coder-default", "variant": ""},
+        "coder_model_default": "coder-default",
+        "reviewers": [
+            {"model": "reviewer-a", "variant": "reviewer-a-v"},
+            {"model": "reviewer-b"},
+        ],
+        "reviewer_models": ["reviewer-a", "reviewer-b"],
+        "max_retries": 4,
+        "publish_remote": "origin",
+    }
+    models_payload = {
+        "models": [
+            "planner-x",
+            "explorer-x",
+            "map-x",
+            "coder-default",
+            "reviewer-a",
+            "reviewer-b",
+        ]
+    }
+    _run_dashboard_js(
+        rf"""
+const cfgPayload = {json.dumps(cfg_payload)};
+const modelsPayload = {json.dumps(models_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/config') return {{ json: async () => cfgPayload }};
+  if (url === '/api/models') return {{ json: async () => modelsPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await loadSysInfo();
+const html = document.getElementById('sysinfo-content').innerHTML;
+assert.match(html, /reviewer-a-v/);
+assert.match(html, /reviewer-b/);
 """
     )
 

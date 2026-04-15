@@ -31,8 +31,8 @@ log = logging.getLogger(__name__)
 class PlannerAgent(BaseAgent):
     agent_type = "planner"
 
-    def __init__(self, model: str, client: OpenCodeClient):
-        super().__init__(model, client)
+    def __init__(self, model: str, client: OpenCodeClient, variant: str = ""):
+        super().__init__(model, client, variant=variant)
 
     def scan_todos(
         self,

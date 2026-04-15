@@ -12,6 +12,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from agents.reviewer import ReviewerAgent
 from core.orchestrator import Orchestrator
 from core.opencode_client import OpenCodeClient
+from core.model_config import (
+    model_spec_list_to_config_value,
+    model_spec_map_to_config_value,
+)
 
 app = FastAPI(title="Multi-Agent TODO Resolver")
 log = logging.getLogger(__name__)
@@ -463,11 +467,26 @@ async def api_config():
         "worktree_dir": repo.get("worktree_dir", ""),
         "worktree_hooks": repo.get("worktree_hooks", []),
         "opencode_config_path": oc.get("config_path", ""),
+        "planner": oc.get(
+            "planner", {"model": oc.get("planner_model", ""), "variant": ""}
+        ),
         "planner_model": oc.get("planner_model", ""),
+        "coder_by_complexity": oc.get("coder_by_complexity", {}),
         "coder_model_by_complexity": oc.get("coder_model_by_complexity", {}),
+        "coder_default": oc.get(
+            "coder_default", {"model": oc.get("coder_model_default", ""), "variant": ""}
+        ),
         "coder_model_default": oc.get("coder_model_default", ""),
+        "reviewers": oc.get("reviewers", []),
         "reviewer_models": oc.get("reviewer_models", []),
+        "explorer": cfg.get("explore", {}).get(
+            "explorer",
+            {"model": cfg.get("explore", {}).get("explorer_model", ""), "variant": ""},
+        ),
         "explorer_model": cfg.get("explore", {}).get("explorer_model", ""),
+        "map": cfg.get("explore", {}).get(
+            "map", {"model": cfg.get("explore", {}).get("map_model", ""), "variant": ""}
+        ),
         "map_model": cfg.get("explore", {}).get("map_model", ""),
         "jira_project_key": cfg.get("jira", {}).get("project_key", ""),
         "jira_issue_type": cfg.get("jira", {}).get("issue_type", []),
@@ -2557,15 +2576,23 @@ function buildModelSelect(id, models, current, extraAttr) {
   return `<select class="sys-select" id="${id}" ${extraAttr||''}>${opts}</select>`;
 }
 
+function modelSpecFromInputs(modelId, variantId) {
+  const model = (document.getElementById(modelId)?.value || '').trim();
+  const variant = (document.getElementById(variantId)?.value || '').trim();
+  return { model, variant };
+}
+
 function addReviewerRow(models, value) {
   const container = document.getElementById('sys-reviewer-list');
   const row = document.createElement('div');
+  row.className = 'sys-reviewer-row';
   row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:6px';
   const all = (value && !models.includes(value)) ? [value, ...models] : models;
   const opts = all.map(m =>
     `<option value="${esc(m)}"${m === value ? ' selected' : ''}>${esc(m)}</option>`
   ).join('');
   row.innerHTML = `<select class="sys-select sys-reviewer-select" style="flex:1">${opts}</select>
+    <input class="sys-reviewer-variant" placeholder="variant" style="width:180px;margin-bottom:0">
     <button class="btn btn-sm" style="color:var(--red);padding:2px 7px;flex-shrink:0" onclick="this.parentElement.remove()" title="Remove">&times;</button>`;
   container.appendChild(row);
 }
@@ -2579,15 +2606,33 @@ async function saveSysModels() {
       cmap[el.dataset.complexity] = el.value;
     });
     const reviewerModels = [];
+    const reviewerSpecs = [];
     document.querySelectorAll('.sys-reviewer-select').forEach(el => {
       if (el.value) reviewerModels.push(el.value);
     });
+    document.querySelectorAll('.sys-reviewer-row').forEach(row => {
+      const model = row.querySelector('.sys-reviewer-select')?.value || '';
+      const variant = row.querySelector('.sys-reviewer-variant')?.value || '';
+      if (model.trim()) reviewerSpecs.push({ model: model.trim(), variant: variant.trim() });
+    });
+    const coderByComplexity = {};
+    document.querySelectorAll('[data-complexity]').forEach(el => {
+      const level = el.dataset.complexity;
+      const variantEl = document.getElementById(`sys-coder-variant-${level}`);
+      coderByComplexity[level] = { model: el.value, variant: variantEl ? variantEl.value.trim() : '' };
+    });
     const payload = {
+      planner: modelSpecFromInputs('sys-planner-model', 'sys-planner-variant'),
       planner_model: document.getElementById('sys-planner-model').value,
+      explorer: modelSpecFromInputs('sys-explorer-model', 'sys-explorer-variant'),
       explorer_model: document.getElementById('sys-explorer-model').value,
+      map: modelSpecFromInputs('sys-map-model', 'sys-map-variant'),
       map_model: document.getElementById('sys-map-model').value,
+      coder_default: modelSpecFromInputs('sys-coder-default', 'sys-coder-default-variant'),
       coder_model_default: document.getElementById('sys-coder-default').value,
+      coder_by_complexity: coderByComplexity,
       coder_model_by_complexity: cmap,
+      reviewers: reviewerSpecs,
       reviewer_models: reviewerModels,
     };
     const res = await api('/api/config', {
@@ -2648,18 +2693,22 @@ async function loadSysInfo() {
   html += `<div class="detail-card">
     <h4>Planner Model</h4>
     ${buildModelSelect('sys-planner-model', models, cfg.planner_model)}
+    <input id="sys-planner-variant" placeholder="optional variant" value="${esc((cfg.planner && cfg.planner.variant) || '')}">
   </div>`;
   html += `<div class="detail-card">
     <h4>Explorer Model</h4>
     ${buildModelSelect('sys-explorer-model', models, cfg.explorer_model)}
+    <input id="sys-explorer-variant" placeholder="optional variant" value="${esc((cfg.explorer && cfg.explorer.variant) || '')}">
   </div>`;
   html += `<div class="detail-card">
     <h4>Map Model</h4>
     ${buildModelSelect('sys-map-model', models, cfg.map_model)}
+    <input id="sys-map-variant" placeholder="optional variant" value="${esc((cfg.map && cfg.map.variant) || '')}">
   </div>`;
   html += `<div class="detail-card">
     <h4>Default Coder Model</h4>
     ${buildModelSelect('sys-coder-default', models, cfg.coder_model_default)}
+    <input id="sys-coder-default-variant" placeholder="optional variant" value="${esc((cfg.coder_default && cfg.coder_default.variant) || '')}">
   </div>`;
   html += `</div>`;
 
@@ -2667,11 +2716,12 @@ async function loadSysInfo() {
   html += `<table style="width:100%;border-collapse:collapse">`;
   for (const [level, model] of Object.entries(cfg.coder_model_by_complexity || {})) {
     const color = complexityColors[level] || 'var(--text)';
-    html += `<tr>
+      const variant = (((cfg.coder_by_complexity || {})[level] || {}).variant) || '';
+      html += `<tr>
       <td style="padding:5px 12px 5px 0;font-size:12px;white-space:nowrap;width:1%">
         <span style="color:${color};border:1px solid ${color};padding:1px 7px;border-radius:3px">${esc(level.replace('_',' '))}</span>
       </td>
-      <td style="padding:5px 0">${buildModelSelect('', models, model, `data-complexity="${esc(level)}"`)}</td>
+      <td style="padding:5px 0">${buildModelSelect('', models, model, `data-complexity="${esc(level)}"`)}<input id="sys-coder-variant-${esc(level)}" placeholder="optional variant" value="${esc(variant)}"></td>
     </tr>`;
   }
   html += `</table></div>`;
@@ -2679,13 +2729,15 @@ async function loadSysInfo() {
   html += `<div class="detail-section"><h3>Reviewer Models <span style="font-size:11px;color:var(--text-dim)">(all must approve)</span></h3>`;
   html += `<div id="sys-reviewer-list">`;
   if (cfg.reviewer_models && cfg.reviewer_models.length) {
-    for (const m of cfg.reviewer_models) {
+    for (const [idx, m] of (cfg.reviewer_models || []).entries()) {
       const all = models.includes(m) ? models : [m, ...models];
       const opts = all.map(x =>
         `<option value="${esc(x)}"${x === m ? ' selected' : ''}>${esc(x)}</option>`
       ).join('');
-      html += `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+      const variant = (((cfg.reviewers || [])[idx] || {}).variant) || '';
+      html += `<div class="sys-reviewer-row" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
         <select class="sys-select sys-reviewer-select" style="flex:1">${opts}</select>
+        <input class="sys-reviewer-variant" placeholder="variant" value="${esc(variant)}" style="width:180px;margin-bottom:0">
         <button class="btn btn-sm" style="color:var(--red);padding:2px 7px;flex-shrink:0" onclick="this.parentElement.remove()" title="Remove">&times;</button>
       </div>`;
     }

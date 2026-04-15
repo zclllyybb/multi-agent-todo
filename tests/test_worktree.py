@@ -615,15 +615,26 @@ class TestOpenCodeClientConstruction:
             "opencode": {
                 "timeout": 30,
                 "config_path": "configs/custom-opencode.json",
+                "planner": {"model": "planner", "variant": "planner-v"},
                 "planner_model": "planner",
+                "coder_default": {"model": "coder", "variant": "coder-v"},
                 "coder_model_default": "coder",
-                "coder_model_by_complexity": {},
-                "reviewer_models": [],
+                "coder_by_complexity": {
+                    "simple": {"model": "simple-coder", "variant": "simple-v"}
+                },
+                "coder_model_by_complexity": {"simple": "simple-coder"},
+                "reviewers": [{"model": "reviewer-a", "variant": "reviewer-v"}],
+                "reviewer_models": ["reviewer-a"],
             },
             "orchestrator": {"max_parallel_tasks": 1, "max_retries": 1},
             "database": {"path": ":memory:"},
             "publish": {"remote": "origin"},
-            "explore": {},
+            "explore": {
+                "explorer": {"model": "explorer-a", "variant": "explorer-v"},
+                "explorer_model": "explorer-a",
+                "map": {"model": "map-a", "variant": "map-v"},
+                "map_model": "map-a",
+            },
         }
 
         with (
@@ -633,8 +644,9 @@ class TestOpenCodeClientConstruction:
             patch("core.orchestrator.JiraService"),
             patch("core.orchestrator.TaskExecutionService"),
             patch("core.orchestrator.ExploreService"),
-            patch("core.orchestrator.PlannerAgent"),
-            patch("core.orchestrator.CoderAgent"),
+            patch("core.orchestrator.PlannerAgent") as planner_cls,
+            patch("core.orchestrator.CoderAgent") as coder_cls,
+            patch("core.orchestrator.ReviewerAgent") as reviewer_cls,
             patch("core.orchestrator.ThreadPoolExecutor"),
         ):
             Orchestrator(config)
@@ -642,6 +654,26 @@ class TestOpenCodeClientConstruction:
         client_cls.assert_called_once_with(
             timeout=30,
             config_path="configs/custom-opencode.json",
+        )
+        planner_cls.assert_called_once_with(
+            model="planner",
+            variant="planner-v",
+            client=client_cls.return_value,
+        )
+        coder_cls.assert_any_call(
+            model="simple-coder",
+            variant="simple-v",
+            client=client_cls.return_value,
+        )
+        coder_cls.assert_any_call(
+            model="coder",
+            variant="coder-v",
+            client=client_cls.return_value,
+        )
+        reviewer_cls.assert_called_once_with(
+            model="reviewer-a",
+            variant="reviewer-v",
+            client=client_cls.return_value,
         )
 
 

@@ -19,8 +19,8 @@ _MAX_REVIEWER_RETRIES = 1
 class ReviewerAgent(BaseAgent):
     agent_type = "reviewer"
 
-    def __init__(self, model: str, client: OpenCodeClient):
-        super().__init__(model, client)
+    def __init__(self, model: str, client: OpenCodeClient, variant: str = ""):
+        super().__init__(model, client, variant=variant)
 
     def review_changes(
         self,
