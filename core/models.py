@@ -204,6 +204,8 @@ class Task:
 
     # Task mode: 'develop' (plan→code→review), 'review' (reviewer-only), or 'jira'
     task_mode: str = "develop"
+    # When true, planner must keep this as a single task.
+    force_no_split: bool = False
     # For review-only tasks: the patch content / URL / description to review
     review_input: str = ""
     # For jira tasks: created issue metadata / draft summary
@@ -238,6 +240,7 @@ class Task:
         d.setdefault("published_at", 0.0)
         d.setdefault("copy_files", [])
         d.setdefault("task_mode", "develop")
+        d.setdefault("force_no_split", False)
         d.setdefault("review_input", "")
         d.setdefault("user_feedback", "")
         d.setdefault("depends_on", [])

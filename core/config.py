@@ -5,6 +5,20 @@ import os
 from typing import Optional
 import yaml
 
+from core.model_config import (
+    model_spec_list_to_dict,
+    model_spec_list_to_config_value,
+    model_spec_list_to_model_list,
+    model_spec_map_to_dict,
+    model_spec_map_to_config_value,
+    model_spec_map_to_model_map,
+    model_spec_to_dict,
+    model_spec_to_config_value,
+    parse_model_spec,
+    parse_model_spec_list,
+    parse_model_spec_map,
+)
+
 
 DEFAULT_CONFIG = {
     "repo": {
@@ -14,9 +28,9 @@ DEFAULT_CONFIG = {
     },
     "opencode": {
         "config_path": "opencode.json",
-        "planner": {"model": "opencode/gpt-5-nano", "variant": ""},
+        "planner": {"model": "opencode/gpt-5-nano", "variant": "", "agent": ""},
         "planner_model": "opencode/gpt-5-nano",
-        "coder_default": {"model": "opencode/gpt-5-nano", "variant": ""},
+        "coder_default": {"model": "opencode/gpt-5-nano", "variant": "", "agent": ""},
         "coder_model": "opencode/gpt-5-nano",
         "coder_by_complexity": {},
         "reviewer_model": "opencode/gpt-5-nano",
@@ -44,8 +58,8 @@ DEFAULT_CONFIG = {
         "path": "/mnt/disk3/zhaochangle/multi-agent-todo/data/tasks.db",
     },
     "explore": {
-        "explorer": {"model": "", "variant": ""},
-        "map": {"model": "", "variant": ""},
+        "explorer": {"model": "", "variant": "", "agent": ""},
+        "map": {"model": "", "variant": "", "agent": ""},
     },
     "jira": {
         "url": "",
@@ -64,32 +78,32 @@ DEFAULT_CONFIG = {
         "dry_run_jira": False,
         "model_profiles": {
             "stable": {
-                "planner": {"model": "github-copilot/gpt-5.4", "variant": ""},
+                "planner": {"model": "github-copilot/gpt-5.4", "variant": "", "agent": ""},
                 "planner_model": "github-copilot/gpt-5.4",
-                "coder_default": {"model": "github-copilot/gpt-5.4", "variant": ""},
+                "coder_default": {"model": "github-copilot/gpt-5.4", "variant": "", "agent": ""},
                 "coder_model_default": "github-copilot/gpt-5.4",
                 "coder_by_complexity": {},
                 "coder_model_by_complexity": {},
-                "reviewers": [{"model": "github-copilot/gpt-5.4", "variant": ""}],
+                "reviewers": [{"model": "github-copilot/gpt-5.4", "variant": "", "agent": ""}],
                 "reviewer_models": ["github-copilot/gpt-5.4"],
-                "explorer": {"model": "github-copilot/gpt-5.4", "variant": ""},
+                "explorer": {"model": "github-copilot/gpt-5.4", "variant": "", "agent": ""},
                 "explorer_model": "github-copilot/gpt-5.4",
-                "map": {"model": "github-copilot/gpt-5.4", "variant": ""},
+                "map": {"model": "github-copilot/gpt-5.4", "variant": "", "agent": ""},
                 "map_model": "github-copilot/gpt-5.4",
                 "timeout": 1800,
             },
             "free": {
-                "planner": {"model": "opencode/qwen3.6-plus-free", "variant": ""},
+                "planner": {"model": "opencode/qwen3.6-plus-free", "variant": "", "agent": ""},
                 "planner_model": "opencode/qwen3.6-plus-free",
-                "coder_default": {"model": "opencode/qwen3.6-plus-free", "variant": ""},
+                "coder_default": {"model": "opencode/qwen3.6-plus-free", "variant": "", "agent": ""},
                 "coder_model_default": "opencode/qwen3.6-plus-free",
                 "coder_by_complexity": {},
                 "coder_model_by_complexity": {},
-                "reviewers": [{"model": "opencode/qwen3.6-plus-free", "variant": ""}],
+                "reviewers": [{"model": "opencode/qwen3.6-plus-free", "variant": "", "agent": ""}],
                 "reviewer_models": ["opencode/qwen3.6-plus-free"],
-                "explorer": {"model": "opencode/qwen3.6-plus-free", "variant": ""},
+                "explorer": {"model": "opencode/qwen3.6-plus-free", "variant": "", "agent": ""},
                 "explorer_model": "opencode/qwen3.6-plus-free",
-                "map": {"model": "opencode/qwen3.6-plus-free", "variant": ""},
+                "map": {"model": "opencode/qwen3.6-plus-free", "variant": "", "agent": ""},
                 "map_model": "opencode/qwen3.6-plus-free",
                 "timeout": 1800,
             },
@@ -128,63 +142,49 @@ def _normalize_model_config(config: dict):
     opencode = config.setdefault("opencode", {})
     explore = config.setdefault("explore", {})
 
-    planner = opencode.get("planner")
-    if not isinstance(planner, dict):
-        opencode["planner"] = {
-            "model": str(opencode.get("planner_model", "")).strip(),
-            "variant": "",
-        }
+    planner_spec = parse_model_spec(opencode.get("planner", opencode.get("planner_model", "")))
+    opencode["planner"] = model_spec_to_dict(planner_spec)
+    opencode["planner_model"] = planner_spec.model
 
-    coder_default = opencode.get("coder_default")
-    if not isinstance(coder_default, dict):
-        opencode["coder_default"] = {
-            "model": str(
-                opencode.get("coder_model_default", opencode.get("coder_model", ""))
-            ).strip(),
-            "variant": "",
-        }
+    default_coder_spec = parse_model_spec(
+        opencode.get(
+            "coder_default",
+            opencode.get("coder_model_default", opencode.get("coder_model", "")),
+        )
+    )
+    opencode["coder_default"] = model_spec_to_dict(default_coder_spec)
+    opencode["coder_model_default"] = default_coder_spec.model
 
-    coder_by_complexity = opencode.get("coder_by_complexity")
-    if not isinstance(coder_by_complexity, dict):
-        coder_by_complexity = {}
-    if not coder_by_complexity and isinstance(
-        opencode.get("coder_model_by_complexity"), dict
-    ):
-        coder_by_complexity = {
-            level: {"model": str(model).strip(), "variant": ""}
-            for level, model in opencode.get("coder_model_by_complexity", {}).items()
-            if str(model).strip()
-        }
-    opencode["coder_by_complexity"] = coder_by_complexity
+    coder_specs = parse_model_spec_map(opencode.get("coder_by_complexity"))
+    if not coder_specs:
+        coder_specs = parse_model_spec_map(opencode.get("coder_model_by_complexity"))
+    opencode["coder_by_complexity"] = model_spec_map_to_dict(coder_specs)
+    opencode["coder_model_by_complexity"] = model_spec_map_to_model_map(coder_specs)
 
-    reviewers = opencode.get("reviewers")
-    if not isinstance(reviewers, list) or not reviewers:
-        reviewers = []
-        for model in opencode.get(
-            "reviewer_models", [opencode.get("reviewer_model", "")]
-        ):
-            model = str(model).strip()
-            if model:
-                reviewers.append({"model": model, "variant": ""})
-    opencode["reviewers"] = reviewers
+    reviewer_specs = parse_model_spec_list(opencode.get("reviewers"))
+    if not reviewer_specs:
+        reviewer_specs = parse_model_spec_list(
+            opencode.get("reviewer_models", [opencode.get("reviewer_model", "")])
+        )
+    opencode["reviewers"] = model_spec_list_to_dict(reviewer_specs)
+    opencode["reviewer_models"] = model_spec_list_to_model_list(reviewer_specs)
 
     legacy_explore_variant = str(explore.get("variant", "")).strip()
-    explorer_spec = explore.get("explorer")
-    if not isinstance(explorer_spec, dict):
-        explore["explorer"] = {
-            "model": str(explore.get("explorer_model", "")).strip(),
-            "variant": legacy_explore_variant,
-        }
-    elif legacy_explore_variant and not str(explorer_spec.get("variant", "")).strip():
-        explorer_spec["variant"] = legacy_explore_variant
+    explorer_spec = parse_model_spec(
+        explore.get("explorer", explore.get("explorer_model", ""))
+    )
+    if legacy_explore_variant and not explorer_spec.variant:
+        explorer_spec = explorer_spec.__class__(
+            model=explorer_spec.model,
+            variant=legacy_explore_variant,
+        )
+    explore["explorer"] = model_spec_to_dict(explorer_spec)
+    explore["explorer_model"] = explorer_spec.model
 
-    map_spec = explore.get("map")
-    if not isinstance(map_spec, dict):
-        explore["map"] = {
-            "model": str(
-                explore.get("map_model", explore.get("explorer_model", ""))
-            ).strip(),
-            "variant": legacy_explore_variant,
-        }
-    elif legacy_explore_variant and not str(map_spec.get("variant", "")).strip():
-        map_spec["variant"] = legacy_explore_variant
+    map_spec = parse_model_spec(explore.get("map", explore.get("map_model", "")))
+    if not map_spec.is_set:
+        map_spec = parse_model_spec(explore.get("explorer_model", ""))
+    if legacy_explore_variant and not map_spec.variant:
+        map_spec = map_spec.__class__(model=map_spec.model, variant=legacy_explore_variant)
+    explore["map"] = model_spec_to_dict(map_spec)
+    explore["map_model"] = map_spec.model

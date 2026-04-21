@@ -158,6 +158,7 @@ class JiraService:
             work_dir=repo_path,
             model=simple_agent.model,
             variant=simple_agent.variant,
+            agent=simple_agent.agent,
             agent_type="jira_assign",
             task_id=task.id,
             max_continues=8,

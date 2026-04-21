@@ -251,6 +251,19 @@ class TestVariantCli:
         cmd = exec_mock.call_args.args[0]
         assert "--variant" not in cmd
 
+    def test_run_omits_variant_flag_when_variant_whitespace(self, client):
+        with patch.object(client, "_exec", return_value=("", 0, 0.1)) as exec_mock:
+            client.run(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                variant="   ",
+            )
+
+        cmd = exec_mock.call_args.args[0]
+        assert "--variant" not in cmd
+
     def test_run_streaming_passes_variant_flag(self, client):
         with patch.object(
             client,
@@ -282,6 +295,119 @@ class TestVariantCli:
                 model="test-model",
                 agent_type="explorer",
                 variant="",
+            )
+
+        cmd = exec_mock.call_args.kwargs["cmd"]
+        assert "--variant" not in cmd
+
+
+class TestAgentCli:
+    def test_run_passes_agent_flag(self, client):
+        with patch.object(client, "_exec", return_value=("", 0, 0.1)) as exec_mock:
+            client.run(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent="deep-explorer",
+            )
+
+        cmd = exec_mock.call_args.args[0]
+        assert "--agent" in cmd
+        idx = cmd.index("--agent")
+        assert cmd[idx + 1] == "deep-explorer"
+
+    def test_run_omits_agent_flag_when_agent_empty(self, client):
+        with patch.object(client, "_exec", return_value=("", 0, 0.1)) as exec_mock:
+            client.run(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent="",
+            )
+
+        cmd = exec_mock.call_args.args[0]
+        assert "--agent" not in cmd
+
+    def test_run_omits_agent_flag_when_agent_whitespace(self, client):
+        with patch.object(client, "_exec", return_value=("", 0, 0.1)) as exec_mock:
+            client.run(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent="   ",
+            )
+
+        cmd = exec_mock.call_args.args[0]
+        assert "--agent" not in cmd
+
+    def test_run_streaming_passes_agent_flag(self, client):
+        with patch.object(
+            client,
+            "_exec_streaming",
+            return_value=("", 0, 0.1, "", False),
+        ) as exec_mock:
+            client.run_streaming(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent="deep-explorer",
+            )
+
+        cmd = exec_mock.call_args.kwargs["cmd"]
+        assert "--agent" in cmd
+        idx = cmd.index("--agent")
+        assert cmd[idx + 1] == "deep-explorer"
+
+    def test_run_streaming_omits_agent_flag_when_agent_empty(self, client):
+        with patch.object(
+            client,
+            "_exec_streaming",
+            return_value=("", 0, 0.1, "", False),
+        ) as exec_mock:
+            client.run_streaming(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent="",
+            )
+
+        cmd = exec_mock.call_args.kwargs["cmd"]
+        assert "--agent" not in cmd
+
+    def test_run_streaming_omits_agent_flag_when_agent_whitespace(self, client):
+        with patch.object(
+            client,
+            "_exec_streaming",
+            return_value=("", 0, 0.1, "", False),
+        ) as exec_mock:
+            client.run_streaming(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                agent="  ",
+            )
+
+        cmd = exec_mock.call_args.kwargs["cmd"]
+        assert "--agent" not in cmd
+
+    def test_run_streaming_omits_variant_flag_when_variant_whitespace(self, client):
+        with patch.object(
+            client,
+            "_exec_streaming",
+            return_value=("", 0, 0.1, "", False),
+        ) as exec_mock:
+            client.run_streaming(
+                message="explore",
+                work_dir="/repo",
+                model="test-model",
+                agent_type="explorer",
+                variant="  ",
             )
 
         cmd = exec_mock.call_args.kwargs["cmd"]

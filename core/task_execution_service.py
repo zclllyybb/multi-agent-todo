@@ -186,6 +186,7 @@ class TaskExecutionService:
                 description=task.description,
                 repo_path=repo_path,
                 task_id=task.id,
+                force_no_split=task.force_no_split,
             )
         except ModelOutputError as first_err:
             log.warning(
@@ -199,6 +200,7 @@ class TaskExecutionService:
                     description=task.description,
                     repo_path=repo_path,
                     task_id=task.id,
+                    force_no_split=task.force_no_split,
                 )
             except ModelOutputError as second_err:
                 raise ModelOutputError(
@@ -698,6 +700,18 @@ class TaskExecutionService:
                 log.info(
                     "Task [%s] is a planner sub-task; ignoring split=true from planner "
                     "(would create recursive split). Treating as single task.",
+                    task.id,
+                )
+                is_split = False
+                plan_text = (
+                    sub_tasks[0].get("description", plan_text)
+                    if sub_tasks
+                    else plan_text
+                )
+
+            if is_split and task.force_no_split:
+                log.info(
+                    "Task [%s] has force_no_split=true; ignoring split=true from planner. Treating as single task.",
                     task.id,
                 )
                 is_split = False

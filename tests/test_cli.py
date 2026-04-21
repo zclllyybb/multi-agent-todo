@@ -25,6 +25,7 @@ def test_cmd_add_uses_daemon_api(capsys):
         title="Fix bug",
         description="Do the thing",
         priority="high",
+        force_no_split=False,
     )
     config = {"web": {"host": "0.0.0.0", "port": 8778}}
 
@@ -36,7 +37,33 @@ def test_cmd_add_uses_daemon_api(capsys):
             "title": "Fix bug",
             "description": "Do the thing",
             "priority": "high",
+            "force_no_split": False,
         }
+        return _FakeResponse({"id": "task123", "title": "Fix bug"})
+
+    with (
+        patch("cli.load_config", return_value=config),
+        patch("cli.request.urlopen", side_effect=_urlopen),
+    ):
+        cli.cmd_add(args)
+
+    out = capsys.readouterr().out
+    assert "Submitted task: [task123] Fix bug" in out
+
+
+def test_cmd_add_can_force_no_split(capsys):
+    args = SimpleNamespace(
+        config=None,
+        title="Fix bug",
+        description="Do the thing",
+        priority="high",
+        force_no_split=True,
+    )
+    config = {"web": {"host": "0.0.0.0", "port": 8778}}
+
+    def _urlopen(req, timeout):
+        payload = json.loads(req.data.decode("utf-8"))
+        assert payload["force_no_split"] is True
         return _FakeResponse({"id": "task123", "title": "Fix bug"})
 
     with (

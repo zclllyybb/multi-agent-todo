@@ -31,8 +31,14 @@ log = logging.getLogger(__name__)
 class PlannerAgent(BaseAgent):
     agent_type = "planner"
 
-    def __init__(self, model: str, client: OpenCodeClient, variant: str = ""):
-        super().__init__(model, client, variant=variant)
+    def __init__(
+        self,
+        model: str,
+        client: OpenCodeClient,
+        variant: str = "",
+        agent: str = "",
+    ):
+        super().__init__(model, client, variant=variant, agent=agent)
 
     def scan_todos(
         self,
@@ -202,6 +208,7 @@ class PlannerAgent(BaseAgent):
         description: str,
         repo_path: str,
         task_id: str = "",
+        force_no_split: bool = False,
     ) -> Tuple[AgentRun, bool, str, List[dict], str]:
         """Unified entry-point: assess complexity, decide atomicity, produce plan or sub-tasks.
         Returns (agent_run, is_split, plan_text, sub_tasks_list, complexity).
@@ -213,6 +220,7 @@ class PlannerAgent(BaseAgent):
             title=title,
             description=description,
             repo_path=repo_path,
+            force_no_split=force_no_split,
         )
         run = self.run(
             prompt,
@@ -238,6 +246,12 @@ class PlannerAgent(BaseAgent):
 
         complexity = str(data.get("complexity", ""))
         is_split = bool(data.get("split", False))
+        if force_no_split and is_split:
+            fallback_sub_tasks = data.get("sub_tasks", [])
+            fallback_plan = str(data.get("plan", ""))
+            if isinstance(fallback_sub_tasks, list) and fallback_sub_tasks:
+                fallback_plan = fallback_sub_tasks[0].get("description", fallback_plan)
+            return run, False, fallback_plan, [], complexity
         if is_split:
             sub_tasks = data.get("sub_tasks", [])
             if not sub_tasks:

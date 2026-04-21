@@ -15,8 +15,14 @@ log = logging.getLogger(__name__)
 class CoderAgent(BaseAgent):
     agent_type = "coder"
 
-    def __init__(self, model: str, client: OpenCodeClient, variant: str = ""):
-        super().__init__(model, client, variant=variant)
+    def __init__(
+        self,
+        model: str,
+        client: OpenCodeClient,
+        variant: str = "",
+        agent: str = "",
+    ):
+        super().__init__(model, client, variant=variant, agent=agent)
 
     @staticmethod
     def _resolve_file_path(file_path: str, worktree_path: str) -> Optional[str]:

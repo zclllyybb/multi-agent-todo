@@ -10,6 +10,7 @@ from typing import Any
 class ModelSpec:
     model: str = ""
     variant: str = ""
+    agent: str = ""
 
     @property
     def is_set(self) -> bool:
@@ -22,18 +23,32 @@ def parse_model_spec(value: Any) -> ModelSpec:
     if isinstance(value, dict):
         model = str(value.get("model", "")).strip()
         variant = str(value.get("variant", "")).strip()
-        return ModelSpec(model=model, variant=variant)
+        agent = str(value.get("agent", "")).strip()
+        return ModelSpec(model=model, variant=variant, agent=agent)
     return ModelSpec()
 
 
 def model_spec_to_config_value(spec: ModelSpec) -> Any:
     model = str(spec.model or "").strip()
     variant = str(spec.variant or "").strip()
-    if not variant:
+    agent = str(spec.agent or "").strip()
+    if not variant and not agent:
         return model
-    return {
+    value = {
         "model": model,
-        "variant": variant,
+    }
+    if variant:
+        value["variant"] = variant
+    if agent:
+        value["agent"] = agent
+    return value
+
+
+def model_spec_to_dict(spec: ModelSpec) -> dict[str, str]:
+    return {
+        "model": str(spec.model or "").strip(),
+        "variant": str(spec.variant or "").strip(),
+        "agent": str(spec.agent or "").strip(),
     }
 
 
@@ -56,6 +71,22 @@ def model_spec_map_to_config_value(spec_map: dict[str, ModelSpec]) -> dict[str, 
     return out
 
 
+def model_spec_map_to_dict(spec_map: dict[str, ModelSpec]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for key, spec in spec_map.items():
+        if spec.is_set:
+            out[str(key)] = model_spec_to_dict(spec)
+    return out
+
+
+def model_spec_map_to_model_map(spec_map: dict[str, ModelSpec]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, spec in spec_map.items():
+        if spec.is_set:
+            out[str(key)] = spec.model
+    return out
+
+
 def parse_model_spec_list(value: Any) -> list[ModelSpec]:
     if not isinstance(value, list):
         return []
@@ -74,3 +105,11 @@ def model_spec_list_to_config_value(specs: list[ModelSpec]) -> list[Any]:
             continue
         out.append(model_spec_to_config_value(spec))
     return out
+
+
+def model_spec_list_to_dict(specs: list[ModelSpec]) -> list[dict[str, str]]:
+    return [model_spec_to_dict(spec) for spec in specs if spec.is_set]
+
+
+def model_spec_list_to_model_list(specs: list[ModelSpec]) -> list[str]:
+    return [spec.model for spec in specs if spec.is_set]

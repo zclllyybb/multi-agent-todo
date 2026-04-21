@@ -81,7 +81,12 @@ Requirements:
 Directly output your plan, including a clear and explicit statement of the overall objectives and implementation strategies. The specific implementation plan must be listed clearly item by item."""
 
 
-def planner_analyze_and_split(title: str, description: str, repo_path: str) -> str:
+def planner_analyze_and_split(
+    title: str,
+    description: str,
+    repo_path: str,
+    force_no_split: bool = False,
+) -> str:
     """Unified prompt: assess complexity, decide whether to split, produce plan or sub-tasks.
 
     Output JSON keys:
@@ -91,45 +96,65 @@ def planner_analyze_and_split(title: str, description: str, repo_path: str) -> s
       plan         str   (only when split=false) numbered implementation steps
       sub_tasks    list  (only when split=true) [{title, description, priority, depends_on}, ...]
     """
-    return f"""You are a planning agent. Analyze the following task and produce a structured plan.
-
-Task title: {title}
-Task description: {description}
-Repository: {repo_path}
-
-Step 1 — Assess complexity. Choose ONE label:
+    complexity_section = """Step 1 — Assess complexity. Choose ONE label:
   very_complex : Requires deep understanding of multiple subsystems, likely touches >10 files,
                  high risk of breaking existing behaviour, needs the most capable model.
   complex      : Touches several modules or requires careful design, moderate risk.
   medium       : Clear scope, a few files, straightforward logic.
-  simple       : Trivial fix or one-liner, low risk, small model is sufficient.
+  simple       : Trivial fix or one-liner, low risk, small model is sufficient."""
 
-Step 2 — Decide splitting. Split into sub-tasks ONLY if:
+    split_allowed_section = """Step 2 — Decide whether to split.
+  Split into sub-tasks ONLY if:
   - The task clearly contains multiple separable concerns in different modules/files AND
-  - Parallelising (where possible) would save meaningful time.
-  Prefer NOT splitting. The tasks of making minor modifications to several files should not be split up; what should be split are large tasks, with each subtask being sufficiently complete and substantial.
+  - Parallelising those concerns would save meaningful time.
+  Prefer NOT splitting. Minor edits across several files should usually remain one task. Only split when each sub-task is substantial and meaningfully self-contained.
 
-Step 3 — For each sub-task, determine ordering dependencies:
-  - Sub-tasks that can run in parallel have an empty depends_on list.
-  - If sub-task B must wait for sub-task A to complete first, add A's 0-based index to B's depends_on.
-  - Only add a dependency when there is a real reason (e.g. B modifies an interface that A defines).
-  - Prefer parallelism: only add dependencies that are strictly required.
+Step 3 — If you split, define dependency ordering precisely.
+  - Sub-tasks that can run in parallel must use an empty depends_on list.
+  - If sub-task B must wait for sub-task A, add A's 0-based index to B's depends_on.
+  - Only add dependencies when strictly required.
+  - Prefer maximum safe parallelism.
 
-Step 4 - Clarify the complete purpose and description of each subtask.
-  - The description of each subtask must fully and measurably specify the output it needs to present.
-  - Sub-tasks are not isolated; it is necessary to explain their role in the entire task.
-  - The description should be suitable for an agent to understand what needs to be done and why.
+Step 4 — If you split, write strong sub-task descriptions.
+  - Each sub-task description must fully and measurably describe the expected outcome.
+  - Each description must explain the sub-task's role in the overall task.
+  - Each description must be clear enough for an implementation agent to act without guessing."""
 
-Step 5 — Produce the output. Output ONLY valid JSON (no markdown fences).
+    split_forbidden_section = """Step 2 — Splitting is forbidden for this task.
+  - You MUST keep this as a single task.
+  - You MUST output "split": false.
+  - You MUST NOT output sub_tasks."""
 
-If single task:
-{{"complexity": "medium", "split": false, "reason": "...", "plan": "Overall objective: ...\\n1. ...\\n2. ..."}}
+    forced_output_section = """Step 3 — Produce the output.
+  Output ONLY valid JSON with this exact shape:
+  {"complexity": "medium", "split": false, "reason": "Splitting was explicitly disabled for this task.", "plan": "Overall objective: ...\\n1. ...\\n2. ..."}"""
 
-If split:
-{{"complexity": "complex", "split": true, "reason": "...", "sub_tasks": [
-  {{"title": "Define new interface in module A", "description": "...", "priority": "high", "depends_on": []}},
-  {{"title": "Migrate callers to new interface", "description": "...", "priority": "medium", "depends_on": [0, 2, 3]}}
-]}}"""
+    flexible_output_section = """Step 5 — Produce the output.
+  Output ONLY valid JSON (no markdown fences).
+
+If you keep it as a single task:
+{"complexity": "medium", "split": false, "reason": "...", "plan": "Overall objective: ...\\n1. ...\\n2. ..."}
+
+If you split it:
+{"complexity": "complex", "split": true, "reason": "...", "sub_tasks": [
+  {"title": "Define new interface in module A", "description": "...", "priority": "high", "depends_on": []},
+  {"title": "Migrate callers to new interface", "description": "...", "priority": "medium", "depends_on": [0]}
+]}"""
+
+    body_sections = [complexity_section]
+    if force_no_split:
+        body_sections.extend([split_forbidden_section, forced_output_section])
+    else:
+        body_sections.extend([split_allowed_section, flexible_output_section])
+
+    sections = [
+        "You are a planning agent. Analyze the following task and produce a structured plan.",
+        f"Task title: {title}",
+        f"Task description: {description}",
+        f"Repository: {repo_path}",
+        *body_sections,
+    ]
+    return "\n\n".join(sections)
 
 
 def planner_decompose_task(description: str, repo_path: str) -> str:

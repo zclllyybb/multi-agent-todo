@@ -53,6 +53,7 @@ def cmd_add(args):
             "title": args.title,
             "description": args.description or "",
             "priority": args.priority,
+            "force_no_split": bool(args.force_no_split),
         }
     ).encode("utf-8")
     req = request.Request(
@@ -336,6 +337,11 @@ Examples:
     p.add_argument("-d", "--description", default="")
     p.add_argument(
         "-p", "--priority", default="medium", choices=["high", "medium", "low"]
+    )
+    p.add_argument(
+        "--force-no-split",
+        action="store_true",
+        help="Require the planner to keep the task as a single task",
     )
     p.set_defaults(func=cmd_add)
 

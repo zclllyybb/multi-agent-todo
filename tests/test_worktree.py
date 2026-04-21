@@ -1330,6 +1330,33 @@ class TestNoRecursiveSplit:
         # Coder should NOT have been called on the parent
         orch._default_coder.implement_task.assert_not_called()
 
+    def test_manual_task_force_no_split_ignores_split_true(self, tmp_db, make_task):
+        task = make_task(status=TaskStatus.PENDING, source=TaskSource.MANUAL)
+        task.force_no_split = True
+        tmp_db.save_task(task)
+        orch = self._make_full_orchestrator(tmp_db)
+
+        orch.planner.analyze_and_split.return_value = (
+            self._make_plan_run(),
+            True,
+            "",
+            [
+                {
+                    "title": "A",
+                    "description": "a",
+                    "priority": "medium",
+                    "depends_on": [],
+                }
+            ],
+            "complex",
+        )
+
+        orch._execute_task(task.id)
+
+        children = [t for t in tmp_db.get_all_tasks() if t.parent_id == task.id]
+        assert children == []
+        orch._default_coder.implement_task.assert_called_once()
+
     def test_split_queues_ready_child_when_parent_occupies_only_slot(
         self, tmp_db, make_task
     ):

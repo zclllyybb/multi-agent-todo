@@ -325,7 +325,7 @@ class ConfigPersistenceService:
         prefix = " " * indent
         child_prefix = " " * (indent + 2)
         if isinstance(value, dict):
-            if set(value.keys()) <= {"model", "variant"}:
+            if set(value.keys()) <= {"model", "variant", "agent"}:
                 return [
                     f"{prefix}{key}: {ConfigPersistenceService._yaml_inline_value(value)}\n"
                 ]

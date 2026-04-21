@@ -10,9 +10,16 @@ log = logging.getLogger(__name__)
 class BaseAgent:
     agent_type: str = "base"
 
-    def __init__(self, model: str, client: OpenCodeClient, variant: str = ""):
+    def __init__(
+        self,
+        model: str,
+        client: OpenCodeClient,
+        variant: str = "",
+        agent: str = "",
+    ):
         self.model = model
         self.variant = variant
+        self.agent = agent
         self.client = client
 
     def run(
@@ -33,6 +40,7 @@ class BaseAgent:
             task_id=task_id,
             session_id=session_id,
             variant=variant or self.variant,
+            agent=self.agent,
             max_continues=max_continues,
             require_stop=require_stop,
         )

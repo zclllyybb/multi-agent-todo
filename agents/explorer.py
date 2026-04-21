@@ -154,6 +154,7 @@ class ExplorerAgent(BaseAgent):
             on_output=on_output,
             should_cancel=should_cancel,
             variant=self.variant,
+            agent=self.agent,
         )
         if run.exit_code == -2:
             return run, [], ""
@@ -236,6 +237,7 @@ class ExplorerAgent(BaseAgent):
             on_output=on_output,
             should_cancel=should_cancel,
             variant=self.variant,
+            agent=self.agent,
         )
         if run.exit_code == -2:
             raise RuntimeError("map init cancelled")

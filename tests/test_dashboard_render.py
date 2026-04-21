@@ -973,25 +973,25 @@ def test_load_sys_info_renders_explorer_and_map_model_selects_successfully():
         "worktree_dir": "/wt",
         "worktree_hooks": ["hooks/setup.sh"],
         "opencode_config_path": "/workspace/opencode.json",
-        "planner": {"model": "planner-x", "variant": "planner-v"},
+        "planner": {"model": "planner-x", "variant": "planner-v", "agent": "planner-agent"},
         "planner_model": "planner-x",
-        "explorer": {"model": "explorer-x", "variant": "explorer-v"},
+        "explorer": {"model": "explorer-x", "variant": "explorer-v", "agent": "explorer-agent"},
         "explorer_model": "explorer-x",
-        "map": {"model": "map-x", "variant": "map-v"},
+        "map": {"model": "map-x", "variant": "map-v", "agent": "map-agent"},
         "map_model": "map-x",
         "coder_by_complexity": {
-            "simple": {"model": "coder-s", "variant": "simple-v"},
-            "complex": {"model": "coder-c", "variant": "complex-v"},
+            "simple": {"model": "coder-s", "variant": "simple-v", "agent": "simple-agent"},
+            "complex": {"model": "coder-c", "variant": "complex-v", "agent": "complex-agent"},
         },
         "coder_model_by_complexity": {
             "simple": "coder-s",
             "complex": "coder-c",
         },
-        "coder_default": {"model": "coder-default", "variant": "coder-default-v"},
+        "coder_default": {"model": "coder-default", "variant": "coder-default-v", "agent": "coder-default-agent"},
         "coder_model_default": "coder-default",
         "reviewers": [
-            {"model": "reviewer-a", "variant": "reviewer-a-v"},
-            {"model": "reviewer-b", "variant": ""},
+            {"model": "reviewer-a", "variant": "reviewer-a-v", "agent": "reviewer-a-agent"},
+            {"model": "reviewer-b", "variant": "", "agent": ""},
         ],
         "reviewer_models": ["reviewer-a", "reviewer-b"],
         "max_retries": 4,
@@ -1028,11 +1028,17 @@ const html = document.getElementById('sysinfo-content').innerHTML;
         assert.match(html, /sys-explorer-model/);
         assert.match(html, /sys-map-model/);
         assert.match(html, /planner-v/);
+        assert.match(html, /planner-agent/);
         assert.match(html, /explorer-v/);
+        assert.match(html, /explorer-agent/);
         assert.match(html, /map-v/);
+        assert.match(html, /map-agent/);
         assert.match(html, /coder-default-v/);
+        assert.match(html, /coder-default-agent/);
         assert.match(html, /simple-v/);
+        assert.match(html, /simple-agent/);
         assert.match(html, /reviewer-a-v/);
+        assert.match(html, /reviewer-a-agent/);
         assert.match(html, /reviewer-a/);
         assert.match(html, /coder-default/);
         """
@@ -1048,14 +1054,20 @@ globalThis.loadSysInfo = () => {};
 document.getElementById('sys-save-btn').textContent = 'Save';
 document.getElementById('sys-planner-model').value = 'planner-save';
 document.getElementById('sys-planner-variant').value = 'planner-variant';
+document.getElementById('sys-planner-agent').value = 'planner-agent';
 document.getElementById('sys-explorer-model').value = 'explorer-save';
 document.getElementById('sys-explorer-variant').value = 'explorer-variant';
+document.getElementById('sys-explorer-agent').value = 'explorer-agent';
 document.getElementById('sys-map-model').value = 'map-save';
 document.getElementById('sys-map-variant').value = 'map-variant';
+document.getElementById('sys-map-agent').value = 'map-agent';
 document.getElementById('sys-coder-default').value = 'coder-save';
 document.getElementById('sys-coder-default-variant').value = 'coder-variant';
+document.getElementById('sys-coder-default-agent').value = 'coder-agent';
 document.getElementById('sys-coder-variant-simple').value = 'simple-variant';
+document.getElementById('sys-coder-agent-simple').value = 'simple-agent';
 document.getElementById('sys-coder-variant-complex').value = 'complex-variant';
+document.getElementById('sys-coder-agent-complex').value = 'complex-agent';
 document.querySelectorAll = (selector) => {
   if (selector === '[data-complexity]') {
     return [
@@ -1069,6 +1081,7 @@ document.querySelectorAll = (selector) => {
         querySelector(sel) {
           if (sel === '.sys-reviewer-select') return { value: 'reviewer-a' };
           if (sel === '.sys-reviewer-variant') return { value: 'reviewer-a-variant' };
+          if (sel === '.sys-reviewer-agent') return { value: 'reviewer-a-agent' };
           return null;
         },
       },
@@ -1076,6 +1089,7 @@ document.querySelectorAll = (selector) => {
         querySelector(sel) {
           if (sel === '.sys-reviewer-select') return { value: 'reviewer-b' };
           if (sel === '.sys-reviewer-variant') return { value: '' };
+          if (sel === '.sys-reviewer-agent') return { value: '' };
           return null;
         },
       },
@@ -1096,22 +1110,22 @@ globalThis.fetch = async (url, opts) => {
 await saveSysModels();
 assert.equal(captured.url, '/api/config');
 const body = JSON.parse(captured.opts.body);
-assert.deepEqual(body.planner, { model: 'planner-save', variant: 'planner-variant' });
+assert.deepEqual(body.planner, { model: 'planner-save', variant: 'planner-variant', agent: 'planner-agent' });
 assert.equal(body.planner_model, 'planner-save');
-assert.deepEqual(body.explorer, { model: 'explorer-save', variant: 'explorer-variant' });
+assert.deepEqual(body.explorer, { model: 'explorer-save', variant: 'explorer-variant', agent: 'explorer-agent' });
 assert.equal(body.explorer_model, 'explorer-save');
-assert.deepEqual(body.map, { model: 'map-save', variant: 'map-variant' });
+assert.deepEqual(body.map, { model: 'map-save', variant: 'map-variant', agent: 'map-agent' });
 assert.equal(body.map_model, 'map-save');
-assert.deepEqual(body.coder_default, { model: 'coder-save', variant: 'coder-variant' });
+assert.deepEqual(body.coder_default, { model: 'coder-save', variant: 'coder-variant', agent: 'coder-agent' });
 assert.equal(body.coder_model_default, 'coder-save');
 assert.deepEqual(body.coder_by_complexity, {
-  simple: { model: 'coder-simple', variant: 'simple-variant' },
-  complex: { model: 'coder-complex', variant: 'complex-variant' },
+  simple: { model: 'coder-simple', variant: 'simple-variant', agent: 'simple-agent' },
+  complex: { model: 'coder-complex', variant: 'complex-variant', agent: 'complex-agent' },
 });
 assert.deepEqual(body.coder_model_by_complexity, { simple: 'coder-simple', complex: 'coder-complex' });
 assert.deepEqual(body.reviewers, [
-  { model: 'reviewer-a', variant: 'reviewer-a-variant' },
-  { model: 'reviewer-b', variant: '' },
+  { model: 'reviewer-a', variant: 'reviewer-a-variant', agent: 'reviewer-a-agent' },
+  { model: 'reviewer-b', variant: '', agent: '' },
 ]);
 assert.deepEqual(body.reviewer_models, ['reviewer-a', 'reviewer-b']);
 """
@@ -1170,6 +1184,62 @@ assert.match(html, /reviewer-b/);
     )
 
 
+def test_load_sys_info_uses_structured_coder_specs_without_rendering_object_object():
+    cfg_payload = {
+        "repo_path": "/repo",
+        "base_branch": "main",
+        "worktree_dir": "/wt",
+        "worktree_hooks": [],
+        "opencode_config_path": "/workspace/opencode.json",
+        "planner": {"model": "planner-x", "variant": ""},
+        "planner_model": "planner-x",
+        "explorer": {"model": "explorer-x", "variant": ""},
+        "explorer_model": "explorer-x",
+        "map": {"model": "map-x", "variant": ""},
+        "map_model": "map-x",
+        "coder_by_complexity": {
+            "simple": {"model": "coder-s", "variant": "simple-v"},
+            "complex": {"model": "coder-c", "variant": ""},
+        },
+        "coder_model_by_complexity": {
+            "simple": {"model": "coder-s", "variant": "simple-v"},
+            "complex": {"model": "coder-c", "variant": ""},
+        },
+        "coder_default": {"model": "coder-default", "variant": ""},
+        "coder_model_default": "coder-default",
+        "reviewers": [],
+        "reviewer_models": [],
+        "max_retries": 4,
+        "publish_remote": "origin",
+    }
+    models_payload = {
+        "models": [
+            "planner-x",
+            "explorer-x",
+            "map-x",
+            "coder-default",
+            "coder-s",
+            "coder-c",
+        ]
+    }
+    _run_dashboard_js(
+        rf"""
+const cfgPayload = {json.dumps(cfg_payload)};
+const modelsPayload = {json.dumps(models_payload)};
+globalThis.fetch = async (url) => {{
+  if (url === '/api/config') return {{ json: async () => cfgPayload }};
+  if (url === '/api/models') return {{ json: async () => modelsPayload }};
+  throw new Error('unexpected url ' + url);
+}};
+await loadSysInfo();
+const html = document.getElementById('sysinfo-content').innerHTML;
+assert.match(html, /coder-s/);
+assert.match(html, /simple-v/);
+assert.doesNotMatch(html, /\[object Object\]/);
+"""
+    )
+
+
 def test_add_jira_task_posts_expected_payload():
     _run_dashboard_js(
         r"""
@@ -1188,6 +1258,32 @@ const body = JSON.parse(captured.opts.body);
 assert.equal(body.title, 'Open Jira for test failure');
 assert.equal(body.description, 'Include stack trace and owner hints');
 assert.equal(body.priority, 'high');
+"""
+    )
+
+
+def test_add_task_posts_force_no_split_flag_when_checked():
+    _run_dashboard_js(
+        r"""
+let captured = null;
+globalThis.refresh = () => {};
+document.getElementById('task-title').value = 'Do not split this';
+document.getElementById('task-desc').value = 'Keep it as one task';
+document.getElementById('task-priority').value = 'high';
+document.getElementById('task-copy-files').value = 'a.txt\nb.txt';
+document.getElementById('task-force-no-split').checked = true;
+globalThis.fetch = async (url, opts) => {
+  captured = { url, opts };
+  return { json: async () => ({ id: 'task123', title: 'Do not split this' }) };
+};
+await addTask();
+assert.equal(captured.url, '/api/tasks');
+const body = JSON.parse(captured.opts.body);
+assert.equal(body.title, 'Do not split this');
+assert.equal(body.description, 'Keep it as one task');
+assert.equal(body.priority, 'high');
+assert.equal(body.copy_files, 'a.txt\nb.txt');
+assert.equal(body.force_no_split, true);
 """
     )
 

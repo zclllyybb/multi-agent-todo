@@ -1906,20 +1906,24 @@ class TestModelConfigUpdates:
         with patch.object(orch, "_save_model_config") as save_mock:
             orch.update_models(
                 {
-                    "planner": {"model": "planner-new", "variant": "planner-v2"},
-                    "explorer": {"model": "explorer-new", "variant": "explorer-v2"},
-                    "map": {"model": "map-new", "variant": "map-v2"},
+                    "planner": {"model": "planner-new", "variant": "planner-v2", "agent": "planner-agent"},
+                    "explorer": {"model": "explorer-new", "variant": "explorer-v2", "agent": "explorer-agent"},
+                    "map": {"model": "map-new", "variant": "map-v2", "agent": "map-agent"},
                 }
             )
 
         assert orch.config["opencode"]["planner_model"] == "planner-new"
         assert orch.config["opencode"]["planner"]["variant"] == "planner-v2"
+        assert orch.config["opencode"]["planner"]["agent"] == "planner-agent"
         assert orch.config["explore"]["explorer_model"] == "explorer-new"
         assert orch.config["explore"]["explorer"]["variant"] == "explorer-v2"
+        assert orch.config["explore"]["explorer"]["agent"] == "explorer-agent"
         assert orch.config["explore"]["map_model"] == "map-new"
         assert orch.config["explore"]["map"]["variant"] == "map-v2"
+        assert orch.config["explore"]["map"]["agent"] == "map-agent"
         assert orch.planner.model == "planner-new"
         assert orch.planner.variant == "planner-v2"
+        assert orch.planner.agent == "planner-agent"
         save_mock.assert_called_once()
 
     def test_patch_yaml_lines_updates_opencode_and_explore_model_fields(self):
@@ -1947,37 +1951,37 @@ class TestModelConfigUpdates:
         patched = Orchestrator._patch_yaml_lines(
             lines,
             {
-                "planner": {"model": "new-planner", "variant": "planner-v"},
+                "planner": {"model": "new-planner", "variant": "planner-v", "agent": "planner-a"},
                 "coder_by_complexity": {
-                    "simple": {"model": "new-simple", "variant": "simple-v"}
+                    "simple": {"model": "new-simple", "variant": "simple-v", "agent": "simple-a"}
                 },
-                "coder_default": {"model": "new-coder", "variant": "coder-v"},
+                "coder_default": {"model": "new-coder", "variant": "coder-v", "agent": "coder-a"},
                 "reviewers": [
-                    {"model": "new-reviewer-a", "variant": "reviewer-a-v"},
-                    {"model": "new-reviewer-b", "variant": ""},
+                    {"model": "new-reviewer-a", "variant": "reviewer-a-v", "agent": "reviewer-a-agent"},
+                    {"model": "new-reviewer-b", "variant": "", "agent": ""},
                 ],
             },
             {
-                "explorer": {"model": "new-explorer", "variant": "explorer-v"},
-                "map": {"model": "new-map", "variant": "map-v"},
+                "explorer": {"model": "new-explorer", "variant": "explorer-v", "agent": "explorer-a"},
+                "map": {"model": "new-map", "variant": "map-v", "agent": "map-a"},
             },
         )
 
         text = "".join(patched)
         assert "planner_model: new-planner" in text
-        assert "planner: {model: new-planner, variant: planner-v}" in text
+        assert "planner: {model: new-planner, variant: planner-v, agent: planner-a}" in text
         assert "simple: new-simple" in text
-        assert "simple: {model: new-simple, variant: simple-v}" in text
+        assert "simple: {model: new-simple, variant: simple-v, agent: simple-a}" in text
         assert "coder_model_default: new-coder" in text
-        assert "coder_default: {model: new-coder, variant: coder-v}" in text
-        assert "- {model: new-reviewer-a, variant: reviewer-a-v}" in text
+        assert "coder_default: {model: new-coder, variant: coder-v, agent: coder-a}" in text
+        assert "- {model: new-reviewer-a, variant: reviewer-a-v, agent: reviewer-a-agent}" in text
         assert "- new-reviewer-a" in text
         assert "- new-reviewer-b" in text
         assert '- {model: new-reviewer-b, variant: ""}' not in text
         assert "explorer_model: new-explorer" in text
-        assert "explorer: {model: new-explorer, variant: explorer-v}" in text
+        assert "explorer: {model: new-explorer, variant: explorer-v, agent: explorer-a}" in text
         assert "map_model: new-map" in text
-        assert "map: {model: new-map, variant: map-v}" in text
+        assert "map: {model: new-map, variant: map-v, agent: map-a}" in text
 
     def test_patch_yaml_lines_does_not_modify_regression_model_profiles(self):
         from core.orchestrator import Orchestrator
@@ -2014,19 +2018,19 @@ class TestModelConfigUpdates:
         patched = Orchestrator._patch_yaml_lines(
             lines,
             {
-                "planner": {"model": "new-planner", "variant": "planner-v"},
+                "planner": {"model": "new-planner", "variant": "planner-v", "agent": "planner-a"},
                 "coder_by_complexity": {
-                    "simple": {"model": "new-simple", "variant": "simple-v"}
+                    "simple": {"model": "new-simple", "variant": "simple-v", "agent": "simple-a"}
                 },
-                "coder_default": {"model": "new-coder", "variant": "coder-v"},
+                "coder_default": {"model": "new-coder", "variant": "coder-v", "agent": "coder-a"},
                 "reviewers": [
-                    {"model": "new-reviewer-a", "variant": "reviewer-a-v"},
-                    {"model": "new-reviewer-b", "variant": ""},
+                    {"model": "new-reviewer-a", "variant": "reviewer-a-v", "agent": "reviewer-a-agent"},
+                    {"model": "new-reviewer-b", "variant": "", "agent": ""},
                 ],
             },
             {
-                "explorer": {"model": "new-explorer", "variant": "explorer-v"},
-                "map": {"model": "new-map", "variant": "map-v"},
+                "explorer": {"model": "new-explorer", "variant": "explorer-v", "agent": "explorer-a"},
+                "map": {"model": "new-map", "variant": "map-v", "agent": "map-a"},
             },
         )
 
@@ -2035,32 +2039,36 @@ class TestModelConfigUpdates:
         assert parsed["opencode"]["planner"] == {
             "model": "new-planner",
             "variant": "planner-v",
+            "agent": "planner-a",
         }
         assert parsed["opencode"]["coder_model_default"] == "new-coder"
         assert parsed["opencode"]["coder_default"] == {
             "model": "new-coder",
             "variant": "coder-v",
+            "agent": "coder-a",
         }
         assert parsed["opencode"]["coder_model_by_complexity"]["simple"] == "new-simple"
         assert parsed["opencode"]["coder_by_complexity"]["simple"] == {
             "model": "new-simple",
             "variant": "simple-v",
+            "agent": "simple-a",
         }
         assert parsed["opencode"]["reviewer_models"] == [
             "new-reviewer-a",
             "new-reviewer-b",
         ]
         assert parsed["opencode"]["reviewers"] == [
-            {"model": "new-reviewer-a", "variant": "reviewer-a-v"},
+            {"model": "new-reviewer-a", "variant": "reviewer-a-v", "agent": "reviewer-a-agent"},
             "new-reviewer-b",
         ]
         assert parsed["explore"]["explorer_model"] == "new-explorer"
         assert parsed["explore"]["explorer"] == {
             "model": "new-explorer",
             "variant": "explorer-v",
+            "agent": "explorer-a",
         }
         assert parsed["explore"]["map_model"] == "new-map"
-        assert parsed["explore"]["map"] == {"model": "new-map", "variant": "map-v"}
+        assert parsed["explore"]["map"] == {"model": "new-map", "variant": "map-v", "agent": "map-a"}
         assert parsed["regression"]["model_profiles"]["stable"]["planner_model"] == (
             "keep-planner"
         )
@@ -2097,9 +2105,9 @@ class TestModelConfigUpdates:
 
             async def _json():
                 return {
-                    "planner": {"model": "planner-api", "variant": "planner-api-v"},
-                    "explorer": {"model": "explorer-api", "variant": "explorer-api-v"},
-                    "map": {"model": "map-api", "variant": "map-api-v"},
+                    "planner": {"model": "planner-api", "variant": "planner-api-v", "agent": "planner-agent"},
+                    "explorer": {"model": "explorer-api", "variant": "explorer-api-v", "agent": "explorer-agent"},
+                    "map": {"model": "map-api", "variant": "map-api-v", "agent": "map-agent"},
                 }
 
             request.json = _json
@@ -2109,10 +2117,13 @@ class TestModelConfigUpdates:
             after = asyncio.run(web_app.api_config())
             assert after["planner_model"] == "planner-api"
             assert after["planner"]["variant"] == "planner-api-v"
+            assert after["planner"]["agent"] == "planner-agent"
             assert after["explorer_model"] == "explorer-api"
             assert after["explorer"]["variant"] == "explorer-api-v"
+            assert after["explorer"]["agent"] == "explorer-agent"
             assert after["map_model"] == "map-api"
             assert after["map"]["variant"] == "map-api-v"
+            assert after["map"]["agent"] == "map-agent"
         finally:
             web_app.set_orchestrator(original)
 
@@ -2144,6 +2155,35 @@ class TestModelConfigUpdates:
             assert saved.task_mode == "jira"
             assert saved.jira_source_task_id == "task_src_123"
             dispatch_mock.assert_called_once_with(saved.id)
+        finally:
+            web_app.set_orchestrator(original)
+
+    def test_api_add_task_passes_force_no_split(self, orch):
+        from web import app as web_app
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            request = MagicMock()
+
+            async def _json():
+                return {
+                    "title": "single task only",
+                    "description": "do not split",
+                    "priority": "high",
+                    "copy_files": "a.txt\nb.txt",
+                    "force_no_split": True,
+                }
+
+            request.json = _json
+            with patch.object(orch, "submit_task") as submit_mock:
+                submit_mock.return_value = MagicMock(to_dict=lambda: {"id": "task123"})
+                response = asyncio.run(web_app.api_add_task(request))
+
+            assert response == {"id": "task123"}
+            kwargs = submit_mock.call_args.kwargs
+            assert kwargs["force_no_split"] is True
+            assert kwargs["copy_files"] == ["a.txt", "b.txt"]
         finally:
             web_app.set_orchestrator(original)
 

@@ -132,6 +132,7 @@ class Orchestrator:
         self.planner = PlannerAgent(
             model=planner_spec.model,
             variant=planner_spec.variant,
+            agent=planner_spec.agent,
             client=self.client,
         )
         # Coder: one agent per complexity level, keyed by complexity string
@@ -140,18 +141,27 @@ class Orchestrator:
         self._coder_by_complexity: Dict[str, CoderAgent] = {}
         for level, spec in complexity_map.items():
             self._coder_by_complexity[level] = CoderAgent(
-                model=spec.model, variant=spec.variant, client=self.client
+                model=spec.model,
+                variant=spec.variant,
+                agent=spec.agent,
+                client=self.client,
             )
         self._default_coder = CoderAgent(
             model=default_coder_spec.model,
             variant=default_coder_spec.variant,
+            agent=default_coder_spec.agent,
             client=self.client,
         )
 
         # Reviewers: one agent per configured model; all must approve
         reviewer_specs = self._reviewer_specs_from_config(config)
         self.reviewers: List[ReviewerAgent] = [
-            ReviewerAgent(model=spec.model, variant=spec.variant, client=self.client)
+            ReviewerAgent(
+                model=spec.model,
+                variant=spec.variant,
+                agent=spec.agent,
+                client=self.client,
+            )
             for spec in reviewer_specs
             if spec.model
         ]
@@ -383,7 +393,7 @@ class Orchestrator:
 
         Each value can be either:
           - a plain model string
-          - {model: "...", variant: "..."}
+          - {model: "...", variant: "...", agent: "..."}
         """
         oc = self.config.setdefault("opencode", {})
         explore = self.config.setdefault("explore", {})
@@ -396,14 +406,16 @@ class Orchestrator:
                 self.planner = PlannerAgent(
                     model=spec.model,
                     variant=spec.variant,
+                    agent=spec.agent,
                     client=self.client,
                 )
                 oc["planner"] = model_spec_to_config_value(spec)
                 oc["planner_model"] = spec.model
                 log.info(
-                    "Updated planner model: %s variant=%s",
+                    "Updated planner model: %s variant=%s agent=%s",
                     spec.model,
                     spec.variant or "-",
+                    spec.agent or "-",
                 )
 
         if "coder_default" in updates or "coder_model_default" in updates:
@@ -414,14 +426,16 @@ class Orchestrator:
                 self._default_coder = CoderAgent(
                     model=spec.model,
                     variant=spec.variant,
+                    agent=spec.agent,
                     client=self.client,
                 )
                 oc["coder_default"] = model_spec_to_config_value(spec)
                 oc["coder_model_default"] = spec.model
                 log.info(
-                    "Updated default coder model: %s variant=%s",
+                    "Updated default coder model: %s variant=%s agent=%s",
                     spec.model,
                     spec.variant or "-",
+                    spec.agent or "-",
                 )
 
         if "coder_by_complexity" in updates or "coder_model_by_complexity" in updates:
@@ -435,6 +449,7 @@ class Orchestrator:
                     level: CoderAgent(
                         model=spec.model,
                         variant=spec.variant,
+                        agent=spec.agent,
                         client=self.client,
                     )
                     for level, spec in cmap.items()
@@ -446,7 +461,11 @@ class Orchestrator:
                 log.info(
                     "Updated coder complexity map: %s",
                     {
-                        level: {"model": spec.model, "variant": spec.variant}
+                        level: {
+                            "model": spec.model,
+                            "variant": spec.variant,
+                            "agent": spec.agent,
+                        }
                         for level, spec in cmap.items()
                     },
                 )
@@ -457,7 +476,10 @@ class Orchestrator:
             )
             self.reviewers = [
                 ReviewerAgent(
-                    model=spec.model, variant=spec.variant, client=self.client
+                    model=spec.model,
+                    variant=spec.variant,
+                    agent=spec.agent,
+                    client=self.client,
                 )
                 for spec in specs
             ]
@@ -465,7 +487,10 @@ class Orchestrator:
             oc["reviewer_models"] = [spec.model for spec in specs]
             log.info(
                 "Updated reviewer models: %s",
-                [{"model": spec.model, "variant": spec.variant} for spec in specs],
+                [
+                    {"model": spec.model, "variant": spec.variant, "agent": spec.agent}
+                    for spec in specs
+                ],
             )
 
         if "explorer" in updates or "explorer_model" in updates:
@@ -476,9 +501,10 @@ class Orchestrator:
                 explore["explorer"] = model_spec_to_config_value(spec)
                 explore["explorer_model"] = spec.model
                 log.info(
-                    "Updated explorer model: %s variant=%s",
+                    "Updated explorer model: %s variant=%s agent=%s",
                     spec.model,
                     spec.variant or "-",
+                    spec.agent or "-",
                 )
 
         if "map" in updates or "map_model" in updates:
@@ -487,7 +513,10 @@ class Orchestrator:
                 explore["map"] = model_spec_to_config_value(spec)
                 explore["map_model"] = spec.model
                 log.info(
-                    "Updated map model: %s variant=%s", spec.model, spec.variant or "-"
+                    "Updated map model: %s variant=%s agent=%s",
+                    spec.model,
+                    spec.variant or "-",
+                    spec.agent or "-",
                 )
 
         # Persist model config changes so they survive restarts.
@@ -792,6 +821,7 @@ class Orchestrator:
         line_number: int = 0,
         parent_id: str = "",
         copy_files: Optional[list] = None,
+        force_no_split: bool = False,
     ) -> Task:
         """Create a pending task that the planner will analyze+split during execution."""
         max_retries = int(self.config.get("orchestrator", {}).get("max_retries", 4))
@@ -805,6 +835,7 @@ class Orchestrator:
             parent_id=parent_id or None,
             max_retries=max_retries,
             copy_files=copy_files or [],
+            force_no_split=force_no_split,
         )
         self.db.save_task(task)
         log.info("Submitted task: [%s] %s", task.id, task.title)
@@ -1065,6 +1096,7 @@ class Orchestrator:
                 description=task.description,
                 repo_path=repo_path,
                 task_id=task.id,
+                force_no_split=task.force_no_split,
             )
         except ModelOutputError as first_err:
             log.warning(
@@ -1078,6 +1110,7 @@ class Orchestrator:
                     description=task.description,
                     repo_path=repo_path,
                     task_id=task.id,
+                    force_no_split=task.force_no_split,
                 )
             except ModelOutputError as second_err:
                 raise ModelOutputError(

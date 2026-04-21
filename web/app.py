@@ -13,8 +13,14 @@ from agents.reviewer import ReviewerAgent
 from core.orchestrator import Orchestrator
 from core.opencode_client import OpenCodeClient
 from core.model_config import (
+    model_spec_list_to_dict,
     model_spec_list_to_config_value,
+    model_spec_map_to_dict,
     model_spec_map_to_config_value,
+    model_spec_to_dict,
+    parse_model_spec,
+    parse_model_spec_list,
+    parse_model_spec_map,
 )
 
 app = FastAPI(title="Multi-Agent TODO Resolver")
@@ -227,6 +233,7 @@ async def api_add_task(request: Request):
         file_path=body.get("file_path", ""),
         line_number=int(body.get("line_number", 0) or 0),
         copy_files=copy_files,
+        force_no_split=bool(body.get("force_no_split", False)),
     )
     return task.to_dict()
 
@@ -460,6 +467,21 @@ async def api_config():
     cfg = orchestrator.config
     repo = cfg.get("repo", {})
     oc = cfg.get("opencode", {})
+    planner_spec = parse_model_spec(oc.get("planner", oc.get("planner_model", "")))
+    coder_specs = parse_model_spec_map(
+        oc.get("coder_by_complexity", oc.get("coder_model_by_complexity", {}))
+    )
+    coder_default_spec = parse_model_spec(
+        oc.get("coder_default", oc.get("coder_model_default", ""))
+    )
+    reviewer_specs = parse_model_spec_list(
+        oc.get("reviewers", oc.get("reviewer_models", []))
+    )
+    explore_cfg = cfg.get("explore", {})
+    explorer_spec = parse_model_spec(
+        explore_cfg.get("explorer", explore_cfg.get("explorer_model", ""))
+    )
+    map_spec = parse_model_spec(explore_cfg.get("map", explore_cfg.get("map_model", "")))
     orch = cfg.get("orchestrator", {})
     return {
         "repo_path": repo.get("path", ""),
@@ -467,27 +489,18 @@ async def api_config():
         "worktree_dir": repo.get("worktree_dir", ""),
         "worktree_hooks": repo.get("worktree_hooks", []),
         "opencode_config_path": oc.get("config_path", ""),
-        "planner": oc.get(
-            "planner", {"model": oc.get("planner_model", ""), "variant": ""}
-        ),
-        "planner_model": oc.get("planner_model", ""),
-        "coder_by_complexity": oc.get("coder_by_complexity", {}),
-        "coder_model_by_complexity": oc.get("coder_model_by_complexity", {}),
-        "coder_default": oc.get(
-            "coder_default", {"model": oc.get("coder_model_default", ""), "variant": ""}
-        ),
-        "coder_model_default": oc.get("coder_model_default", ""),
-        "reviewers": oc.get("reviewers", []),
-        "reviewer_models": oc.get("reviewer_models", []),
-        "explorer": cfg.get("explore", {}).get(
-            "explorer",
-            {"model": cfg.get("explore", {}).get("explorer_model", ""), "variant": ""},
-        ),
-        "explorer_model": cfg.get("explore", {}).get("explorer_model", ""),
-        "map": cfg.get("explore", {}).get(
-            "map", {"model": cfg.get("explore", {}).get("map_model", ""), "variant": ""}
-        ),
-        "map_model": cfg.get("explore", {}).get("map_model", ""),
+        "planner": model_spec_to_dict(planner_spec),
+        "planner_model": planner_spec.model,
+        "coder_by_complexity": model_spec_map_to_dict(coder_specs),
+        "coder_model_by_complexity": {level: spec.model for level, spec in coder_specs.items()},
+        "coder_default": model_spec_to_dict(coder_default_spec),
+        "coder_model_default": coder_default_spec.model,
+        "reviewers": model_spec_list_to_dict(reviewer_specs),
+        "reviewer_models": [spec.model for spec in reviewer_specs],
+        "explorer": model_spec_to_dict(explorer_spec),
+        "explorer_model": explorer_spec.model,
+        "map": model_spec_to_dict(map_spec),
+        "map_model": map_spec.model,
         "jira_project_key": cfg.get("jira", {}).get("project_key", ""),
         "jira_issue_type": cfg.get("jira", {}).get("issue_type", []),
         "max_retries": orch.get("max_retries", 4),
@@ -923,11 +936,61 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge-cancelled { background: var(--badge-pending-bg); color: var(--text-dim); }
   .badge-high { color: var(--red); } .badge-medium { color: var(--yellow); }
   .badge-low { color: var(--text-dim); }
-  .sys-select { width: 100%; padding: 5px 8px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 6px; color: var(--text);
-    font-size: 12px; font-family: monospace; cursor: pointer; }
-  .sys-select:focus { outline: none; border-color: var(--accent); }
+  .sys-select { width: 100%; min-height: 38px; padding: 8px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 10px; color: var(--text);
+    font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s, background 0.15s; }
+  .sys-select:hover { border-color: var(--accent); }
+  .sys-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--surface-accent-soft); }
   .sys-select option { background: var(--surface); color: var(--text); }
+  .sys-overview-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:14px; }
+  .sys-model-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .sys-model-card h4 { margin-bottom: 10px; }
+  .sys-model-note { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+  .sys-meta-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; margin-top: 10px; }
+  .sys-meta-grid.compact { margin-top: 8px; }
+  .sys-field-shell { display:flex; flex-direction:column; gap:6px; min-width:0; }
+  .sys-field-label { display:inline-flex; align-items:center; gap:6px; font-size:10px; text-transform:uppercase;
+    letter-spacing:0.08em; color: var(--text-dim); font-weight: 700; }
+  .sys-field-chip { display:inline-flex; align-items:center; justify-content:center; min-width: 18px; height: 18px;
+    padding: 0 6px; border-radius: 999px; background: var(--surface-accent-soft); color: var(--accent); }
+  .sys-field-input { width:100%; min-height:38px; padding: 8px 12px; border-radius: 10px; border:1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s; }
+  .sys-field-input:hover { border-color: var(--accent); }
+  .sys-field-input:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--surface-accent-soft); }
+  .sys-section-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-top: 16px; }
+  .sys-section-card h3 { margin: 0 0 12px 0; font-size: 14px; font-weight: 600; border: 0; padding: 0; }
+  .sys-reviewer-stack { display:flex; flex-direction:column; gap:10px; }
+  .sys-reviewer-row { display:grid; grid-template-columns:minmax(0, 1.4fr) repeat(2, minmax(140px, 0.8fr)) auto;
+    gap:10px; align-items:end; padding: 12px; border:1px solid var(--border); border-radius: 12px; background: var(--bg); }
+  .sys-reviewer-remove { color: var(--red); padding: 6px 10px; min-height: 38px; }
+  .sys-complexity-table { width:100%; border-collapse:separate; border-spacing:0 10px; }
+  .sys-complexity-table td { vertical-align:top; }
+  .sys-complexity-spec { background: var(--bg); border:1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .sys-complexity-head { display:flex; align-items:center; gap:10px; margin-bottom: 10px; }
+  .task-option-card { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; padding:14px 16px;
+    margin:12px 0 10px; border:1px solid var(--border); border-radius:12px; background: linear-gradient(180deg, var(--surface), var(--surface-muted)); }
+  .task-option-copy { min-width:0; }
+  .task-option-title { font-size:13px; font-weight:700; color:var(--text); }
+  .task-option-desc { font-size:12px; color:var(--text-dim); margin-top:4px; line-height:1.5; }
+  .task-switch { position:relative; display:inline-flex; align-items:center; flex-shrink:0; margin-top:2px; }
+  .task-switch input { position:absolute; opacity:0; pointer-events:none; }
+  .task-switch-track { width:48px; height:28px; border-radius:999px; background:var(--surface-track); border:1px solid var(--border);
+    transition: background 0.15s, border-color 0.15s; }
+  .task-switch-thumb { position:absolute; left:4px; top:4px; width:20px; height:20px; border-radius:50%; background:#fff;
+    box-shadow:0 1px 4px rgba(0,0,0,0.25); transition: transform 0.15s ease; }
+  .task-switch input:checked + .task-switch-track { background: var(--accent); border-color: var(--accent); }
+  .task-switch input:checked + .task-switch-track + .task-switch-thumb { transform: translateX(20px); }
+  .task-switch input:focus-visible + .task-switch-track { box-shadow: 0 0 0 3px var(--surface-accent-soft); }
+  @media (max-width: 960px) {
+    .sys-reviewer-row { grid-template-columns:1fr; }
+    .sys-meta-grid { grid-template-columns:1fr; }
+  }
+  @media (max-width: 700px) {
+    .task-option-card { flex-direction:column; align-items:stretch; }
+    .task-switch { align-self:flex-end; }
+  }
   .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     background: var(--overlay-backdrop); z-index: 100; justify-content: center; align-items: flex-start;
     padding-top: 40px; overflow-y: auto; }
@@ -1307,6 +1370,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <option value="medium" selected>Medium</option>
         <option value="low">Low</option>
       </select>
+      <div class="task-option-card">
+        <div class="task-option-copy">
+          <div class="task-option-title">Force Single Task</div>
+          <div class="task-option-desc">Disable planner decomposition for this submission. The planner must return one complete task and one implementation plan only.</div>
+        </div>
+        <label class="task-switch" for="task-force-no-split" aria-label="Force Single Task">
+          <input id="task-force-no-split" type="checkbox" />
+          <span class="task-switch-track"></span>
+          <span class="task-switch-thumb"></span>
+        </label>
+      </div>
       <label style="font-size:12px;color:var(--text-dim);display:block;margin:8px 0 4px">Copy files to worktree <span style="font-size:11px">(one path per line, relative to repo root)</span></label>
       <textarea id="task-copy-files" placeholder="e.g. test_data/input.csv&#10;debug/repro.sql" style="height:60px;font-family:monospace;font-size:12px"></textarea>
       <div class="actions">
@@ -2324,6 +2398,7 @@ async function addTask() {
     description: document.getElementById('task-desc').value,
     priority: document.getElementById('task-priority').value,
     copy_files: document.getElementById('task-copy-files').value,
+    force_no_split: !!document.getElementById('task-force-no-split').checked,
   })});
   closeModals(); refresh();
 }
@@ -2576,24 +2651,50 @@ function buildModelSelect(id, models, current, extraAttr) {
   return `<select class="sys-select" id="${id}" ${extraAttr||''}>${opts}</select>`;
 }
 
-function modelSpecFromInputs(modelId, variantId) {
+function modelSpecFromInputs(modelId, variantId, agentId) {
   const model = (document.getElementById(modelId)?.value || '').trim();
   const variant = (document.getElementById(variantId)?.value || '').trim();
-  return { model, variant };
+  const agent = (document.getElementById(agentId)?.value || '').trim();
+  return { model, variant, agent };
+}
+
+function modelName(value) {
+  if (value && typeof value === 'object') return String(value.model || '').trim();
+  return String(value || '').trim();
+}
+
+function renderMetaField(label, inputId, value, extraClass = '', placeholder = 'default') {
+  const lower = String(label || '').toLowerCase();
+  const suffix = lower === 'variant' ? 'V' : (lower === 'agent' ? 'A' : lower.slice(0, 1).toUpperCase());
+  const idAttr = inputId ? ` id="${inputId}"` : '';
+  const clsAttr = extraClass ? ` ${extraClass}` : '';
+  return `<label class="sys-field-shell">
+    <span class="sys-field-label"><span class="sys-field-chip">${esc(suffix)}</span>${esc(label)}</span>
+    <input class="sys-field-input${clsAttr}"${idAttr} placeholder="${esc(placeholder)}" value="${esc(value || '')}">
+  </label>`;
+}
+
+function renderReviewerRowHtml(models, value, variant = '', agent = '') {
+  const all = (value && !models.includes(value)) ? [value, ...models] : models;
+  const opts = all.map(m =>
+    `<option value="${esc(m)}"${m === value ? ' selected' : ''}>${esc(m)}</option>`
+  ).join('');
+  return `<div class="sys-reviewer-row">
+    <div>
+      <div class="sys-field-label" style="margin-bottom:6px"><span class="sys-field-chip">M</span>model</div>
+      <select class="sys-select sys-reviewer-select">${opts}</select>
+    </div>
+    ${renderMetaField('variant', '', variant, 'sys-reviewer-variant')}
+    ${renderMetaField('agent', '', agent, 'sys-reviewer-agent')}
+    <button class="btn btn-sm sys-reviewer-remove" onclick="this.parentElement.remove()" title="Remove">Remove</button>
+  </div>`;
 }
 
 function addReviewerRow(models, value) {
   const container = document.getElementById('sys-reviewer-list');
   const row = document.createElement('div');
   row.className = 'sys-reviewer-row';
-  row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:6px';
-  const all = (value && !models.includes(value)) ? [value, ...models] : models;
-  const opts = all.map(m =>
-    `<option value="${esc(m)}"${m === value ? ' selected' : ''}>${esc(m)}</option>`
-  ).join('');
-  row.innerHTML = `<select class="sys-select sys-reviewer-select" style="flex:1">${opts}</select>
-    <input class="sys-reviewer-variant" placeholder="variant" style="width:180px;margin-bottom:0">
-    <button class="btn btn-sm" style="color:var(--red);padding:2px 7px;flex-shrink:0" onclick="this.parentElement.remove()" title="Remove">&times;</button>`;
+  row.innerHTML = renderReviewerRowHtml(models, value);
   container.appendChild(row);
 }
 
@@ -2613,22 +2714,28 @@ async function saveSysModels() {
     document.querySelectorAll('.sys-reviewer-row').forEach(row => {
       const model = row.querySelector('.sys-reviewer-select')?.value || '';
       const variant = row.querySelector('.sys-reviewer-variant')?.value || '';
-      if (model.trim()) reviewerSpecs.push({ model: model.trim(), variant: variant.trim() });
+      const agent = row.querySelector('.sys-reviewer-agent')?.value || '';
+      if (model.trim()) reviewerSpecs.push({ model: model.trim(), variant: variant.trim(), agent: agent.trim() });
     });
     const coderByComplexity = {};
     document.querySelectorAll('[data-complexity]').forEach(el => {
       const level = el.dataset.complexity;
       const variantEl = document.getElementById(`sys-coder-variant-${level}`);
-      coderByComplexity[level] = { model: el.value, variant: variantEl ? variantEl.value.trim() : '' };
+      const agentEl = document.getElementById(`sys-coder-agent-${level}`);
+      coderByComplexity[level] = {
+        model: el.value,
+        variant: variantEl ? variantEl.value.trim() : '',
+        agent: agentEl ? agentEl.value.trim() : '',
+      };
     });
     const payload = {
-      planner: modelSpecFromInputs('sys-planner-model', 'sys-planner-variant'),
+      planner: modelSpecFromInputs('sys-planner-model', 'sys-planner-variant', 'sys-planner-agent'),
       planner_model: document.getElementById('sys-planner-model').value,
-      explorer: modelSpecFromInputs('sys-explorer-model', 'sys-explorer-variant'),
+      explorer: modelSpecFromInputs('sys-explorer-model', 'sys-explorer-variant', 'sys-explorer-agent'),
       explorer_model: document.getElementById('sys-explorer-model').value,
-      map: modelSpecFromInputs('sys-map-model', 'sys-map-variant'),
+      map: modelSpecFromInputs('sys-map-model', 'sys-map-variant', 'sys-map-agent'),
       map_model: document.getElementById('sys-map-model').value,
-      coder_default: modelSpecFromInputs('sys-coder-default', 'sys-coder-default-variant'),
+      coder_default: modelSpecFromInputs('sys-coder-default', 'sys-coder-default-variant', 'sys-coder-default-agent'),
       coder_model_default: document.getElementById('sys-coder-default').value,
       coder_by_complexity: coderByComplexity,
       coder_model_by_complexity: cmap,
@@ -2690,60 +2797,81 @@ async function loadSysInfo() {
     <h4>Worktree Directory</h4>
     <div class="val" style="font-size:12px;word-break:break-all">${esc(cfg.worktree_dir)}</div>
   </div>`;
-  html += `<div class="detail-card">
+  html += `</div>`;
+
+  html += `<div class="sys-overview-grid">`;
+  html += `<div class="sys-model-card">
     <h4>Planner Model</h4>
     ${buildModelSelect('sys-planner-model', models, cfg.planner_model)}
-    <input id="sys-planner-variant" placeholder="optional variant" value="${esc((cfg.planner && cfg.planner.variant) || '')}">
+    <div class="sys-meta-grid">
+      ${renderMetaField('variant', 'sys-planner-variant', (cfg.planner && cfg.planner.variant) || '')}
+      ${renderMetaField('agent', 'sys-planner-agent', (cfg.planner && cfg.planner.agent) || '')}
+    </div>
+    <div class="sys-model-note">Used for complexity analysis, planning, and task split decisions.</div>
   </div>`;
-  html += `<div class="detail-card">
+  html += `<div class="sys-model-card">
     <h4>Explorer Model</h4>
     ${buildModelSelect('sys-explorer-model', models, cfg.explorer_model)}
-    <input id="sys-explorer-variant" placeholder="optional variant" value="${esc((cfg.explorer && cfg.explorer.variant) || '')}">
+    <div class="sys-meta-grid">
+      ${renderMetaField('variant', 'sys-explorer-variant', (cfg.explorer && cfg.explorer.variant) || '')}
+      ${renderMetaField('agent', 'sys-explorer-agent', (cfg.explorer && cfg.explorer.agent) || '')}
+    </div>
+    <div class="sys-model-note">Used for focused repository exploration tasks.</div>
   </div>`;
-  html += `<div class="detail-card">
+  html += `<div class="sys-model-card">
     <h4>Map Model</h4>
     ${buildModelSelect('sys-map-model', models, cfg.map_model)}
-    <input id="sys-map-variant" placeholder="optional variant" value="${esc((cfg.map && cfg.map.variant) || '')}">
+    <div class="sys-meta-grid">
+      ${renderMetaField('variant', 'sys-map-variant', (cfg.map && cfg.map.variant) || '')}
+      ${renderMetaField('agent', 'sys-map-agent', (cfg.map && cfg.map.agent) || '')}
+    </div>
+    <div class="sys-model-note">Used when building or refreshing the module map.</div>
   </div>`;
-  html += `<div class="detail-card">
+  html += `<div class="sys-model-card">
     <h4>Default Coder Model</h4>
     ${buildModelSelect('sys-coder-default', models, cfg.coder_model_default)}
-    <input id="sys-coder-default-variant" placeholder="optional variant" value="${esc((cfg.coder_default && cfg.coder_default.variant) || '')}">
+    <div class="sys-meta-grid">
+      ${renderMetaField('variant', 'sys-coder-default-variant', (cfg.coder_default && cfg.coder_default.variant) || '')}
+      ${renderMetaField('agent', 'sys-coder-default-agent', (cfg.coder_default && cfg.coder_default.agent) || '')}
+    </div>
+    <div class="sys-model-note">Fallback coder used when no complexity-specific override is configured.</div>
   </div>`;
   html += `</div>`;
 
-  html += `<div class="detail-section"><h3>Coder Model by Complexity</h3>`;
-  html += `<table style="width:100%;border-collapse:collapse">`;
-  for (const [level, model] of Object.entries(cfg.coder_model_by_complexity || {})) {
+  html += `<div class="sys-section-card"><h3>Coder Model by Complexity</h3>`;
+  html += `<table class="sys-complexity-table">`;
+  for (const [level, rawModel] of Object.entries(cfg.coder_model_by_complexity || {})) {
+    const model = modelName(rawModel);
     const color = complexityColors[level] || 'var(--text)';
-      const variant = (((cfg.coder_by_complexity || {})[level] || {}).variant) || '';
-      html += `<tr>
-      <td style="padding:5px 12px 5px 0;font-size:12px;white-space:nowrap;width:1%">
-        <span style="color:${color};border:1px solid ${color};padding:1px 7px;border-radius:3px">${esc(level.replace('_',' '))}</span>
+    const variant = (((cfg.coder_by_complexity || {})[level] || {}).variant) || '';
+    const agent = (((cfg.coder_by_complexity || {})[level] || {}).agent) || '';
+    html += `<tr>
+      <td style="padding:0 12px 0 0;font-size:12px;white-space:nowrap;width:1%">
+        <div class="sys-complexity-head"><span style="color:${color};border:1px solid ${color};padding:2px 8px;border-radius:999px;font-weight:600">${esc(level.replace('_',' '))}</span></div>
       </td>
-      <td style="padding:5px 0">${buildModelSelect('', models, model, `data-complexity="${esc(level)}"`)}<input id="sys-coder-variant-${esc(level)}" placeholder="optional variant" value="${esc(variant)}"></td>
+      <td style="padding:0">
+        <div class="sys-complexity-spec">
+          ${buildModelSelect('', models, model, `data-complexity="${esc(level)}"`)}
+          <div class="sys-meta-grid compact">
+            ${renderMetaField('variant', `sys-coder-variant-${esc(level)}`, variant)}
+            ${renderMetaField('agent', `sys-coder-agent-${esc(level)}`, agent)}
+          </div>
+        </div>
+      </td>
     </tr>`;
   }
   html += `</table></div>`;
 
-  html += `<div class="detail-section"><h3>Reviewer Models <span style="font-size:11px;color:var(--text-dim)">(all must approve)</span></h3>`;
-  html += `<div id="sys-reviewer-list">`;
+  html += `<div class="sys-section-card"><h3>Reviewer Models <span style="font-size:11px;color:var(--text-dim)">(all must approve)</span></h3>`;
+  html += `<div id="sys-reviewer-list" class="sys-reviewer-stack">`;
   if (cfg.reviewer_models && cfg.reviewer_models.length) {
     for (const [idx, m] of (cfg.reviewer_models || []).entries()) {
-      const all = models.includes(m) ? models : [m, ...models];
-      const opts = all.map(x =>
-        `<option value="${esc(x)}"${x === m ? ' selected' : ''}>${esc(x)}</option>`
-      ).join('');
       const variant = (((cfg.reviewers || [])[idx] || {}).variant) || '';
-      html += `<div class="sys-reviewer-row" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-        <select class="sys-select sys-reviewer-select" style="flex:1">${opts}</select>
-        <input class="sys-reviewer-variant" placeholder="variant" value="${esc(variant)}" style="width:180px;margin-bottom:0">
-        <button class="btn btn-sm" style="color:var(--red);padding:2px 7px;flex-shrink:0" onclick="this.parentElement.remove()" title="Remove">&times;</button>
-      </div>`;
+      const agent = (((cfg.reviewers || [])[idx] || {}).agent) || '';
+      html += renderReviewerRowHtml(models, m, variant, agent);
     }
   }
   html += `</div>`;
-  // Store models list on a hidden element so addReviewerRow can access it
   html += `<button class="btn btn-sm" style="margin-top:6px;color:var(--accent)"
     onclick="addReviewerRow(_sysModels,'')">+ Add reviewer</button>`;
   html += `</div>`;

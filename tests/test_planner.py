@@ -168,6 +168,25 @@ class TestAnalyzeAndSplit:
         )
         assert complexity == "3"
 
+    def test_force_no_split_keeps_single_task_even_if_model_requests_split(self):
+        model_output = json.dumps({
+            "complexity": "complex",
+            "split": True,
+            "reason": "Would normally split",
+            "sub_tasks": [{"title": "A", "description": "Do A"}],
+        })
+        planner = _make_planner(model_output)
+        run, is_split, plan_text, sub_tasks, complexity = planner.analyze_and_split(
+            title="T",
+            description="D",
+            repo_path="/repo",
+            force_no_split=True,
+        )
+        assert is_split is False
+        assert complexity == "complex"
+        assert sub_tasks == []
+        assert "Do A" in plan_text
+
     def test_sub_tasks_missing_fields_use_defaults(self):
         """Sub-task dicts may lack optional fields like priority and depends_on."""
         model_output = json.dumps({

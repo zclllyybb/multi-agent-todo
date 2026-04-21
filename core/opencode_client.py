@@ -54,6 +54,10 @@ class OpenCodeClient:
         proc_env["OPENCODE_CONFIG"] = self.config_path
         return proc_env
 
+    @staticmethod
+    def _normalize_cli_option(value: str) -> str:
+        return str(value or "").strip()
+
     def _exec(
         self,
         cmd: list,
@@ -240,6 +244,7 @@ class OpenCodeClient:
         env: Optional[dict[str, str]] = None,
         require_stop: bool = False,
         variant: str = "",
+        agent: str = "",
     ) -> AgentRun:
         """Run opencode with a message in a specific directory.
 
@@ -262,18 +267,23 @@ class OpenCodeClient:
             "--format",
             "json",
         ]
+        variant = self._normalize_cli_option(variant)
+        agent = self._normalize_cli_option(agent)
         if variant:
             cmd.extend(["--variant", variant])
+        if agent:
+            cmd.extend(["--agent", agent])
         if session_id:
             cmd.extend(["--session", session_id])
         cmd.append(message)
 
         log.info(
-            "Running opencode [%s] model=%s dir=%s variant=%s",
+            "Running opencode [%s] model=%s dir=%s variant=%s agent=%s",
             agent_type,
             model,
             work_dir,
             variant or "-",
+            agent or "-",
         )
         log.debug("Prompt: %s", message)
 
@@ -313,6 +323,8 @@ class OpenCodeClient:
             ]
             if variant:
                 cont_cmd.extend(["--variant", variant])
+            if agent:
+                cont_cmd.extend(["--agent", agent])
             cont_cmd.extend(["--session", sid, "Continue"])
             cont_output, exit_code, cont_duration = self._exec(
                 cont_cmd, work_dir, task_id, env=env
@@ -356,6 +368,7 @@ class OpenCodeClient:
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
         variant: str = "",
+        agent: str = "",
     ) -> AgentRun:
         """Run opencode with streaming output and optional cancellation."""
         total_duration = 0.0
@@ -365,6 +378,8 @@ class OpenCodeClient:
         current_message = message
 
         while True:
+            variant = self._normalize_cli_option(variant)
+            agent = self._normalize_cli_option(agent)
             cmd = [
                 "opencode",
                 "run",
@@ -377,17 +392,20 @@ class OpenCodeClient:
             ]
             if variant:
                 cmd.extend(["--variant", variant])
+            if agent:
+                cmd.extend(["--agent", agent])
             if sid:
                 cmd.extend(["--session", sid])
             cmd.append(current_message)
 
             log.info(
-                "Running opencode(stream) [%s] model=%s dir=%s session=%s variant=%s",
+                "Running opencode(stream) [%s] model=%s dir=%s session=%s variant=%s agent=%s",
                 agent_type,
                 model,
                 work_dir,
                 sid,
                 variant or "-",
+                agent or "-",
             )
             chunk_out, exit_code, duration, observed_sid, cancelled = (
                 self._exec_streaming(

@@ -655,7 +655,7 @@ class ExploreService:
         spec = self.get_map_spec()
         model = spec.model
         explorer = ExplorerAgent(
-            model=spec.model, variant=spec.variant, client=self.client
+            model=spec.model, variant=spec.variant, agent=spec.agent, client=self.client
         )
         log.info(
             "Starting explore map init: model=%s variant=%s", model, spec.variant or "-"
@@ -1024,7 +1024,7 @@ class ExploreService:
                 resume_with_continue = bool(job.get("resume_with_continue", False))
 
             explorer = ExplorerAgent(
-                model=spec.model, variant=spec.variant, client=self.client
+                model=spec.model, variant=spec.variant, agent=spec.agent, client=self.client
             )
             log.info(
                 "Starting exploration run: module=%s category=%s model=%s variant=%s personality=%s",

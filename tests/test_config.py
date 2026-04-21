@@ -129,6 +129,44 @@ class TestLoadConfig:
         config = load_config(str(cfg_file))
         assert config["opencode"]["config_path"] == "/tmp/custom-opencode.json"
 
+    def test_load_config_normalizes_structured_legacy_coder_model_by_complexity(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            yaml.dump(
+                {
+                    "opencode": {
+                        "coder_model_by_complexity": {
+                            "simple": {
+                                "model": "coder-s",
+                                "variant": "simple-v",
+                                "agent": "coder-simple",
+                            },
+                            "complex": {
+                                "model": "coder-c",
+                                "variant": "",
+                                "agent": "",
+                            },
+                        }
+                    }
+                }
+            )
+        )
+
+        config = load_config(str(cfg_file))
+
+        assert config["opencode"]["coder_model_by_complexity"] == {
+            "simple": "coder-s",
+            "complex": "coder-c",
+        }
+        assert config["opencode"]["coder_by_complexity"] == {
+            "simple": {
+                "model": "coder-s",
+                "variant": "simple-v",
+                "agent": "coder-simple",
+            },
+            "complex": {"model": "coder-c", "variant": "", "agent": ""},
+        }
+
 
 class TestRegressionConfigFactory:
     def test_runtime_config_writes_opencode_config_path(self, tmp_path):
