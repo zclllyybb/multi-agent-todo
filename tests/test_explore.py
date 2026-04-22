@@ -596,7 +596,7 @@ class TestExplorerAgentRunDefaults:
 
 class TestExplorePrompts:
     def test_personalities_structure(self):
-        assert len(EXPLORER_PERSONALITIES) == 5
+        assert len(EXPLORER_PERSONALITIES) == 8
         for key, p in EXPLORER_PERSONALITIES.items():
             assert "name" in p
             assert "category" in p
@@ -605,9 +605,12 @@ class TestExplorePrompts:
             assert p["model_preference"] == "very_complex"
 
     def test_default_categories(self):
-        assert len(DEFAULT_EXPLORE_CATEGORIES) == 5
+        assert len(DEFAULT_EXPLORE_CATEGORIES) == 8
+        assert "logic_correctness" in DEFAULT_EXPLORE_CATEGORIES
         assert "performance" in DEFAULT_EXPLORE_CATEGORIES
+        assert "memory_handling" in DEFAULT_EXPLORE_CATEGORIES
         assert "concurrency" in DEFAULT_EXPLORE_CATEGORIES
+        assert "architecture_rationality" in DEFAULT_EXPLORE_CATEGORIES
 
     def test_explorer_prompt_contains_key_info(self):
         prompt = explorer_prompt(
@@ -624,6 +627,19 @@ class TestExplorePrompts:
         assert "performance" in prompt
         assert "bottlenecks, copies" in prompt
         assert "Execution engine" in prompt
+
+    def test_explorer_prompt_supports_logic_correctness_focus(self):
+        prompt = explorer_prompt(
+            module_name="Planner",
+            module_path="fe/src/planner",
+            module_description="Query planning logic",
+            category="logic_correctness",
+            personality_name="Logic Correctness Investigator",
+            personality_focus="algorithm invariants and edge cases",
+            repo_path="/repo",
+        )
+        assert "logic_correctness" in prompt
+        assert "algorithm invariants and edge cases" in prompt
 
     def test_map_init_prompt_contains_key_info(self):
         prompt = map_init_prompt(repo_path="/repo", max_depth=3)
@@ -687,9 +703,6 @@ def _make_orchestrator_config(tmp_path):
                 "    variant: map-variant",
                 "  explorer_model: test-explorer",
                 "  map_model: test-map-model",
-                "  categories:",
-                "    - performance",
-                "    - concurrency",
                 "  auto_task_severity: major",
                 "jira:",
                 "  url: https://jira.example",
@@ -757,7 +770,6 @@ def _make_orchestrator_config(tmp_path):
             "map": {"model": "test-map-model", "variant": "map-variant"},
             "explorer_model": "test-explorer",
             "map_model": "test-map-model",
-            "categories": ["performance", "concurrency"],
             "auto_task_severity": "major",
         },
         "jira": {
@@ -819,7 +831,7 @@ class TestOrchestratorExplore:
 
     def test_get_explore_categories(self, orch):
         cats = orch._get_explore_categories()
-        assert cats == ["performance", "concurrency"]
+        assert cats == DEFAULT_EXPLORE_CATEGORIES
 
     def test_get_explore_categories_default(self, orch):
         del orch.config["explore"]
@@ -848,6 +860,17 @@ class TestOrchestratorExplore:
         assert key == "perf_hunter"
         key = orch._pick_personality_for_category("concurrency")
         assert key == "concurrency_auditor"
+
+    def test_pick_personality_for_new_categories(self, orch):
+        assert orch._pick_personality_for_category("logic_correctness") == (
+            "logic_correctness_investigator"
+        )
+        assert orch._pick_personality_for_category("memory_handling") == (
+            "memory_handling_auditor"
+        )
+        assert orch._pick_personality_for_category("architecture_rationality") == (
+            "architecture_rationality_critic"
+        )
 
     def test_pick_personality_for_unknown_category(self, orch):
         key = orch._pick_personality_for_category("unknown_category")
@@ -887,8 +910,9 @@ class TestOrchestratorExplore:
         assert exec_mod.depth == 1
 
         # Verify category_status initialized
+        expected_categories = set(orch._get_explore_categories())
         for m in modules:
-            assert set(m.category_status.keys()) == {"performance", "concurrency"}
+            assert set(m.category_status.keys()) == expected_categories
             for v in m.category_status.values():
                 assert v == ExploreStatus.TODO.value
 
@@ -1010,7 +1034,9 @@ class TestOrchestratorExplore:
         )
         assert "id" in result
         assert result["name"] == "Test"
-        assert set(result["category_status"].keys()) == {"performance", "concurrency"}
+        assert set(result["category_status"].keys()) == set(
+            orch._get_explore_categories()
+        )
 
     def test_add_explore_module_with_parent(self, orch):
         parent = orch.add_explore_module(name="Parent", path="p")
@@ -1072,9 +1098,9 @@ class TestOrchestratorExplore:
         orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
 
         result = orch.start_exploration()
-        # Only the leaf (child) should be explored, 2 categories
-        assert result["started"] == 2
-        assert len(submitted) == 2
+        expected = len(orch._get_explore_categories())
+        assert result["started"] == expected
+        assert len(submitted) == min(expected, orch._explore_parallel_limit)
 
     def test_start_exploration_with_specific_modules(self, orch):
         self._mark_map_ready(orch)
@@ -1083,7 +1109,7 @@ class TestOrchestratorExplore:
         orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
 
         result = orch.start_exploration(module_ids=[mod["id"]])
-        assert result["started"] == 2  # 2 categories
+        assert result["started"] == len(orch._get_explore_categories())
 
     def test_start_exploration_focus_point_propagated_to_jobs(self, orch):
         self._mark_map_ready(orch)
@@ -1114,7 +1140,7 @@ class TestOrchestratorExplore:
         orch._pool.submit = lambda fn, *a: submitted.append((fn, a))
 
         result = orch.start_exploration(module_ids=[mod.id])
-        assert result["started"] == 2
+        assert result["started"] == len(orch._get_explore_categories())
         assert result["skipped_non_todo"] == 0
 
     def test_start_exploration_allows_replaying_done_category(self, orch):
@@ -1534,27 +1560,28 @@ class TestExplorationFullFlow:
         ):
             start_result = orch.start_exploration()
 
-        # Only leaf modules explored: "Exec Module" and "Frontend" (2 leaves × 2 cats = 4)
-        assert start_result["started"] == 4
+        expected = 2 * len(orch._get_explore_categories())
+        assert start_result["started"] == expected
 
-        # Verify all leaf modules are DONE for both categories
+        # Verify all leaf modules are DONE for all configured categories
         modules = orch.db.get_all_explore_modules()
         leaves = [
             m
             for m in modules
             if m.depth > 0 or not any(c.parent_id == m.id for c in modules)
         ]
+        categories = orch._get_explore_categories()
         for leaf in leaves:
-            for cat in ["performance", "concurrency"]:
+            for cat in categories:
                 assert leaf.category_status[cat] == ExploreStatus.DONE.value
 
         # Verify runs created
         all_runs = orch.db.get_all_explore_runs()
-        assert len(all_runs) == 4
+        assert len(all_runs) == expected
 
-        # Verify tasks created (each run has 1 major finding → 4 tasks)
+        # Verify tasks created (each run has 1 major finding)
         tasks = [t for t in orch.db.get_all_tasks() if t.source == TaskSource.EXPLORE]
-        assert len(tasks) == 4
+        assert len(tasks) == expected
 
     def test_auto_task_severity_threshold(self, orch):
         """Only findings >= configured severity create auto-tasks."""
@@ -1928,6 +1955,64 @@ class TestExploreModuleDetailApi:
             returned["parsed"]["steps"][0]["events"][0]["content"]
             == "Exploring scanner and scheduler"
         )
+
+    def test_api_explore_module_detail_backfills_new_categories_for_existing_module(
+        self, orch
+    ):
+        from web import app as web_app
+
+        legacy = ExploreModule(
+            id="legacy-mod",
+            name="Legacy",
+            path="legacy/path",
+            category_status={"performance": "done"},
+            category_notes={"performance": "already checked"},
+        )
+        orch.db.save_explore_module(legacy)
+
+        original = web_app.orchestrator
+        web_app.set_orchestrator(orch)
+        try:
+            result = asyncio.run(web_app.api_explore_module_detail("legacy-mod"))
+        finally:
+            web_app.set_orchestrator(original)
+
+        module = result["module"]
+        assert module["category_status"]["performance"] == "done"
+        assert module["category_status"]["logic_correctness"] == ExploreStatus.TODO.value
+        assert module["category_status"]["memory_handling"] == ExploreStatus.TODO.value
+        assert (
+            module["category_status"]["architecture_rationality"]
+            == ExploreStatus.TODO.value
+        )
+        assert module["category_notes"]["performance"] == "already checked"
+        assert module["category_notes"]["logic_correctness"] == ""
+
+    def test_existing_module_is_normalized_when_categories_expand(self, orch):
+        legacy = ExploreModule(
+            id="legacy-expand",
+            name="Legacy",
+            path="legacy/path",
+            category_status={"performance": ExploreStatus.DONE.value},
+            category_notes={"performance": "done note"},
+        )
+        orch.db.save_explore_module(legacy)
+
+        module = orch._explore_service().get_explore_module("legacy-expand")
+
+        assert module is not None
+        assert module.category_status["performance"] == ExploreStatus.DONE.value
+        assert module.category_status["logic_correctness"] == ExploreStatus.TODO.value
+        assert module.category_status["memory_handling"] == ExploreStatus.TODO.value
+        assert (
+            module.category_status["architecture_rationality"]
+            == ExploreStatus.TODO.value
+        )
+        reloaded = orch.db.get_explore_module("legacy-expand")
+        assert reloaded is not None
+        assert "logic_correctness" in reloaded.category_status
+        assert "memory_handling" in reloaded.category_status
+        assert "architecture_rationality" in reloaded.category_status
 
 
 class TestModelConfigUpdates:

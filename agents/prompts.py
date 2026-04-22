@@ -511,51 +511,79 @@ Depending on the material type:
 # EXPLORER AGENT  (autonomous code quality exploration)
 # ─────────────────────────────────────────────────────────────────────────────
 
-EXPLORER_PERSONALITIES = {
-    "perf_hunter": {
+EXPLORER_CATEGORY_PROFILES = {
+    "logic_correctness": {
+        "personality_key": "logic_correctness_investigator",
+        "name": "Logic Correctness Investigator",
+        "focus": "algorithm invariants, edge-case handling, state transitions, "
+        "ordering assumptions, silent semantic mismatches, off-by-one logic, "
+        "overflow/underflow risks, stale cache invalidation, incorrect merge or fallback behavior in core flows",
+        "model_preference": "very_complex",
+    },
+    "performance": {
+        "personality_key": "perf_hunter",
         "name": "Performance Hunter",
-        "category": "performance",
         "focus": "performance bottlenecks, unnecessary copies, O(n²) algorithms, "
         "hot path inefficiencies, missing caching opportunities",
         "model_preference": "very_complex",
     },
-    "concurrency_auditor": {
+    "memory_handling": {
+        "personality_key": "memory_handling_auditor",
+        "name": "Memory Handling Auditor",
+        "focus": "memory leaks, ownership/lifetime mistakes, repeated allocations on "
+        "hot paths, allocator churn, unbounded buffer growth, poor reuse of arenas or "
+        "buffers, unnecessary retention of large objects, refcount or cleanup mistakes",
+        "model_preference": "very_complex",
+    },
+    "concurrency": {
+        "personality_key": "concurrency_auditor",
         "name": "Concurrency Auditor",
-        "category": "concurrency",
         "focus": "race conditions, deadlocks, missing locks, unsafe shared state, "
         "lock ordering violations, atomic operation misuse",
         "model_preference": "very_complex",
     },
-    "maintainability_critic": {
-        "name": "Maintainability Critic",
-        "category": "maintainability",
-        "focus": "code smells, overly complex functions (>50 lines), god classes, "
-        "poor naming, missing abstractions, copy-paste duplication",
-        "model_preference": "very_complex",
-    },
-    "error_handling_inspector": {
+    "error_handling": {
+        "personality_key": "error_handling_inspector",
         "name": "Error Handling Inspector",
-        "category": "error_handling",
         "focus": "unchecked return values, swallowed exceptions, missing error paths, "
         "resource leaks on error, inconsistent error reporting",
         "model_preference": "very_complex",
     },
-    "security_scout": {
+    "architecture_rationality": {
+        "personality_key": "architecture_rationality_critic",
+        "name": "Architecture Rationality Critic",
+        "focus": "unclear module boundaries, confused ownership between modules, chatty "
+        "cross-module interactions, circular dependencies, duplicated responsibility, "
+        "state flow that is hard to reason about, and opportunities to simplify design for performance and maintainability",
+        "model_preference": "very_complex",
+    },
+    "maintainability": {
+        "personality_key": "maintainability_critic",
+        "name": "Maintainability Critic",
+        "focus": "code smells, overly complex functions (>50 lines), god classes, "
+        "poor naming, missing abstractions, copy-paste duplication",
+        "model_preference": "very_complex",
+    },
+    "security": {
+        "personality_key": "security_scout",
         "name": "Security Scout",
-        "category": "security",
         "focus": "injection vulnerabilities, unsafe deserialization, hardcoded secrets, "
         "path traversal, buffer overflows, privilege escalation",
         "model_preference": "very_complex",
     },
 }
 
-DEFAULT_EXPLORE_CATEGORIES = [
-    "performance",
-    "concurrency",
-    "error_handling",
-    "maintainability",
-    "security",
-]
+EXPLORER_PERSONALITIES = {
+    profile["personality_key"]: {
+        "name": profile["name"],
+        "category": category,
+        "focus": profile["focus"],
+        "model_preference": profile["model_preference"],
+    }
+    for category, profile in EXPLORER_CATEGORY_PROFILES.items()
+}
+
+DEFAULT_EXPLORE_CATEGORIES = list(EXPLORER_CATEGORY_PROFILES.keys())
 
 
 def explorer_prompt(

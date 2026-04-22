@@ -111,7 +111,6 @@ DEFAULT_CONFIG = {
     },
 }
 
-
 def load_config(config_path: Optional[str] = None) -> dict:
     """Load configuration from YAML file, falling back to defaults."""
     config = copy.deepcopy(DEFAULT_CONFIG)
@@ -141,6 +140,7 @@ def _deep_merge(base: dict, override: dict):
 def _normalize_model_config(config: dict):
     opencode = config.setdefault("opencode", {})
     explore = config.setdefault("explore", {})
+    explore.pop("categories", None)
 
     planner_spec = parse_model_spec(opencode.get("planner", opencode.get("planner_model", "")))
     opencode["planner"] = model_spec_to_dict(planner_spec)

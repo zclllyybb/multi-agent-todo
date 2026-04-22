@@ -46,9 +46,41 @@ class ExploreService:
     def get_explore_categories(self) -> List[str]:
         from agents.prompts import DEFAULT_EXPLORE_CATEGORIES
 
-        return self.config.get("explore", {}).get(
-            "categories", DEFAULT_EXPLORE_CATEGORIES
+        return list(DEFAULT_EXPLORE_CATEGORIES)
+
+    def normalize_module_categories(
+        self, module: ExploreModule, persist: bool = False
+    ) -> ExploreModule:
+        configured = self.get_explore_categories()
+        normalized_status = {
+            cat: module.category_status.get(cat, ExploreStatus.TODO.value)
+            for cat in configured
+        }
+        normalized_notes = {
+            cat: module.category_notes.get(cat, "")
+            for cat in configured
+        }
+        changed = (
+            normalized_status != module.category_status
+            or normalized_notes != module.category_notes
         )
+        if changed:
+            module.category_status = normalized_status
+            module.category_notes = normalized_notes
+            module.updated_at = time.time()
+            if persist:
+                self.db.save_explore_module(module)
+        return module
+
+    def get_explore_module(self, module_id: str, persist: bool = True) -> Optional[ExploreModule]:
+        module = self.db.get_explore_module(module_id)
+        if not module:
+            return None
+        return self.normalize_module_categories(module, persist=persist)
+
+    def get_all_explore_modules(self, persist: bool = True) -> List[ExploreModule]:
+        modules = self.db.get_all_explore_modules()
+        return [self.normalize_module_categories(m, persist=persist) for m in modules]
 
     def get_explorer_model(self) -> str:
         return self.get_explorer_spec().model
@@ -112,7 +144,7 @@ class ExploreService:
         default_state = self.orchestrator._default_explore_map_state()
         if persisted:
             default_state.update(persisted)
-        elif self.db.get_all_explore_modules():
+        elif self.get_all_explore_modules(persist=False):
             default_state["status"] = "done"
             default_state["finished_at"] = time.time()
 
@@ -195,7 +227,7 @@ class ExploreService:
                     self.db.delete_explore_queue_job(job_id)
                 continue
 
-            module = self.db.get_explore_module(module_id)
+            module = self.get_explore_module(module_id)
             if not module or category not in module.category_status:
                 job_id = str(job.get("job_id", ""))
                 if job_id:
@@ -250,7 +282,7 @@ class ExploreService:
                     job["queued_at"] = now
                 job["started_at"] = 0.0
 
-                module = self.db.get_explore_module(job["module_id"])
+                module = self.get_explore_module(job["module_id"])
                 if (
                     module
                     and module.category_status.get(job["category"])
@@ -275,7 +307,7 @@ class ExploreService:
             init_status = self.orchestrator._explore_map_state.get("status", "idle")
         if init_status == "in_progress":
             return False
-        return bool(self.db.get_all_explore_modules())
+        return bool(self.get_all_explore_modules(persist=False))
 
     def get_explore_init_state(self) -> dict:
         with self.orchestrator._lock:
@@ -306,7 +338,7 @@ class ExploreService:
         module_ids: Optional[List[str]],
         leaf_only_when_empty: bool = True,
     ) -> List[ExploreModule]:
-        all_modules = self.db.get_all_explore_modules()
+        all_modules = self.get_all_explore_modules()
         if module_ids:
             selected = set(module_ids)
             return [m for m in all_modules if m.id in selected]
@@ -334,7 +366,7 @@ class ExploreService:
     def set_module_category_status(
         self, module_id: str, category: str, status: str, note: Optional[str] = None
     ):
-        module = self.db.get_explore_module(module_id)
+        module = self.get_explore_module(module_id)
         if not module:
             return
         module.category_status[category] = status
@@ -474,7 +506,7 @@ class ExploreService:
             ]
 
         def _decorate(job: dict) -> dict:
-            module = self.db.get_explore_module(job["module_id"])
+            module = self.get_explore_module(job["module_id"])
             status = "unknown"
             if module:
                 status = module.category_status.get(job["category"], "unknown")
@@ -571,7 +603,7 @@ class ExploreService:
             if key in self.orchestrator._explore_running:
                 continue
             module_id, category = key.split(":", 1)
-            module = module_map.get(module_id) or self.db.get_explore_module(module_id)
+            module = module_map.get(module_id) or self.get_explore_module(module_id)
             if not module:
                 continue
             if module.category_status.get(category) == ExploreStatus.IN_PROGRESS.value:
@@ -1006,7 +1038,7 @@ class ExploreService:
             return
 
         try:
-            module = self.db.get_explore_module(module_id)
+            module = self.get_explore_module(module_id)
             assert module is not None, f"module {module_id} vanished from DB"
             personality = EXPLORER_PERSONALITIES[personality_key]
             repo_path = self.config["repo"]["path"]
@@ -1080,7 +1112,7 @@ class ExploreService:
                 self.orchestrator._persist_explore_job(job)
 
             if run.exit_code == -2:
-                module = self.db.get_explore_module(module_id)
+                module = self.get_explore_module(module_id)
                 if module:
                     module.category_status[category] = ExploreStatus.TODO.value
                     module.category_notes[category] = ""
@@ -1142,7 +1174,7 @@ class ExploreService:
             self.db.save_explore_run(explore_run)
 
             if self.orchestrator._is_explore_cancel_requested(key):
-                module = self.db.get_explore_module(module_id)
+                module = self.get_explore_module(module_id)
                 if module:
                     module.category_status[category] = ExploreStatus.TODO.value
                     module.category_notes[category] = ""
@@ -1156,7 +1188,7 @@ class ExploreService:
                 )
                 return
 
-            module = self.db.get_explore_module(module_id)
+            module = self.get_explore_module(module_id)
             if module is None:
                 log.warning(
                     "Explore result could not be applied because module vanished: module=%s category=%s",
@@ -1221,7 +1253,7 @@ class ExploreService:
                 e,
                 traceback.format_exc(),
             )
-            module = self.db.get_explore_module(module_id)
+            module = self.get_explore_module(module_id)
             if module:
                 module.category_status[category] = ExploreStatus.TODO.value
                 module.updated_at = time.time()
@@ -1266,7 +1298,7 @@ class ExploreService:
 
     def update_explore_module(self, module_id: str, updates: dict) -> dict:
         """Update an explore module's editable fields."""
-        module = self.db.get_explore_module(module_id)
+        module = self.get_explore_module(module_id)
         if not module:
             return {"error": "Module not found"}
         if "name" in updates:
@@ -1289,7 +1321,7 @@ class ExploreService:
         """Manually add a module to the exploration map."""
         depth = 0
         if parent_id:
-            parent = self.db.get_explore_module(parent_id)
+            parent = self.get_explore_module(parent_id)
             if not parent:
                 return {"error": "Parent module not found"}
             depth = parent.depth + 1
@@ -1309,7 +1341,7 @@ class ExploreService:
 
     def delete_explore_module(self, module_id: str) -> dict:
         """Delete a module and all its descendants from the map."""
-        module = self.db.get_explore_module(module_id)
+        module = self.get_explore_module(module_id)
         if not module:
             return {"error": "Module not found"}
         children = self.db.get_child_modules(module_id)
@@ -1327,7 +1359,7 @@ class ExploreService:
             return {"error": "Invalid finding index"}
 
         finding = explore_run.findings[finding_index]
-        module = self.db.get_explore_module(explore_run.module_id)
+        module = self.get_explore_module(explore_run.module_id)
         module_name = module.name if module else "unknown"
         module_path = module.path if module else ""
 

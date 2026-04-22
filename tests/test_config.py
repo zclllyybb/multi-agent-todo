@@ -92,6 +92,27 @@ class TestLoadConfig:
         assert config["web"]["port"] == 1234
         assert config["web"]["host"] == "0.0.0.0"  # default preserved
 
+    def test_load_config_discards_explore_categories_override(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            yaml.dump(
+                {
+                    "explore": {
+                        "categories": [
+                            "performance",
+                            "concurrency",
+                            "error_handling",
+                            "maintainability",
+                        ]
+                    }
+                }
+            )
+        )
+
+        config = load_config(str(cfg_file))
+
+        assert "categories" not in config["explore"]
+
     def test_jira_defaults_and_partial_override(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(

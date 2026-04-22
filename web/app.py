@@ -616,7 +616,7 @@ async def api_explore_modules():
     """Return all explore modules (flat list; frontend builds tree from parent_id)."""
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
-    modules = orchestrator.db.get_all_explore_modules()
+    modules = orchestrator._explore_service().get_all_explore_modules()
     return [m.to_dict() for m in modules]
 
 
@@ -625,7 +625,7 @@ async def api_explore_module_detail(module_id: str):
     """Return a single module with its exploration runs."""
     if not orchestrator:
         return JSONResponse({"error": "Not initialized"}, status_code=503)
-    module = orchestrator.db.get_explore_module(module_id)
+    module = orchestrator._explore_service().get_explore_module(module_id)
     if not module:
         return JSONResponse({"error": "Module not found"}, status_code=404)
     runs = orchestrator.db.get_explore_runs_for_module(module_id)
@@ -3310,9 +3310,12 @@ let _exploreStatus = {
   },
 };
 const _catColors = {
+  logic_correctness: '#ff7b72',
   performance: '#f85149',
+  memory_handling: '#ffa657',
   concurrency: '#d29922',
   error_handling: '#f0883e',
+  architecture_rationality: '#79c0ff',
   maintainability: '#58a6ff',
   security: '#bc8cff',
 };

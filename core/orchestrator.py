@@ -234,7 +234,7 @@ class Orchestrator:
     def _recover_stuck_exploration(self, active_keys: Optional[Set[str]] = None):
         """Reset stale ExploreModule cells left in IN_PROGRESS by previous daemon exit."""
         active_keys = active_keys or set()
-        modules = self.db.get_all_explore_modules()
+        modules = self._explore_service().get_all_explore_modules()
         recovered = 0
         for m in modules:
             changed = False
