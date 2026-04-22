@@ -15,6 +15,7 @@ from core.models import (
     ExploreModule,
     ExploreRun,
 )
+from core.task_artifacts import write_task_note
 
 
 class Database:
@@ -90,6 +91,7 @@ class Database:
             (task.id, json.dumps(task.to_dict())),
         )
         self._conn.commit()
+        write_task_note(task, self._db_path)
 
     def get_task(self, task_id: str) -> Optional[Task]:
         row = self._conn.execute(

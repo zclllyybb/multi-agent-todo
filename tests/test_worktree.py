@@ -658,21 +658,25 @@ class TestOpenCodeClientConstruction:
         planner_cls.assert_called_once_with(
             model="planner",
             variant="planner-v",
+            agent="",
             client=client_cls.return_value,
         )
         coder_cls.assert_any_call(
             model="simple-coder",
             variant="simple-v",
+            agent="",
             client=client_cls.return_value,
         )
         coder_cls.assert_any_call(
             model="coder",
             variant="coder-v",
+            agent="",
             client=client_cls.return_value,
         )
         reviewer_cls.assert_called_once_with(
             model="reviewer-a",
             variant="reviewer-v",
+            agent="",
             client=client_cls.return_value,
         )
 

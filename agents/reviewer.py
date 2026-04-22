@@ -62,36 +62,7 @@ class ReviewerAgent(BaseAgent):
             prior_rejections=prior_rejections,
             coder_response=coder_response,
         )
-        run = self.run(prompt, worktree_path, task_id=task.id)
-        review_text = self.get_text(run)
-
-        verdict = self._evaluate_review(review_text)
-        if verdict is None:
-            # Inconclusive output — auto-retry the reviewer once
-            for retry in range(_MAX_REVIEWER_RETRIES):
-                log.warning(
-                    "Reviewer(%s) output inconclusive for task [%s], "
-                    "auto-retrying (%d/%d)",
-                    self.model,
-                    task.id,
-                    retry + 1,
-                    _MAX_REVIEWER_RETRIES,
-                )
-                run = self.run(prompt, worktree_path, task_id=task.id)
-                review_text = self.get_text(run)
-                verdict = self._evaluate_review(review_text)
-                if verdict is not None:
-                    break
-            if verdict is None:
-                log.error(
-                    "Reviewer(%s) still inconclusive after %d retries for "
-                    "task [%s], treating as REQUEST_CHANGES",
-                    self.model,
-                    _MAX_REVIEWER_RETRIES,
-                    task.id,
-                )
-                verdict = False
-        return run, verdict, review_text
+        return self._run_review_with_retry(prompt, worktree_path, task.id, mode="changes")
 
     def review_patch(
         self,
@@ -113,34 +84,69 @@ class ReviewerAgent(BaseAgent):
             revision_context=revision_context,
             prior_rejections=prior_rejections,
         )
-        run = self.run(prompt, worktree_path, task_id=task.id)
-        review_text = self.get_text(run)
-        verdict = self._evaluate_review(review_text)
-        if verdict is None:
-            for retry in range(_MAX_REVIEWER_RETRIES):
-                log.warning(
-                    "Reviewer(%s) patch output inconclusive for task [%s], "
-                    "auto-retrying (%d/%d)",
-                    self.model,
-                    task.id,
-                    retry + 1,
-                    _MAX_REVIEWER_RETRIES,
-                )
-                run = self.run(prompt, worktree_path, task_id=task.id)
-                review_text = self.get_text(run)
-                verdict = self._evaluate_review(review_text)
-                if verdict is not None:
-                    break
-            if verdict is None:
+        return self._run_review_with_retry(prompt, worktree_path, task.id, mode="patch")
+
+    def _run_review_with_retry(
+        self,
+        prompt: str,
+        worktree_path: str,
+        task_id: str,
+        mode: str,
+    ) -> Tuple[AgentRun, bool, str]:
+        run = None
+        review_text = ""
+        verdict = None
+        for attempt in range(_MAX_REVIEWER_RETRIES + 1):
+            run = self.run(
+                prompt,
+                worktree_path,
+                task_id=task_id,
+                max_continues=8,
+            )
+            review_text = self.get_text(run)
+            if not self.client.is_output_complete(run.output):
+                if attempt < _MAX_REVIEWER_RETRIES:
+                    log.warning(
+                        "Reviewer(%s) %s output incomplete for task [%s], auto-retrying (%d/%d)",
+                        self.model,
+                        mode,
+                        task_id,
+                        attempt + 1,
+                        _MAX_REVIEWER_RETRIES,
+                    )
+                    continue
                 log.error(
-                    "Reviewer(%s) patch still inconclusive after %d retries "
-                    "for task [%s], treating as REQUEST_CHANGES",
+                    "Reviewer(%s) %s output still incomplete after %d retries for task [%s], treating as REQUEST_CHANGES",
                     self.model,
+                    mode,
                     _MAX_REVIEWER_RETRIES,
-                    task.id,
+                    task_id,
                 )
-                verdict = False
-        return run, verdict, review_text
+                return run, False, review_text
+
+            verdict = self._evaluate_review(review_text)
+            if verdict is not None:
+                return run, verdict, review_text
+
+            if attempt < _MAX_REVIEWER_RETRIES:
+                log.warning(
+                    "Reviewer(%s) %s output inconclusive for task [%s], auto-retrying (%d/%d)",
+                    self.model,
+                    mode,
+                    task_id,
+                    attempt + 1,
+                    _MAX_REVIEWER_RETRIES,
+                )
+                continue
+
+        log.error(
+            "Reviewer(%s) %s still inconclusive after %d retries for task [%s], treating as REQUEST_CHANGES",
+            self.model,
+            mode,
+            _MAX_REVIEWER_RETRIES,
+            task_id,
+        )
+        return run, False, review_text
 
     def _evaluate_review(self, review_text: str) -> Optional[bool]:
         """Parse review output to determine if changes are approved.

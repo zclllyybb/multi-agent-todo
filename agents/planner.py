@@ -152,7 +152,7 @@ class PlannerAgent(BaseAgent):
         log.debug("Analyzer prompt length: %d chars (todo=%s)", len(prompt), item.id)
 
         t0 = _time.time()
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, max_continues=8)
         elapsed = _time.time() - t0
         text = self.get_text(run)
 
@@ -227,7 +227,6 @@ class PlannerAgent(BaseAgent):
             repo_path,
             task_id=task_id,
             max_continues=8,
-            require_stop=True,
         )
         text = self.get_text(run)
 
@@ -281,7 +280,6 @@ class PlannerAgent(BaseAgent):
             repo_path,
             task_id=task.id,
             max_continues=8,
-            require_stop=True,
         )
         plan_text = self.get_text(run)
         return run, plan_text
@@ -297,7 +295,7 @@ class PlannerAgent(BaseAgent):
             repo_path=repo_path,
         )
 
-        run = self.run(prompt, repo_path, max_continues=8, require_stop=True)
+        run = self.run(prompt, repo_path, max_continues=8)
         text = self.get_text(run)
 
         match = re.search(r"\[.*\]", text, re.DOTALL)

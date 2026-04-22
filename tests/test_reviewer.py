@@ -244,6 +244,7 @@ class TestReviewChangesAutoRetry:
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nOK")
         mock_client.run.side_effect = [inconclusive_run, approve_run]
         mock_client.extract_text_response.side_effect = ["Planning...", "APPROVE\nOK"]
+        mock_client.is_output_complete.side_effect = [True, True]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
         run, passed, text = reviewer.review_changes(self._make_task(), "/repo")
@@ -260,6 +261,7 @@ class TestReviewChangesAutoRetry:
         )
         mock_client.run.return_value = inconclusive_run
         mock_client.extract_text_response.return_value = "Thinking..."
+        mock_client.is_output_complete.return_value = True
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
         run, passed, text = reviewer.review_changes(self._make_task(), "/repo")
@@ -276,12 +278,48 @@ class TestReviewChangesAutoRetry:
         )
         mock_client.run.return_value = run_obj
         mock_client.extract_text_response.return_value = "REQUEST_CHANGES\nBug"
+        mock_client.is_output_complete.return_value = True
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
         _, passed, _ = reviewer.review_changes(self._make_task(), "/repo")
 
         assert passed is False
         assert mock_client.run.call_count == 1  # no retry
+
+    def test_incomplete_output_retries_before_negative_heuristic(self):
+        mock_client = MagicMock()
+        incomplete_run = AgentRun(
+            agent_type="reviewer", model="m", output="I found a bug and missing coverage"
+        )
+        approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nOK")
+        mock_client.run.side_effect = [incomplete_run, approve_run]
+        mock_client.extract_text_response.side_effect = [
+            "I found a bug and missing coverage",
+            "APPROVE\nOK",
+        ]
+        mock_client.is_output_complete.side_effect = [False, True]
+
+        reviewer = ReviewerAgent(model="m", client=mock_client)
+        _, passed, text = reviewer.review_changes(self._make_task(), "/repo")
+
+        assert passed is True
+        assert text == "APPROVE\nOK"
+        assert mock_client.run.call_count == 2
+
+    def test_incomplete_output_exhausted_rejects_without_heuristic_shortcut(self):
+        mock_client = MagicMock()
+        incomplete_run = AgentRun(
+            agent_type="reviewer", model="m", output="There is a bug here"
+        )
+        mock_client.run.return_value = incomplete_run
+        mock_client.extract_text_response.return_value = "There is a bug here"
+        mock_client.is_output_complete.return_value = False
+
+        reviewer = ReviewerAgent(model="m", client=mock_client)
+        _, passed, _ = reviewer.review_changes(self._make_task(), "/repo")
+
+        assert passed is False
+        assert mock_client.run.call_count == 1 + _MAX_REVIEWER_RETRIES
 
 
 class TestReviewPatchAutoRetry:
@@ -306,6 +344,7 @@ class TestReviewPatchAutoRetry:
             "Let me check...",
             "APPROVE\nLGTM",
         ]
+        mock_client.is_output_complete.side_effect = [True, True]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
         _, passed, _ = reviewer.review_patch(self._make_task(), "/repo")
@@ -317,11 +356,31 @@ class TestReviewPatchAutoRetry:
         run_obj = AgentRun(agent_type="reviewer", model="m", output="Hmm...")
         mock_client.run.return_value = run_obj
         mock_client.extract_text_response.return_value = "Hmm..."
+        mock_client.is_output_complete.return_value = True
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
         _, passed, _ = reviewer.review_patch(self._make_task(), "/repo")
         assert passed is False
         assert mock_client.run.call_count == 1 + _MAX_REVIEWER_RETRIES
+
+    def test_patch_incomplete_output_retries_before_verdict(self):
+        mock_client = MagicMock()
+        incomplete_run = AgentRun(
+            agent_type="reviewer", model="m", output="REQUEST_CHANGES\nmissing test"
+        )
+        approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nLGTM")
+        mock_client.run.side_effect = [incomplete_run, approve_run]
+        mock_client.extract_text_response.side_effect = [
+            "REQUEST_CHANGES\nmissing test",
+            "APPROVE\nLGTM",
+        ]
+        mock_client.is_output_complete.side_effect = [False, True]
+
+        reviewer = ReviewerAgent(model="m", client=mock_client)
+        _, passed, _ = reviewer.review_patch(self._make_task(), "/repo")
+
+        assert passed is True
+        assert mock_client.run.call_count == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────

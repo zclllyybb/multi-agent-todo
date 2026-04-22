@@ -242,7 +242,6 @@ class OpenCodeClient:
         session_id: str = "",
         max_continues: int = 1,
         env: Optional[dict[str, str]] = None,
-        require_stop: bool = False,
         variant: str = "",
         agent: str = "",
     ) -> AgentRun:
@@ -296,17 +295,14 @@ class OpenCodeClient:
         # send "Continue" to resume the session.
         continue_count = 0
         while sid and continue_count < max_continues:
-            needs_continue = exit_code != 0 or (
-                require_stop and not self.is_output_complete(output)
-            )
+            needs_continue = exit_code != 0 or not self.is_output_complete(output)
             if not needs_continue:
                 break
             continue_count += 1
             log.warning(
-                "opencode [%s] needs continue (exit=%d require_stop=%s), session %s (%d/%d)",
+                "opencode [%s] needs continue (exit=%d), session %s (%d/%d)",
                 agent_type,
                 exit_code,
-                require_stop,
                 sid,
                 continue_count,
                 max_continues,
@@ -364,7 +360,6 @@ class OpenCodeClient:
         session_id: str = "",
         max_continues: int = 1,
         env: Optional[dict[str, str]] = None,
-        require_stop: bool = False,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
         variant: str = "",
@@ -425,9 +420,7 @@ class OpenCodeClient:
                 exit_code = -2
                 break
 
-            needs_continue = exit_code != 0 or (
-                require_stop and not self.is_output_complete(output)
-            )
+            needs_continue = exit_code != 0 or not self.is_output_complete(output)
             if not needs_continue:
                 break
 
@@ -436,10 +429,9 @@ class OpenCodeClient:
 
             continue_count += 1
             log.warning(
-                "opencode(stream) [%s] needs continue (exit=%d require_stop=%s), session %s (%d/%d)",
+                "opencode(stream) [%s] needs continue (exit=%d), session %s (%d/%d)",
                 agent_type,
                 exit_code,
-                require_stop,
                 sid,
                 continue_count,
                 max_continues,

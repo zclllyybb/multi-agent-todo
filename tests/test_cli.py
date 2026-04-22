@@ -76,6 +76,35 @@ def test_cmd_add_can_force_no_split(capsys):
     assert "Submitted task: [task123] Fix bug" in out
 
 
+def test_cmd_start_initializes_skill_before_starting_daemon(capsys):
+    args = SimpleNamespace(config=None, foreground=False)
+
+    with (
+        patch("cli.ensure_skill_initialized", return_value=["/tmp/SKILL.md", "/tmp/ask.sh"]),
+        patch("cli.daemon_mod.start") as start_mock,
+    ):
+        cli.cmd_start(args)
+
+    start_mock.assert_called_once_with(config_path=None, foreground=False)
+    out = capsys.readouterr().out
+    assert "Initialized Claude skill asset: /tmp/SKILL.md" in out
+    assert "Initialized Claude skill asset: /tmp/ask.sh" in out
+
+
+def test_cmd_start_reports_existing_skill_when_already_present(capsys):
+    args = SimpleNamespace(config=None, foreground=True)
+
+    with (
+        patch("cli.ensure_skill_initialized", return_value=[]),
+        patch("cli.daemon_mod.start") as start_mock,
+    ):
+        cli.cmd_start(args)
+
+    start_mock.assert_called_once_with(config_path=None, foreground=True)
+    out = capsys.readouterr().out
+    assert "Claude skill already initialized: opencode-session-ask" in out
+
+
 def test_cmd_dispatch_uses_daemon_api_and_reports_queue(capsys):
     args = SimpleNamespace(config=None, task_id="task123")
     config = {"web": {"host": "127.0.0.1", "port": 8778}}

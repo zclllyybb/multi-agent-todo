@@ -413,9 +413,7 @@ class TestAgentCli:
         cmd = exec_mock.call_args.kwargs["cmd"]
         assert "--variant" not in cmd
 
-    def test_run_streaming_continues_when_require_stop_and_output_incomplete(
-        self, client
-    ):
+    def test_run_streaming_continues_when_output_incomplete(self, client):
         first_output = _build_output((["partial"], [], "tool-calls"))
         second_output = _build_output((["final"], [], "stop"))
 
@@ -432,7 +430,6 @@ class TestAgentCli:
                 work_dir="/repo",
                 model="test-model",
                 agent_type="explorer",
-                require_stop=True,
                 max_continues=2,
             )
 
@@ -584,7 +581,6 @@ class TestOpenCodeConfigEnv:
             run = client.run(
                 message="hello",
                 work_dir="/repo",
-                require_stop=True,
                 max_continues=2,
             )
 
@@ -605,7 +601,6 @@ class TestOpenCodeConfigEnv:
             run = client.run_streaming(
                 message="hello",
                 work_dir="/repo",
-                require_stop=True,
                 max_continues=1,
             )
 

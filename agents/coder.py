@@ -75,7 +75,6 @@ class CoderAgent(BaseAgent):
             task_id=task.id,
             session_id=session_id,
             max_continues=8,
-            require_stop=True,
         )
         output_text = self.get_text(run)
         return run, output_text
@@ -94,7 +93,6 @@ class CoderAgent(BaseAgent):
             task_id=task.id,
             session_id=session_id,
             max_continues=8,
-            require_stop=True,
         )
         output_text = self.get_text(run)
         return run, output_text
@@ -125,7 +123,6 @@ class CoderAgent(BaseAgent):
             task_id=task.id,
             session_id=session_id,
             max_continues=8,
-            require_stop=True,
         )
         output_text = self.get_text(run)
         return run, output_text

@@ -75,7 +75,7 @@ class ExplorerAgent(BaseAgent):
             focus_point=focus_point,
             prior_note=prior_note,
         )
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, max_continues=8)
         text = self.get_text(run)
         findings, summary = self._parse_output(text)
         return run, findings, summary
@@ -150,7 +150,6 @@ class ExplorerAgent(BaseAgent):
             task_id=task_id,
             session_id=session_id,
             max_continues=8,
-            require_stop=True,
             on_output=on_output,
             should_cancel=should_cancel,
             variant=self.variant,
@@ -205,7 +204,7 @@ class ExplorerAgent(BaseAgent):
         from agents.prompts import map_init_prompt
 
         prompt = map_init_prompt(repo_path=repo_path, max_depth=max_depth)
-        run = self.run(prompt, repo_path)
+        run = self.run(prompt, repo_path, max_continues=8)
         text = self.get_text(run)
         modules = self._parse_map_output(text)
         return run, modules
@@ -233,7 +232,6 @@ class ExplorerAgent(BaseAgent):
             task_id=task_id,
             session_id=session_id,
             max_continues=8,
-            require_stop=True,
             on_output=on_output,
             should_cancel=should_cancel,
             variant=self.variant,

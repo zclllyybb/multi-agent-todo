@@ -832,6 +832,7 @@ class TestOrchestratorExplore:
         explorer_cls.assert_called_once_with(
             model="test-map-model",
             variant="map-variant",
+            agent="",
             client=orch.client,
         )
         assert "modules_created" in result
@@ -883,6 +884,7 @@ class TestOrchestratorExplore:
         explorer_cls.assert_called_once_with(
             model="test-explorer",
             variant="explorer-variant",
+            agent="",
             client=orch.client,
         )
 
@@ -916,6 +918,7 @@ class TestOrchestratorExplore:
         explorer_cls.assert_called_once_with(
             model="test-explorer",
             variant="explorer-variant",
+            agent="",
             client=orch.client,
         )
 

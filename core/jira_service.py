@@ -163,7 +163,6 @@ class JiraService:
             task_id=task.id,
             max_continues=8,
             env=env,
-            require_stop=True,
         )
         text = self.client.extract_last_text_block_or_raw(run.output).strip()
         log.info(

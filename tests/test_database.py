@@ -1,5 +1,7 @@
 """Tests for core/database.py: CRUD operations with a temporary SQLite database."""
 
+from pathlib import Path
+
 import pytest
 
 from core.database import Database
@@ -86,6 +88,25 @@ class TestTaskCRUD:
         assert len(loaded.comments) == 1
         assert loaded.comments[0]["username"] == "alice"
         assert loaded.comments[0]["content"] == "looks good"
+
+    def test_save_task_writes_task_markdown_note(self, tmp_db, make_task):
+        t = make_task(title="Track me", description="remember sessions")
+        t.session_ids = {
+            "planner": ["ses_plan_1"],
+            "coder": ["ses_code_1", "ses_code_2"],
+            "reviewer": ["ses_review_1"],
+        }
+
+        tmp_db.save_task(t)
+
+        note_path = Path(tmp_db._db_path).parent / "task-notes" / f"{t.id}.md"
+        assert note_path.exists()
+        text = note_path.read_text(encoding="utf-8")
+        assert f"# Task {t.id}" in text
+        assert "- Title: Track me" in text
+        assert "`ses_plan_1`" in text
+        assert "`ses_code_2`" in text
+        assert "`ses_review_1`" in text
 
 
 class TestTodoItemCRUD:

@@ -13,11 +13,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.config import load_config
 from core.orchestrator import Orchestrator
 from core.database import Database
+from core.task_artifacts import ensure_skill_initialized
 import daemon as daemon_mod
 
 
 def cmd_start(args):
     """Start the daemon (orchestrator + web dashboard)."""
+    created = ensure_skill_initialized()
+    if created:
+        for path in created:
+            print(f"Initialized Claude skill asset: {path}")
+    else:
+        print("Claude skill already initialized: opencode-session-ask")
     daemon_mod.start(config_path=args.config, foreground=args.foreground)
 
 
