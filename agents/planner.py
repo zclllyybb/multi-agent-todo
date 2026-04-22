@@ -152,9 +152,9 @@ class PlannerAgent(BaseAgent):
         log.debug("Analyzer prompt length: %d chars (todo=%s)", len(prompt), item.id)
 
         t0 = _time.time()
-        run = self.run(prompt, repo_path, max_continues=8)
+        run = self.run(prompt, repo_path)
         elapsed = _time.time() - t0
-        text = self.get_text(run)
+        text = self.get_final_text(run)
 
         log.debug(
             "Analyzer raw output for todo [%s] (%.1fs, exit=%d):\n%s",
@@ -226,9 +226,8 @@ class PlannerAgent(BaseAgent):
             prompt,
             repo_path,
             task_id=task_id,
-            max_continues=8,
         )
-        text = self.get_text(run)
+        text = self.get_final_text(run)
 
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
@@ -279,9 +278,8 @@ class PlannerAgent(BaseAgent):
             prompt,
             repo_path,
             task_id=task.id,
-            max_continues=8,
         )
-        plan_text = self.get_text(run)
+        plan_text = self.get_final_text(run)
         return run, plan_text
 
     def decompose_complex_task(
@@ -295,8 +293,8 @@ class PlannerAgent(BaseAgent):
             repo_path=repo_path,
         )
 
-        run = self.run(prompt, repo_path, max_continues=8)
-        text = self.get_text(run)
+        run = self.run(prompt, repo_path)
+        text = self.get_final_text(run)
 
         match = re.search(r"\[.*\]", text, re.DOTALL)
         if not match:

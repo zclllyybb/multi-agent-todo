@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 from agents.base import BaseAgent
 from agents.prompts import reviewer_review, reviewer_review_patch
-from core.models import AgentRun, Task
+from core.models import AgentRun, ModelOutputError, Task
 from core.opencode_client import OpenCodeClient
 
 log = logging.getLogger(__name__)
@@ -97,13 +97,13 @@ class ReviewerAgent(BaseAgent):
         review_text = ""
         verdict = None
         for attempt in range(_MAX_REVIEWER_RETRIES + 1):
-            run = self.run(
-                prompt,
-                worktree_path,
-                task_id=task_id,
-                max_continues=8,
-            )
-            review_text = self.get_text(run)
+            run = self.run(prompt, worktree_path, task_id=task_id)
+            if not self.client.has_readable_steps(run.output):
+                raise ModelOutputError(
+                    f"Reviewer({self.model}) {mode} output is not a readable opencode "
+                    f"transcript for task [{task_id}] (session={run.session_id or '-'})"
+                )
+            review_text = self.get_final_text(run)
             if not self.client.is_output_complete(run.output):
                 if attempt < _MAX_REVIEWER_RETRIES:
                     log.warning(

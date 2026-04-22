@@ -161,7 +161,7 @@ class JiraService:
             agent=simple_agent.agent,
             agent_type="jira_assign",
             task_id=task.id,
-            max_continues=8,
+            max_continues=simple_agent.default_max_continues,
             env=env,
         )
         text = self.client.extract_last_text_block_or_raw(run.output).strip()

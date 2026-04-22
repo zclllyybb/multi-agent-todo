@@ -24,6 +24,8 @@ def _ts_fmt(ts_ms: int) -> str:
 
 
 class OpenCodeClient:
+    DEFAULT_MAX_CONTINUES = 8
+
     def __init__(self, timeout: int = 600, config_path: str = ""):
         self.timeout = timeout
         self.config_path = self._resolve_config_path(config_path)
@@ -240,7 +242,7 @@ class OpenCodeClient:
         agent_type: str = "coder",
         task_id: str = "",
         session_id: str = "",
-        max_continues: int = 1,
+        max_continues: int = DEFAULT_MAX_CONTINUES,
         env: Optional[dict[str, str]] = None,
         variant: str = "",
         agent: str = "",
@@ -358,7 +360,7 @@ class OpenCodeClient:
         agent_type: str = "coder",
         task_id: str = "",
         session_id: str = "",
-        max_continues: int = 1,
+        max_continues: int = DEFAULT_MAX_CONTINUES,
         env: Optional[dict[str, str]] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
@@ -683,6 +685,16 @@ class OpenCodeClient:
             return False
         last_step = steps[-1]
         return last_step.get("finish_reason") == "stop"
+
+    def has_readable_steps(self, output: str) -> bool:
+        """Return whether the output contains at least one structured step.
+
+        This distinguishes malformed / wrong-format output from a valid opencode
+        transcript that is merely incomplete. Outputs that would render as
+        "No events" in the UI return False here.
+        """
+        parsed = self.parse_readable_output(output)
+        return bool(parsed.get("steps"))
 
     def extract_last_text_block(self, output: str) -> str:
         """Extract only the text from the final step that ends with ``stop``.

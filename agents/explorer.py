@@ -75,8 +75,8 @@ class ExplorerAgent(BaseAgent):
             focus_point=focus_point,
             prior_note=prior_note,
         )
-        run = self.run(prompt, repo_path, max_continues=8)
-        text = self.get_text(run)
+        run = self.run(prompt, repo_path)
+        text = self.get_final_text(run)
         findings, summary = self._parse_output(text)
         return run, findings, summary
 
@@ -149,7 +149,7 @@ class ExplorerAgent(BaseAgent):
             agent_type=self.agent_type,
             task_id=task_id,
             session_id=session_id,
-            max_continues=8,
+            max_continues=self.default_max_continues,
             on_output=on_output,
             should_cancel=should_cancel,
             variant=self.variant,
@@ -157,7 +157,7 @@ class ExplorerAgent(BaseAgent):
         )
         if run.exit_code == -2:
             return run, [], ""
-        text = self.get_text(run)
+        text = self.get_final_text(run)
         findings, summary = self._parse_output(text)
         return run, findings, summary
 
@@ -204,8 +204,8 @@ class ExplorerAgent(BaseAgent):
         from agents.prompts import map_init_prompt
 
         prompt = map_init_prompt(repo_path=repo_path, max_depth=max_depth)
-        run = self.run(prompt, repo_path, max_continues=8)
-        text = self.get_text(run)
+        run = self.run(prompt, repo_path)
+        text = self.get_final_text(run)
         modules = self._parse_map_output(text)
         return run, modules
 
@@ -231,7 +231,7 @@ class ExplorerAgent(BaseAgent):
             agent_type="explorer_map_init",
             task_id=task_id,
             session_id=session_id,
-            max_continues=8,
+            max_continues=self.default_max_continues,
             on_output=on_output,
             should_cancel=should_cancel,
             variant=self.variant,
@@ -239,7 +239,7 @@ class ExplorerAgent(BaseAgent):
         )
         if run.exit_code == -2:
             raise RuntimeError("map init cancelled")
-        text = self.get_text(run)
+        text = self.get_final_text(run)
         modules = self._parse_map_output(text)
         return run, modules
 

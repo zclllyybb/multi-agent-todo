@@ -118,12 +118,12 @@ class ConfigPersistenceService:
                     else scalar_values.get(key)
                 )
                 if value:
-                    result[i] = (
-                        m.group(1)
-                        + ConfigPersistenceService._yaml_inline_value(value)
-                        + "\n"
+                    block_end = ConfigPersistenceService._find_block_end(result, i)
+                    new_block = ConfigPersistenceService._render_section_entry(
+                        key, value, len(line) - len(line.lstrip())
                     )
-                    i += 1
+                    result[i:block_end] = new_block
+                    i += len(new_block)
                     continue
 
             m = _re.match(
@@ -137,12 +137,12 @@ class ConfigPersistenceService:
                     else scalar_values.get(key)
                 )
                 if value:
-                    result[i] = (
-                        m.group(1)
-                        + ConfigPersistenceService._yaml_inline_value(value)
-                        + "\n"
+                    block_end = ConfigPersistenceService._find_block_end(result, i)
+                    new_block = ConfigPersistenceService._render_section_entry(
+                        key, value, len(line) - len(line.lstrip())
                     )
-                    i += 1
+                    result[i:block_end] = new_block
+                    i += len(new_block)
                     continue
 
             m = _re.match(
@@ -159,22 +159,10 @@ class ConfigPersistenceService:
                     i += 1
                     continue
                 indent = len(line) - len(line.lstrip())
-                block_end = i + 1
-                while block_end < len(result):
-                    nxt = result[block_end]
-                    if nxt.strip() == "" or nxt.strip().startswith("#"):
-                        block_end += 1
-                        continue
-                    nxt_indent = len(nxt) - len(nxt.lstrip())
-                    if nxt_indent <= indent:
-                        break
-                    block_end += 1
-                child_indent = " " * (indent + 4)
-                new_block = [result[i]]
-                for level, value in cmap.items():
-                    new_block.append(
-                        f"{child_indent}{level}: {ConfigPersistenceService._yaml_inline_value(value)}\n"
-                    )
+                block_end = ConfigPersistenceService._find_block_end(result, i)
+                new_block = ConfigPersistenceService._render_section_entry(
+                    key, cmap, indent
+                )
                 result[i:block_end] = new_block
                 i += len(new_block)
                 continue
@@ -191,24 +179,10 @@ class ConfigPersistenceService:
                     i += 1
                     continue
                 indent = len(line) - len(line.lstrip())
-                block_end = i + 1
-                while block_end < len(result):
-                    nxt = result[block_end]
-                    if nxt.strip() == "" or nxt.strip().startswith("#"):
-                        block_end += 1
-                        continue
-                    nxt_indent = len(nxt) - len(nxt.lstrip())
-                    if nxt_indent < indent:
-                        break
-                    if nxt_indent == indent and not nxt.lstrip().startswith("-"):
-                        break
-                    block_end += 1
-                child_indent = " " * (indent + 2)
-                new_block = [result[i]]
-                for value in entries:
-                    new_block.append(
-                        f"{child_indent}- {ConfigPersistenceService._yaml_inline_value(value)}\n"
-                    )
+                block_end = ConfigPersistenceService._find_block_end(result, i)
+                new_block = ConfigPersistenceService._render_section_entry(
+                    key, entries, indent
+                )
                 result[i:block_end] = new_block
                 i += len(new_block)
                 continue
@@ -222,12 +196,12 @@ class ConfigPersistenceService:
                     else scalar_values.get(key)
                 )
                 if value:
-                    result[i] = (
-                        m.group(1)
-                        + ConfigPersistenceService._yaml_inline_value(value)
-                        + "\n"
+                    block_end = ConfigPersistenceService._find_block_end(result, i)
+                    new_block = ConfigPersistenceService._render_section_entry(
+                        key, value, len(line) - len(line.lstrip())
                     )
-                    i += 1
+                    result[i:block_end] = new_block
+                    i += len(new_block)
                     continue
 
             m = _re.match(r"^(\s*(map|map_model)\s*:\s*)(.*)$", stripped)
@@ -239,12 +213,12 @@ class ConfigPersistenceService:
                     else scalar_values.get(key)
                 )
                 if value:
-                    result[i] = (
-                        m.group(1)
-                        + ConfigPersistenceService._yaml_inline_value(value)
-                        + "\n"
+                    block_end = ConfigPersistenceService._find_block_end(result, i)
+                    new_block = ConfigPersistenceService._render_section_entry(
+                        key, value, len(line) - len(line.lstrip())
                     )
-                    i += 1
+                    result[i:block_end] = new_block
+                    i += len(new_block)
                     continue
 
             i += 1
@@ -276,6 +250,90 @@ class ConfigPersistenceService:
         dumped = yaml.safe_dump(value, default_flow_style=True, sort_keys=False)
         cleaned = [line for line in dumped.splitlines() if line.strip() != "..."]
         return "\n".join(cleaned).strip()
+
+    @staticmethod
+    def _find_block_end(lines: list[str], start_index: int) -> int:
+        line = lines[start_index]
+        indent = len(line) - len(line.lstrip())
+        block_end = start_index + 1
+        header_stripped = line.strip()
+        is_sequence_header = header_stripped.endswith(":")
+        while block_end < len(lines):
+            nxt = lines[block_end]
+            if nxt.strip() == "" or nxt.strip().startswith("#"):
+                block_end += 1
+                continue
+            nxt_indent = len(nxt) - len(nxt.lstrip())
+            if nxt_indent < indent:
+                break
+            if nxt_indent == indent:
+                nxt_stripped = nxt.lstrip()
+                if not (is_sequence_header and nxt_stripped.startswith("-")):
+                    break
+            block_end += 1
+        return block_end
+
+    @staticmethod
+    def _render_yaml_value(value, indent: int) -> list[str]:
+        prefix = " " * indent
+        lines: list[str] = []
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                if isinstance(child_value, (dict, list)):
+                    lines.append(f"{prefix}{child_key}:\n")
+                    lines.extend(
+                        ConfigPersistenceService._render_yaml_value(
+                            child_value, indent + 2
+                        )
+                    )
+                else:
+                    lines.append(
+                        f"{prefix}{child_key}: {ConfigPersistenceService._yaml_inline_value(child_value)}\n"
+                    )
+            return lines
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    item_entries = list(item.items())
+                    if not item_entries:
+                        lines.append(f"{prefix}- {{}}\n")
+                        continue
+                    first_key, first_value = item_entries[0]
+                    if isinstance(first_value, (dict, list)):
+                        lines.append(f"{prefix}-\n")
+                        lines.extend(
+                            ConfigPersistenceService._render_yaml_value(item, indent + 2)
+                        )
+                        continue
+                    lines.append(
+                        f"{prefix}- {first_key}: {ConfigPersistenceService._yaml_inline_value(first_value)}\n"
+                    )
+                    nested_prefix = " " * (indent + 2)
+                    for child_key, child_value in item_entries[1:]:
+                        if isinstance(child_value, (dict, list)):
+                            lines.append(f"{nested_prefix}{child_key}:\n")
+                            lines.extend(
+                                ConfigPersistenceService._render_yaml_value(
+                                    child_value, indent + 4
+                                )
+                            )
+                        else:
+                            lines.append(
+                                f"{nested_prefix}{child_key}: {ConfigPersistenceService._yaml_inline_value(child_value)}\n"
+                            )
+                    continue
+                if isinstance(item, list):
+                    lines.append(f"{prefix}-\n")
+                    lines.extend(
+                        ConfigPersistenceService._render_yaml_value(item, indent + 2)
+                    )
+                    continue
+                lines.append(
+                    f"{prefix}- {ConfigPersistenceService._yaml_inline_value(item)}\n"
+                )
+            return lines
+        lines.append(f"{prefix}{ConfigPersistenceService._yaml_inline_value(value)}\n")
+        return lines
 
     @staticmethod
     def _ensure_section_entries(lines: list, section_name: str, entries: dict) -> list:
@@ -323,25 +381,8 @@ class ConfigPersistenceService:
     @staticmethod
     def _render_section_entry(key: str, value, indent: int) -> list[str]:
         prefix = " " * indent
-        child_prefix = " " * (indent + 2)
-        if isinstance(value, dict):
-            if set(value.keys()) <= {"model", "variant", "agent"}:
-                return [
-                    f"{prefix}{key}: {ConfigPersistenceService._yaml_inline_value(value)}\n"
-                ]
-            lines = [f"{prefix}{key}:\n"]
-            for child_key, child_value in value.items():
-                lines.append(
-                    f"{child_prefix}{child_key}: {ConfigPersistenceService._yaml_inline_value(child_value)}\n"
-                )
-            return lines
-        if isinstance(value, list):
-            lines = [f"{prefix}{key}:\n"]
-            for item in value:
-                lines.append(
-                    f"{child_prefix}- {ConfigPersistenceService._yaml_inline_value(item)}\n"
-                )
-            return lines
-        return [
-            f"{prefix}{key}: {ConfigPersistenceService._yaml_inline_value(value)}\n"
-        ]
+        if isinstance(value, (dict, list)):
+            return [f"{prefix}{key}:\n"] + ConfigPersistenceService._render_yaml_value(
+                value, indent + 2
+            )
+        return [f"{prefix}{key}: {ConfigPersistenceService._yaml_inline_value(value)}\n"]

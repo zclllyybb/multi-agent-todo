@@ -554,6 +554,41 @@ class TestExplorerAgentParsing:
             ExplorerAgent._parse_map_output("{bad")
 
 
+class TestExplorerAgentRunDefaults:
+    def test_explore_module_streaming_uses_shared_default_max_continues(self):
+        client = MagicMock()
+        client.run_streaming.return_value = _mock_agent_run(output=MOCK_EXPLORE_OUTPUT)
+        client.extract_last_text_block_or_raw.return_value = MOCK_EXPLORE_OUTPUT
+        agent = ExplorerAgent(model="m", client=client)
+        module = ExploreModule(id="m1", name="Exec", path="be/src/exec")
+
+        agent.explore_module_streaming(
+            module,
+            "performance",
+            "bottlenecks",
+            "Performance Hunter",
+            "/repo",
+        )
+
+        assert (
+            client.run_streaming.call_args.kwargs["max_continues"]
+            == agent.default_max_continues
+        )
+
+    def test_init_map_streaming_uses_shared_default_max_continues(self):
+        client = MagicMock()
+        client.run_streaming.return_value = _mock_agent_run(output=MOCK_MAP_OUTPUT)
+        client.extract_last_text_block_or_raw.return_value = MOCK_MAP_OUTPUT
+        agent = ExplorerAgent(model="m", client=client)
+
+        agent.init_map_streaming("/repo")
+
+        assert (
+            client.run_streaming.call_args.kwargs["max_continues"]
+            == agent.default_max_continues
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 4. PROMPT GENERATION TESTS
 # ═══════════════════════════════════════════════════════════════════════
@@ -1972,19 +2007,26 @@ class TestModelConfigUpdates:
 
         text = "".join(patched)
         assert "planner_model: new-planner" in text
-        assert "planner: {model: new-planner, variant: planner-v, agent: planner-a}" in text
+        assert "planner:\n    model: new-planner\n    variant: planner-v\n    agent: planner-a\n" in text
         assert "simple: new-simple" in text
-        assert "simple: {model: new-simple, variant: simple-v, agent: simple-a}" in text
+        assert "simple:\n      model: new-simple\n      variant: simple-v\n      agent: simple-a\n" in text
         assert "coder_model_default: new-coder" in text
-        assert "coder_default: {model: new-coder, variant: coder-v, agent: coder-a}" in text
-        assert "- {model: new-reviewer-a, variant: reviewer-a-v, agent: reviewer-a-agent}" in text
+        assert "coder_default:\n    model: new-coder\n    variant: coder-v\n    agent: coder-a\n" in text
         assert "- new-reviewer-a" in text
         assert "- new-reviewer-b" in text
-        assert '- {model: new-reviewer-b, variant: ""}' not in text
+        assert "variant: \"\"" not in text
         assert "explorer_model: new-explorer" in text
-        assert "explorer: {model: new-explorer, variant: explorer-v, agent: explorer-a}" in text
+        assert "explorer:\n    model: new-explorer\n    variant: explorer-v\n    agent: explorer-a\n" in text
         assert "map_model: new-map" in text
-        assert "map: {model: new-map, variant: map-v, agent: map-a}" in text
+        assert "map:\n    model: new-map\n    variant: map-v\n    agent: map-a\n" in text
+        parsed = yaml.safe_load(text)
+        assert parsed["opencode"]["planner"]["agent"] == "planner-a"
+        assert parsed["opencode"]["reviewers"][0] == {
+            "model": "new-reviewer-a",
+            "variant": "reviewer-a-v",
+            "agent": "reviewer-a-agent",
+        }
+        assert parsed["explore"]["explorer"]["agent"] == "explorer-a"
 
     def test_patch_yaml_lines_does_not_modify_regression_model_profiles(self):
         from core.orchestrator import Orchestrator
@@ -2089,6 +2131,121 @@ class TestModelConfigUpdates:
         assert parsed["regression"]["model_profiles"]["stable"]["map_model"] == (
             "keep-map"
         )
+
+    def test_save_model_config_rewrites_structured_blocks_as_valid_yaml(self, tmp_path):
+        from core.orchestrator import Orchestrator
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "".join(
+                [
+                    "opencode:\n",
+                    "  planner:\n",
+                    "    model: old-planner\n",
+                    "  planner_model: old-planner\n",
+                    "  coder_default:\n",
+                    "    model: old-coder\n",
+                    "  coder_model_default: old-coder\n",
+                    "  reviewers:\n",
+                    "    - old-reviewer\n",
+                    "  reviewer_models:\n",
+                    "    - old-reviewer\n",
+                    "explore:\n",
+                    "  explorer:\n",
+                    "    model: old-explorer\n",
+                    "  explorer_model: old-explorer\n",
+                    "  map:\n",
+                    "    model: old-map\n",
+                    "  map_model: old-map\n",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.config = {
+            "_meta": {"config_path": str(config_path)},
+            "opencode": {
+                "planner": {
+                    "model": "planner-new",
+                    "variant": "planner-v",
+                    "agent": "planner-a",
+                },
+                "planner_model": "planner-new",
+                "coder_default": {
+                    "model": "coder-new",
+                    "variant": "coder-v",
+                    "agent": "coder-a",
+                },
+                "coder_model_default": "coder-new",
+                "coder_by_complexity": {
+                    "simple": {
+                        "model": "simple-new",
+                        "variant": "simple-v",
+                        "agent": "simple-a",
+                    }
+                },
+                "coder_model_by_complexity": {"simple": "simple-new"},
+                "reviewers": [
+                    {
+                        "model": "reviewer-new",
+                        "variant": "reviewer-v",
+                        "agent": "reviewer-a",
+                    }
+                ],
+                "reviewer_models": ["reviewer-new"],
+            },
+            "explore": {
+                "explorer": {
+                    "model": "explorer-new",
+                    "variant": "explorer-v",
+                    "agent": "explorer-a",
+                },
+                "explorer_model": "explorer-new",
+                "map": {
+                    "model": "map-new",
+                    "variant": "map-v",
+                    "agent": "map-a",
+                },
+                "map_model": "map-new",
+            },
+        }
+
+        Orchestrator._save_model_config(orch)
+
+        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert parsed["opencode"]["planner"] == {
+            "model": "planner-new",
+            "variant": "planner-v",
+            "agent": "planner-a",
+        }
+        assert parsed["opencode"]["coder_default"] == {
+            "model": "coder-new",
+            "variant": "coder-v",
+            "agent": "coder-a",
+        }
+        assert parsed["opencode"]["coder_by_complexity"]["simple"] == {
+            "model": "simple-new",
+            "variant": "simple-v",
+            "agent": "simple-a",
+        }
+        assert parsed["opencode"]["reviewers"] == [
+            {
+                "model": "reviewer-new",
+                "variant": "reviewer-v",
+                "agent": "reviewer-a",
+            }
+        ]
+        assert parsed["explore"]["explorer"] == {
+            "model": "explorer-new",
+            "variant": "explorer-v",
+            "agent": "explorer-a",
+        }
+        assert parsed["explore"]["map"] == {
+            "model": "map-new",
+            "variant": "map-v",
+            "agent": "map-a",
+        }
 
     def test_api_config_get_and_post_include_explore_models(self, orch):
         from web import app as web_app
@@ -2568,6 +2725,7 @@ class TestModelConfigUpdates:
         assert text.startswith("key=QA-123")
         kwargs = orch.client.run.call_args.kwargs
         assert kwargs["model"] == "test-coder"
+        assert kwargs["max_continues"] == orch._default_coder.default_max_continues
         assert "planner failures and scheduling" in kwargs["message"]
         assert "all unmatched items" in kwargs["message"]
         assert "required_epic: QA-100" in kwargs["message"]

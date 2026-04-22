@@ -1,9 +1,12 @@
 """Tests for agents/coder.py: _resolve_file_path static method."""
 
 import os
+from unittest.mock import MagicMock
+
 import pytest
 
 from agents.coder import CoderAgent
+from core.models import AgentRun, Task
 
 
 class TestResolveFilePath:
@@ -49,3 +52,16 @@ class TestResolveFilePath:
         """Absolute path that doesn't exist anywhere in the worktree."""
         result = CoderAgent._resolve_file_path("/other/repo/foo.py", str(tmp_path))
         assert result is None
+
+
+class TestCoderRunDefaults:
+    def test_implement_task_uses_shared_default_max_continues(self):
+        client = MagicMock()
+        client.run.return_value = AgentRun(output="raw")
+        client.extract_last_text_block_or_raw.return_value = "done"
+        agent = CoderAgent(model="m", client=client)
+        task = Task(title="T", description="D")
+
+        agent.implement_task(task, "/repo")
+
+        assert client.run.call_args.kwargs["max_continues"] == agent.default_max_continues

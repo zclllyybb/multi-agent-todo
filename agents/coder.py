@@ -74,9 +74,8 @@ class CoderAgent(BaseAgent):
             worktree_path,
             task_id=task.id,
             session_id=session_id,
-            max_continues=8,
         )
-        output_text = self.get_text(run)
+        output_text = self.get_final_text(run)
         return run, output_text
 
     def continue_session(
@@ -92,9 +91,8 @@ class CoderAgent(BaseAgent):
             worktree_path,
             task_id=task.id,
             session_id=session_id,
-            max_continues=8,
         )
-        output_text = self.get_text(run)
+        output_text = self.get_final_text(run)
         return run, output_text
 
     def retry_with_feedback(
@@ -122,9 +120,8 @@ class CoderAgent(BaseAgent):
             worktree_path,
             task_id=task.id,
             session_id=session_id,
-            max_continues=8,
         )
-        output_text = self.get_text(run)
+        output_text = self.get_final_text(run)
         return run, output_text
 
     def _build_prompt(

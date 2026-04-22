@@ -17,6 +17,7 @@ from core.models import (
     TaskPriority,
     TaskSource,
     AgentRun,
+    ModelOutputError,
     TodoItem,
     TodoItemStatus,
 )
@@ -646,6 +647,7 @@ class TestOpenCodeClientConstruction:
             patch("core.orchestrator.ExploreService"),
             patch("core.orchestrator.PlannerAgent") as planner_cls,
             patch("core.orchestrator.CoderAgent") as coder_cls,
+            patch("core.orchestrator.SlugAgent") as slugger_cls,
             patch("core.orchestrator.ReviewerAgent") as reviewer_cls,
             patch("core.orchestrator.ThreadPoolExecutor"),
         ):
@@ -678,6 +680,34 @@ class TestOpenCodeClientConstruction:
             variant="reviewer-v",
             agent="",
             client=client_cls.return_value,
+        )
+        slugger_cls.assert_called_once_with(
+            model="coder",
+            variant="coder-v",
+            agent="",
+            client=client_cls.return_value,
+        )
+
+    def test_generate_branch_slug_uses_slug_agent_final_text(self, tmp_db):
+        orch = _orch_helper(tmp_db)
+        simple_agent = MagicMock(model="simple-model", variant="simple-v", agent="simple-a")
+        orch._coder_by_complexity = {"simple": simple_agent}
+        orch._default_coder = MagicMock(model="default-model", variant="default-v", agent="default-a")
+        orch._slug_agent = MagicMock()
+        orch._slug_agent.run.return_value = AgentRun(output="raw slug output")
+        orch._slug_agent.get_final_text.return_value = "Fix Login Flow!!!"
+        orch.config["repo"]["path"] = "/repo"
+
+        branch = orch._generate_branch_slug("User title ignored by mock", "1234567890abcdef")
+
+        assert branch == "agent/task-12345678-fix-login-flow"
+        assert orch._slug_agent.model == "simple-model"
+        assert orch._slug_agent.variant == "simple-v"
+        assert orch._slug_agent.agent == "simple-a"
+        orch._slug_agent.run.assert_called_once()
+        assert orch._slug_agent.run.call_args.args[1] == "/repo"
+        orch._slug_agent.get_final_text.assert_called_once_with(
+            orch._slug_agent.run.return_value
         )
 
 
@@ -1775,3 +1805,49 @@ class TestReviewerCoderResponseSelection:
             "=== Reviewer: rev-m | REQUEST_CHANGES ===\nPlease adjust edge cases"
         )
         orch.client.extract_last_text_block_or_raw.assert_called_with(reject_run.output)
+
+    def test_execute_task_fails_when_reviewer_output_has_no_readable_events(
+        self, tmp_db, make_task
+    ):
+        task = make_task(
+            status=TaskStatus.PENDING,
+            source=TaskSource.MANUAL,
+            max_retries=1,
+        )
+        tmp_db.save_task(task)
+        orch = self._make_execute_orchestrator(tmp_db)
+
+        orch.planner.analyze_and_split.return_value = (
+            self._make_plan_run(task.id),
+            False,
+            "plan text",
+            [],
+            "simple",
+        )
+
+        code_run = AgentRun(
+            task_id=task.id,
+            agent_type="coder",
+            model="m",
+            prompt="p",
+            output="coder transcript",
+            exit_code=0,
+            session_id="ses_code",
+        )
+        orch._default_coder.implement_task.return_value = (code_run, "coder transcript")
+        orch.client.is_output_complete.return_value = True
+        orch.client.extract_last_text_block.return_value = "final coder summary"
+
+        reviewer = MagicMock()
+        reviewer.model = "wrong-model"
+        reviewer.review_changes.side_effect = ModelOutputError(
+            "Reviewer(wrong-model) changes output is not a readable opencode transcript"
+        )
+        orch.reviewers = [reviewer]
+
+        orch._execute_task(task.id)
+
+        saved = tmp_db.get_task(task.id)
+        assert saved.status == TaskStatus.FAILED
+        assert "not a readable opencode transcript" in saved.error
+        orch._default_coder.retry_with_feedback.assert_not_called()

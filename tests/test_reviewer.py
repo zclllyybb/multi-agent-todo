@@ -6,7 +6,7 @@ import pytest
 
 from agents.prompts import coder_retry_feedback, reviewer_review, reviewer_review_patch
 from agents.reviewer import ReviewerAgent, _MAX_REVIEWER_RETRIES
-from core.models import AgentRun, Task
+from core.models import AgentRun, ModelOutputError, Task
 
 
 @pytest.fixture
@@ -117,7 +117,8 @@ def _make_reviewer(review_text: str) -> ReviewerAgent:
     mock_client = MagicMock()
     mock_run = AgentRun(agent_type="reviewer", model="test-model", output=review_text)
     mock_client.run.return_value = mock_run
-    mock_client.extract_text_response.return_value = review_text
+    mock_client.extract_last_text_block_or_raw.return_value = review_text
+    mock_client.is_output_complete.return_value = True
     return ReviewerAgent(model="test-model", client=mock_client)
 
 
@@ -243,7 +244,11 @@ class TestReviewChangesAutoRetry:
         )
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nOK")
         mock_client.run.side_effect = [inconclusive_run, approve_run]
-        mock_client.extract_text_response.side_effect = ["Planning...", "APPROVE\nOK"]
+        mock_client.extract_last_text_block_or_raw.side_effect = [
+            "Planning...",
+            "APPROVE\nOK",
+        ]
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.side_effect = [True, True]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -260,7 +265,8 @@ class TestReviewChangesAutoRetry:
             agent_type="reviewer", model="m", output="Thinking..."
         )
         mock_client.run.return_value = inconclusive_run
-        mock_client.extract_text_response.return_value = "Thinking..."
+        mock_client.extract_last_text_block_or_raw.return_value = "Thinking..."
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.return_value = True
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -277,7 +283,8 @@ class TestReviewChangesAutoRetry:
             agent_type="reviewer", model="m", output="REQUEST_CHANGES\nBug"
         )
         mock_client.run.return_value = run_obj
-        mock_client.extract_text_response.return_value = "REQUEST_CHANGES\nBug"
+        mock_client.extract_last_text_block_or_raw.return_value = "REQUEST_CHANGES\nBug"
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.return_value = True
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -293,10 +300,11 @@ class TestReviewChangesAutoRetry:
         )
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nOK")
         mock_client.run.side_effect = [incomplete_run, approve_run]
-        mock_client.extract_text_response.side_effect = [
+        mock_client.extract_last_text_block_or_raw.side_effect = [
             "I found a bug and missing coverage",
             "APPROVE\nOK",
         ]
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.side_effect = [False, True]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -312,7 +320,8 @@ class TestReviewChangesAutoRetry:
             agent_type="reviewer", model="m", output="There is a bug here"
         )
         mock_client.run.return_value = incomplete_run
-        mock_client.extract_text_response.return_value = "There is a bug here"
+        mock_client.extract_last_text_block_or_raw.return_value = "There is a bug here"
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.return_value = False
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -320,6 +329,20 @@ class TestReviewChangesAutoRetry:
 
         assert passed is False
         assert mock_client.run.call_count == 1 + _MAX_REVIEWER_RETRIES
+
+    def test_malformed_output_raises_model_output_error(self):
+        mock_client = MagicMock()
+        bad_run = AgentRun(agent_type="reviewer", model="m", output="wrong model text")
+        mock_client.run.return_value = bad_run
+        mock_client.has_readable_steps.return_value = False
+
+        reviewer = ReviewerAgent(model="m", client=mock_client)
+
+        with pytest.raises(ModelOutputError, match="not a readable opencode transcript"):
+            reviewer.review_changes(self._make_task(), "/repo")
+
+        assert mock_client.extract_last_text_block_or_raw.call_count == 0
+        assert mock_client.is_output_complete.call_count == 0
 
 
 class TestReviewPatchAutoRetry:
@@ -340,10 +363,11 @@ class TestReviewPatchAutoRetry:
         )
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nLGTM")
         mock_client.run.side_effect = [inconclusive_run, approve_run]
-        mock_client.extract_text_response.side_effect = [
+        mock_client.extract_last_text_block_or_raw.side_effect = [
             "Let me check...",
             "APPROVE\nLGTM",
         ]
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.side_effect = [True, True]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -355,7 +379,8 @@ class TestReviewPatchAutoRetry:
         mock_client = MagicMock()
         run_obj = AgentRun(agent_type="reviewer", model="m", output="Hmm...")
         mock_client.run.return_value = run_obj
-        mock_client.extract_text_response.return_value = "Hmm..."
+        mock_client.extract_last_text_block_or_raw.return_value = "Hmm..."
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.return_value = True
 
         reviewer = ReviewerAgent(model="m", client=mock_client)
@@ -370,10 +395,11 @@ class TestReviewPatchAutoRetry:
         )
         approve_run = AgentRun(agent_type="reviewer", model="m", output="APPROVE\nLGTM")
         mock_client.run.side_effect = [incomplete_run, approve_run]
-        mock_client.extract_text_response.side_effect = [
+        mock_client.extract_last_text_block_or_raw.side_effect = [
             "REQUEST_CHANGES\nmissing test",
             "APPROVE\nLGTM",
         ]
+        mock_client.has_readable_steps.return_value = True
         mock_client.is_output_complete.side_effect = [False, True]
 
         reviewer = ReviewerAgent(model="m", client=mock_client)

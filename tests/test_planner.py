@@ -25,7 +25,7 @@ def _make_planner(mock_output_text: str) -> PlannerAgent:
         exit_code=0, duration_sec=1.0,
     )
     client.run.return_value = fake_run
-    client.extract_text_response.return_value = mock_output_text
+    client.extract_last_text_block_or_raw.return_value = mock_output_text
     return agent
 
 

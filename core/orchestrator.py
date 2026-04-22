@@ -16,6 +16,7 @@ from agents.explorer import ExplorerAgent
 from agents.planner import PlannerAgent
 from agents.prompts import coder_assign_jira_issue
 from agents.reviewer import ReviewerAgent
+from agents.slugger import SlugAgent
 from core.config_persistence import ConfigPersistenceService
 from core.database import Database
 from core.explore_service import ExploreService
@@ -147,6 +148,12 @@ class Orchestrator:
                 client=self.client,
             )
         self._default_coder = CoderAgent(
+            model=default_coder_spec.model,
+            variant=default_coder_spec.variant,
+            agent=default_coder_spec.agent,
+            client=self.client,
+        )
+        self._slug_agent = SlugAgent(
             model=default_coder_spec.model,
             variant=default_coder_spec.variant,
             agent=default_coder_spec.agent,
@@ -360,15 +367,11 @@ class Orchestrator:
                 f"Reply with ONLY the slug, nothing else."
             )
             repo_path = self.config["repo"]["path"]
-            agent_run = self.client.run(
-                message=prompt,
-                work_dir=repo_path,
-                model=simple_agent.model,
-                variant=simple_agent.variant,
-                agent_type="slug",
-                max_continues=0,
-            )
-            text = self.client.extract_text_response(agent_run.output).strip().lower()
+            self._slug_agent.model = simple_agent.model
+            self._slug_agent.variant = simple_agent.variant
+            self._slug_agent.agent = simple_agent.agent
+            agent_run = self._slug_agent.run(prompt, repo_path)
+            text = self._slug_agent.get_final_text(agent_run).strip().lower()
             slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
             slug = re.sub(r"-+", "-", slug)
             slug = slug[:50]  # hard cap
