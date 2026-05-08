@@ -1,4 +1,4 @@
-"""Shared test fixtures for multi-agent-todo tests."""
+"""Shared test fixtures for OpenGiraffe tests."""
 
 import pytest
 

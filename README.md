@@ -1,4 +1,8 @@
-# Multi-Agent TODO Resolver
+# Open Giraffe
+
+> *Pick the high-hanging fruit.*
+
+![Logo](docs/open-giraffe.png)
 
 A persistent, daemon-based multi-agent system that leverages [opencode](https://opencode.ai) to **automatically explore, discover, plan, implement, and review code changes** across a codebase. Multiple tasks run in parallel, each in its own `git worktree`, driven by a **Project Explorer** and a **Planner → Coder → Reviewer** pipeline with configurable models and retry logic.
 
@@ -127,8 +131,8 @@ Completed tasks can be **published** (push branch to remote), **revised** (human
 
 ```bash
 # Clone this project
-git clone <repo-url> multi-agent-todo
-cd multi-agent-todo
+git clone <repo-url> OpenGiraffe
+cd OpenGiraffe
 
 # Install dependencies
 pip install -r requirements.txt

@@ -337,7 +337,7 @@ Required description footer (must appear at the end, verbatim):
 
 Your job:
 1. Read the vendored skill instructions in `skills/jira-issue/SKILL.md`.
-2. Choose the most appropriate issue type and priority from the allowed candidate lists.
+2. Choose the most appropriate issue type and priority from the allowed candidate lists. Be cautious not to set it too high; the priority above the average level is only allowed in scenarios where there are obvious defects in correctness and cluster stability.
 3. Choose assignee, extra labels, and optional component strictly from the routing hints. If no specific hint matches, use the catch-all unmatched hint if present.
 4. Write a concise but specific Jira summary. It MUST begin with `[Doris Agent {source_task_id}]`.
 5. Write a complete Jira description suitable for direct filing. It MUST end with the required footer verbatim.

@@ -23,7 +23,10 @@ class RegressionConfigFactory:
         self.repository_root = Path(repository_root)
         self.base_config_path = Path(base_config_path)
         self._raw_base_config = self._load_raw_base_config()
-        self._base_config = load_config(str(self.base_config_path))
+        self._base_config = load_config(
+            str(self.base_config_path),
+            validate_required=False,
+        )
 
     def _load_raw_base_config(self) -> dict:
         if not self.base_config_path.exists():

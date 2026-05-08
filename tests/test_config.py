@@ -10,6 +10,19 @@ from regression.helpers.configuration import RegressionConfigFactory
 from regression.helpers.models import RegressionPaths, RegressionWorkspace
 
 
+def _required_config(tmp_path):
+    repo = tmp_path / "repo"
+    return {
+        "repo": {
+            "path": str(repo),
+            "worktree_dir": str(tmp_path / "worktrees"),
+        },
+        "hook_env": {"ROOT_WORKSPACE_PATH": str(repo)},
+        "logging": {"file": str(tmp_path / "logs" / "agent.log")},
+        "database": {"path": str(tmp_path / "data" / "tasks.db")},
+    }
+
+
 class TestDeepMerge:
     def test_flat_override(self):
         base = {"a": 1, "b": 2}
@@ -56,17 +69,22 @@ class TestLoadConfig:
     def test_default_config_includes_opencode_config_path(self):
         assert DEFAULT_CONFIG["opencode"]["config_path"] == "opencode.json"
 
+    def test_default_config_does_not_include_machine_local_paths(self):
+        dumped = yaml.safe_dump(DEFAULT_CONFIG)
+        assert "/mnt/disk3/zhaochangle" not in dumped
+
     def test_loads_yaml_file(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(
-            yaml.dump(
-                {
-                    "web": {"port": 9999},
-                    "orchestrator": {"max_parallel_tasks": 10},
-                    "explore": {"variant": "deep-explorer"},
-                }
-            )
+        raw = _required_config(tmp_path)
+        _deep_merge(
+            raw,
+            {
+                "web": {"port": 9999},
+                "orchestrator": {"max_parallel_tasks": 10},
+                "explore": {"variant": "deep-explorer"},
+            },
         )
+        cfg_file.write_text(yaml.dump(raw))
         config = load_config(str(cfg_file))
         assert config["web"]["port"] == 9999
         assert config["orchestrator"]["max_parallel_tasks"] == 10
@@ -78,36 +96,46 @@ class TestLoadConfig:
 
     def test_missing_file_uses_defaults(self, tmp_path):
         missing = tmp_path / "nonexistent.yaml"
-        config = load_config(str(missing))
+        config = load_config(str(missing), validate_required=False)
         assert config["orchestrator"]["max_parallel_tasks"] == 3
         assert config["web"]["port"] == 8778
         assert config["explore"]["explorer"]["variant"] == ""
         assert config["opencode"]["config_path"] == "opencode.json"
         assert config["_meta"]["config_path"] == str(missing)
 
-    def test_partial_override_keeps_defaults(self, tmp_path):
+    def test_missing_required_paths_raise_by_default(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.dump({"web": {"port": 1234}}))
+
+        with pytest.raises(ValueError, match="repo.path"):
+            load_config(str(cfg_file))
+
+    def test_partial_override_keeps_defaults(self, tmp_path):
+        cfg_file = tmp_path / "config.yaml"
+        raw = _required_config(tmp_path)
+        _deep_merge(raw, {"web": {"port": 1234}})
+        cfg_file.write_text(yaml.dump(raw))
         config = load_config(str(cfg_file))
         assert config["web"]["port"] == 1234
         assert config["web"]["host"] == "0.0.0.0"  # default preserved
 
     def test_load_config_discards_explore_categories_override(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(
-            yaml.dump(
-                {
-                    "explore": {
-                        "categories": [
-                            "performance",
-                            "concurrency",
-                            "error_handling",
-                            "maintainability",
-                        ]
-                    }
+        raw = _required_config(tmp_path)
+        _deep_merge(
+            raw,
+            {
+                "explore": {
+                    "categories": [
+                        "performance",
+                        "concurrency",
+                        "error_handling",
+                        "maintainability",
+                    ]
                 }
-            )
+            },
         )
+        cfg_file.write_text(yaml.dump(raw))
 
         config = load_config(str(cfg_file))
 
@@ -115,24 +143,25 @@ class TestLoadConfig:
 
     def test_jira_defaults_and_partial_override(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(
-            yaml.dump(
-                {
-                    "jira": {
-                        "project_key": "QA",
-                        "epic": "QA-100",
-                        "routing_hints": [
-                            {
-                                "about": "planner issues",
-                                "assignee": "alice",
-                                "component": "query execution",
-                                "labels": ["planner"],
-                            }
-                        ],
-                    }
+        raw = _required_config(tmp_path)
+        _deep_merge(
+            raw,
+            {
+                "jira": {
+                    "project_key": "QA",
+                    "epic": "QA-100",
+                    "routing_hints": [
+                        {
+                            "about": "planner issues",
+                            "assignee": "alice",
+                            "component": "query execution",
+                            "labels": ["planner"],
+                        }
+                    ],
                 }
-            )
+            },
         )
+        cfg_file.write_text(yaml.dump(raw))
         config = load_config(str(cfg_file))
         assert config["jira"]["project_key"] == "QA"
         assert config["jira"]["epic"] == "QA-100"
@@ -144,34 +173,35 @@ class TestLoadConfig:
 
     def test_opencode_config_path_can_be_overridden(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(
-            yaml.dump({"opencode": {"config_path": "/tmp/custom-opencode.json"}})
-        )
+        raw = _required_config(tmp_path)
+        _deep_merge(raw, {"opencode": {"config_path": "/tmp/custom-opencode.json"}})
+        cfg_file.write_text(yaml.dump(raw))
         config = load_config(str(cfg_file))
         assert config["opencode"]["config_path"] == "/tmp/custom-opencode.json"
 
     def test_load_config_normalizes_structured_legacy_coder_model_by_complexity(self, tmp_path):
         cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(
-            yaml.dump(
-                {
-                    "opencode": {
-                        "coder_model_by_complexity": {
-                            "simple": {
-                                "model": "coder-s",
-                                "variant": "simple-v",
-                                "agent": "coder-simple",
-                            },
-                            "complex": {
-                                "model": "coder-c",
-                                "variant": "",
-                                "agent": "",
-                            },
-                        }
+        raw = _required_config(tmp_path)
+        _deep_merge(
+            raw,
+            {
+                "opencode": {
+                    "coder_model_by_complexity": {
+                        "simple": {
+                            "model": "coder-s",
+                            "variant": "simple-v",
+                            "agent": "coder-simple",
+                        },
+                        "complex": {
+                            "model": "coder-c",
+                            "variant": "",
+                            "agent": "",
+                        },
                     }
                 }
-            )
+            },
         )
+        cfg_file.write_text(yaml.dump(raw))
 
         config = load_config(str(cfg_file))
 

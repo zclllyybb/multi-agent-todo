@@ -1,6 +1,6 @@
 # Tiny Python App Instructions
 
-This repository is a deterministic regression fixture for `multi-agent-todo`.
+This repository is a deterministic regression fixture for `OpenGiraffe`.
 
 Rules:
 

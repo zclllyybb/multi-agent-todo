@@ -1,6 +1,6 @@
 # Regression Framework
 
-This directory contains the real black-box regression framework for `multi-agent-todo`.
+This directory contains the real black-box regression framework for `OpenGiraffe`.
 
 Properties:
 

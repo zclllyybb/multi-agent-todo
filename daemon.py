@@ -15,7 +15,7 @@ from core.config import load_config
 from core.orchestrator import Orchestrator
 from web.app import app, set_orchestrator
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _pid_file_path(config: dict) -> str:
@@ -101,14 +101,28 @@ def _pid_matches_project(pid: int) -> bool:
         cwd = os.readlink(f"/proc/{pid}/cwd")
     except OSError:
         cwd = ""
-    if cwd.startswith(PROJECT_ROOT):
+    if _path_is_within_project(cwd):
         return True
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
-            cmdline = f.read().replace(b"\x00", b" ").decode(errors="ignore")
+            argv = [
+                part.decode(errors="ignore")
+                for part in f.read().split(b"\x00")
+                if part
+            ]
     except OSError:
-        cmdline = ""
-    return "multi-agent-todo" in cmdline
+        argv = []
+    return any(_path_is_within_project(arg) for arg in argv if os.path.isabs(arg))
+
+
+def _path_is_within_project(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        real_path = os.path.realpath(path)
+        return os.path.commonpath([PROJECT_ROOT, real_path]) == PROJECT_ROOT
+    except (OSError, ValueError):
+        return False
 
 
 def _wait_until_stopped(pid: int, timeout_sec: float = 5.0) -> bool:

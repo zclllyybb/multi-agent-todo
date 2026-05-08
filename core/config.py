@@ -22,9 +22,9 @@ from core.model_config import (
 
 DEFAULT_CONFIG = {
     "repo": {
-        "path": "/mnt/disk3/zhaochangle/doris",
+        "path": "",
         "base_branch": "master",
-        "worktree_dir": "/mnt/disk3/zhaochangle/multi-agent-todo/worktrees",
+        "worktree_dir": "",
     },
     "opencode": {
         "config_path": "opencode.json",
@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
         "auto_scan_todos": False,
     },
     "hook_env": {
-        "ROOT_WORKSPACE_PATH": "/mnt/disk3/zhaochangle/doris",
+        "ROOT_WORKSPACE_PATH": "",
     },
     "web": {
         "host": "0.0.0.0",
@@ -52,10 +52,10 @@ DEFAULT_CONFIG = {
     },
     "logging": {
         "level": "DEBUG",
-        "file": "/mnt/disk3/zhaochangle/multi-agent-todo/logs/agent.log",
+        "file": "",
     },
     "database": {
-        "path": "/mnt/disk3/zhaochangle/multi-agent-todo/data/tasks.db",
+        "path": "",
     },
     "explore": {
         "explorer": {"model": "", "variant": "", "agent": ""},
@@ -111,7 +111,19 @@ DEFAULT_CONFIG = {
     },
 }
 
-def load_config(config_path: Optional[str] = None) -> dict:
+REQUIRED_CONFIG_PATHS = (
+    ("repo", "path"),
+    ("repo", "worktree_dir"),
+    ("logging", "file"),
+    ("database", "path"),
+)
+
+
+def load_config(
+    config_path: Optional[str] = None,
+    *,
+    validate_required: bool = True,
+) -> dict:
     """Load configuration from YAML file, falling back to defaults."""
     config = copy.deepcopy(DEFAULT_CONFIG)
     if config_path is None:
@@ -124,6 +136,8 @@ def load_config(config_path: Optional[str] = None) -> dict:
             user_config = yaml.safe_load(f) or {}
         _deep_merge(config, user_config)
     _normalize_model_config(config)
+    if validate_required:
+        _validate_required_config(config, config_path)
     config["_meta"] = {"config_path": config_path}
     return config
 
@@ -135,6 +149,22 @@ def _deep_merge(base: dict, override: dict):
             _deep_merge(base[key], value)
         else:
             base[key] = value
+
+
+def _validate_required_config(config: dict, config_path: str):
+    missing = []
+    for path in REQUIRED_CONFIG_PATHS:
+        value = config
+        for key in path:
+            value = value.get(key, {}) if isinstance(value, dict) else {}
+        if not str(value).strip():
+            missing.append(".".join(path))
+    if missing:
+        raise ValueError(
+            "Missing required config values in "
+            f"{config_path}: {', '.join(missing)}. "
+            "Set these explicitly in config.yaml before starting OpenGiraffe."
+        )
 
 
 def _normalize_model_config(config: dict):

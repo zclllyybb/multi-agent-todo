@@ -23,7 +23,7 @@ from core.model_config import (
     parse_model_spec_map,
 )
 
-app = FastAPI(title="Multi-Agent TODO Resolver")
+app = FastAPI(title="OpenGiraffe")
 log = logging.getLogger(__name__)
 
 # Will be set by the daemon
@@ -821,7 +821,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Multi-Agent TODO Resolver</title>
+<title>OpenGiraffe</title>
 <style>
   :root {
     --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -1164,7 +1164,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body data-theme="dark">
 <div class="container">
   <header>
-    <h1>Multi-Agent TODO Resolver</h1>
+    <h1>OpenGiraffe</h1>
     <div>
       <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()"><span class="theme-dot"></span><span id="theme-toggle-label">Night</span></button>
       <span id="refresh-indicator">Auto-refresh: 5s</span>

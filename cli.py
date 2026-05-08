@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for the multi-agent TODO resolver."""
+"""CLI entry point for the OpenGiraffe."""
 
 import argparse
 import json
@@ -301,7 +301,7 @@ def cmd_cancel(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Multi-Agent TODO Resolver",
+        description="OpenGiraffe",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

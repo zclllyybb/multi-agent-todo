@@ -1,4 +1,4 @@
-# Multi-Agent TODO Resolver Configuration
+# OpenGiraffe Configuration
 # Copy this file to config.yaml and edit the values below.
 
 # Target repository to work on
@@ -7,7 +7,7 @@ repo:
   # Base branch for creating worktrees
   base_branch: master
   # Directory to store worktrees (absolute path recommended)
-  worktree_dir: /path/to/multi-agent-todo/worktrees
+  worktree_dir: /path/to/OpenGiraffe/worktrees
   # Scripts to run inside the worktree after it is created (relative to repo root or absolute).
   # They are executed in order; a non-zero exit code aborts the task with an error.
   # Example: a script that builds compile_commands.json or installs project dependencies.
@@ -148,8 +148,8 @@ regression:
 # Logging
 logging:
   level: INFO
-  file: /path/to/multi-agent-todo/logs/agent.log
+  file: /path/to/OpenGiraffe/logs/agent.log
 
 # Persistence
 database:
-  path: /path/to/multi-agent-todo/data/tasks.db
+  path: /path/to/OpenGiraffe/data/tasks.db
